@@ -1,0 +1,21 @@
+# Price cache (rebuilt from yfinance on deploy)
+prices.db
+
+# Raw import files (sensitive, normalized data is in transactions.json)
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Backup files
+*_backup.*

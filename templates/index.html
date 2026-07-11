@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=device-width, initial-scale=1.0">
+  <title>Worthly — Net Worth & Portfolio Dashboard</title>
+  <meta name="description" content="A multi-currency net worth and portfolio tracking dashboard with real-time ASX and US market data.">
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <div class="app-layout" id="app-layout">
+    
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="app-sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2L2 7L12 12L22 7L12 2Z" fill="url(#brand-grad)" />
+            <path d="M2 17L12 22L22 17" stroke="url(#brand-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2 12L12 17L22 12" stroke="url(#brand-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs>
+              <linearGradient id="brand-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#6366f1" />
+                <stop offset="1" stop-color="#a855f7" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <span class="brand-name">Worthly</span>
+      </div>
+      
+      <nav class="sidebar-nav">
+        <button class="nav-item active" id="nav-dashboard" onclick="switchTab('dashboard')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
+          Dashboard
+        </button>
+        <button class="nav-item" id="nav-holdings" onclick="switchTab('holdings')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+          Holdings
+        </button>
+        <button class="nav-item" id="nav-transactions" onclick="switchTab('transactions')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+          Transactions
+        </button>
+        <button class="nav-item" id="nav-networth" onclick="switchTab('networth')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+          Net Worth
+        </button>
+      </nav>
+      
+      <div class="sidebar-footer">
+        <div class="sync-panel">
+          <div class="sync-info">
+            <span class="sync-label">Database Sync</span>
+            <span class="sync-time" id="sync-time-str">Not synced</span>
+          </div>
+          <button class="sync-button" id="sidebar-sync-btn" onclick="syncData()">
+            <svg id="sync-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            Sync Market Prices
+          </button>
+          <div class="sync-status-msg" id="sync-status-msg">Cooldown inactive</div>
+        </div>
+      </div>
+    </aside>
+    
+    <!-- Main Content Area -->
+    <main class="main-layout">
+      
+      <!-- Top Header -->
+      <header class="app-header">
+        <div>
+          <h1 class="header-title" id="page-main-heading">Portfolio Overview</h1>
+          <p class="header-subtitle" id="header-date">Retrieving updates...</p>
+        </div>
+        <div class="header-actions">
+          <button class="action-btn-primary" id="add-txn-trigger" onclick="openAddModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            New Transaction
+          </button>
+        </div>
+      </header>
+      
+      <!-- Content Container -->
+      <div class="content-container">
+        
+        <!-- Tab 1: Dashboard -->
+        <section id="section-dashboard" class="tab-section active">
+
+          <!-- Key Indicators Grid: Total Net Worth, Portfolio, Super, Cash -->
+          <div class="metrics-grid">
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Total Net Worth</span>
+                <div class="metric-icon val-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="stat-total-nw">$0.00</div>
+              <div class="metric-desc">Portfolio + Cash + Super</div>
+            </div>
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Portfolio</span>
+                <div class="metric-icon val-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="stat-nw-portfolio">$0.00</div>
+              <div class="metric-change" id="stat-portfolio-change">$0.00 total return</div>
+            </div>
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Super / Retirement</span>
+                <div class="metric-icon principal-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="stat-nw-super">$0.00</div>
+              <div class="metric-desc" id="stat-nw-super-pct">0% of net worth</div>
+            </div>
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Cash</span>
+                <div class="metric-icon fx-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="stat-nw-cash">$0.00</div>
+              <div class="metric-desc" id="stat-nw-cash-pct">0% of net worth</div>
+            </div>
+          </div>
+
+          <!-- Charts Row: Net Worth Timeline + Asset Allocation -->
+          <div class="charts-row">
+            <div class="chart-container-large card">
+              <div class="chart-header">
+                <h2 class="chart-title">Net Worth Timeline</h2>
+              </div>
+              <div class="chart-wrapper">
+                <canvas id="networthTimelineChart"></canvas>
+              </div>
+            </div>
+            <div class="chart-container-small card">
+              <div class="chart-header">
+                <h2 class="chart-title">Asset Allocation</h2>
+              </div>
+              <div class="chart-wrapper doughnut-wrapper">
+                <canvas id="allocationChart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Individual Holding Performance Bar Chart -->
+          <div class="full-row-chart card">
+            <div class="chart-header">
+              <h2 class="chart-title">Individual Holding Performance (%)</h2>
+            </div>
+            <div class="chart-wrapper bar-wrapper">
+              <canvas id="performanceChart"></canvas>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- Tab 2: Holdings -->
+        <section id="section-holdings" class="tab-section">
+
+          <!-- Cash + Super Cards -->
+          <div class="metrics-grid" style="grid-template-columns: 1fr 1fr;">
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Cash Balance</span>
+                <div class="metric-icon fx-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="holdings-cash-value">$0.00</div>
+              <div class="metric-desc" id="holdings-cash-date">Last updated: --</div>
+              <button class="sync-button" style="margin-top:12px;" onclick="openSnapshotModal('cash')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Update Cash
+              </button>
+            </div>
+            <div class="metric-card card">
+              <div class="metric-header">
+                <span class="metric-title">Super Balance</span>
+                <div class="metric-icon principal-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                </div>
+              </div>
+              <div class="metric-value" id="holdings-super-value">$0.00</div>
+              <div class="metric-desc" id="holdings-super-date">Last updated: --</div>
+              <button class="sync-button" style="margin-top:12px;" onclick="openSnapshotModal('super')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Update Super
+              </button>
+            </div>
+          </div>
+
+          <!-- Stocks Table -->
+          <div class="table-container card">
+            <div class="table-header-custom">
+              <h2 class="table-title">Stocks & ETFs</h2>
+              <span class="table-badge" id="holdings-count-badge">0 Assets</span>
+            </div>
+            <div class="table-responsive">
+              <table id="holdings-table">
+                <thead>
+                  <tr>
+                    <th>Asset</th>
+                    <th>Market</th>
+                    <th>Shares</th>
+                    <th>Avg Cost (Local)</th>
+                    <th>Avg Cost (AUD)</th>
+                    <th>Current Price</th>
+                    <th>Market Value (AUD)</th>
+                    <th>Return (AUD)</th>
+                    <th>Weight</th>
+                  </tr>
+                </thead>
+                <tbody id="holdings-table-body">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- Tab 3: Transactions -->
+        <section id="section-transactions" class="tab-section">
+          <div class="table-container card">
+            <div class="table-header-custom flex-header">
+              <h2 class="table-title">Transaction Ledger</h2>
+              <div class="ledger-filters">
+                <input type="text" id="ledger-search" placeholder="Search by ticker..." oninput="filterLedger()">
+                <select id="ledger-type-filter" onchange="filterLedger()">
+                  <option value="all">All Actions</option>
+                  <option value="buy">Buy Only</option>
+                  <option value="sell">Sell Only</option>
+                </select>
+                <select id="ledger-market-filter" onchange="filterLedger()">
+                  <option value="all">All Markets</option>
+                  <option value="asx">ASX</option>
+                  <option value="us">US</option>
+                </select>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table id="ledger-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Symbol</th>
+                    <th>Market</th>
+                    <th>Action</th>
+                    <th>Shares</th>
+                    <th>Price</th>
+                    <th>Brokerage</th>
+                    <th>Total Cost (AUD)</th>
+                    <th>Exchange Rate</th>
+                    <th>Delete</th>
+                  </tr>
+                </thead>
+                <tbody id="ledger-table-body">
+                  <!-- Injected via JavaScript -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab 4: Net Worth -->
+        <section id="section-networth" class="tab-section">
+
+          <!-- Charts Row: Asset Breakdown + Country Allocation -->
+          <div class="charts-row">
+            <div class="chart-container-large card">
+              <div class="chart-header">
+                <h2 class="chart-title">Net Worth Change (Month-over-Month)</h2>
+              </div>
+              <div class="chart-wrapper" style="height: 300px;">
+                <canvas id="monthlyChangeChartCanvas"></canvas>
+              </div>
+            </div>
+            <div class="chart-container-small card">
+              <div class="chart-header">
+                <h2 class="chart-title">Country Allocation</h2>
+              </div>
+              <div class="chart-wrapper doughnut-wrapper">
+                <canvas id="allocationCountryChart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Snapshot History Table -->
+          <div class="table-container card">
+            <div class="table-header-custom">
+              <h2 class="table-title">Cash & Super History</h2>
+              <span class="table-badge" id="snapshots-count-badge">0 Months</span>
+            </div>
+            <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+              <table id="snapshots-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Super</th>
+                    <th>Cash</th>
+                    <th>Combined</th>
+                  </tr>
+                </thead>
+                <tbody id="snapshots-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Add Transaction Modal -->
+  <div class="modal-overlay" id="add-txn-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title">Add Transaction</h3>
+        <button class="modal-close" onclick="closeAddModal()">✕</button>
+      </div>
+      <form id="txn-form" onsubmit="submitTransaction(event)">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="f-date">Trade Date</label>
+            <input type="date" id="f-date" required>
+          </div>
+          <div class="form-group">
+            <label for="f-exchange">Exchange / Market</label>
+            <select id="f-exchange" onchange="onExchangeChange()">
+              <option value="ASX">ASX (Australia)</option>
+              <option value="NASDAQ">NASDAQ (US)</option>
+              <option value="NYSE">NYSE (US)</option>
+              <option value="US">US Over-The-Counter</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="f-ticker">Ticker Symbol</label>
+            <input type="text" id="f-ticker" placeholder="e.g. VAS, GOOG" required>
+          </div>
+          <div class="form-group">
+            <label for="f-name">Company / ETF Name</label>
+            <input type="text" id="f-name" placeholder="e.g. Alphabet Inc">
+          </div>
+          <div class="form-group">
+            <label for="f-action">Action</label>
+            <select id="f-action">
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="f-units">Units (Shares)</label>
+            <input type="number" step="any" id="f-units" placeholder="0.00" required>
+          </div>
+          <div class="form-group">
+            <label for="f-price">Price Per Unit</label>
+            <input type="number" step="any" id="f-price" placeholder="0.00" required>
+          </div>
+          <div class="form-group">
+            <label for="f-brokerage">Brokerage Fee</label>
+            <input type="number" step="any" id="f-brokerage" value="0.00">
+          </div>
+        </div>
+        <div class="currency-disclaimer" id="currency-helper-text">
+          ASX Trades are priced in <strong>AUD</strong>. US Trades are priced in <strong>USD</strong> and will fetch historical currency rates automatically.
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" onclick="closeAddModal()">Cancel</button>
+          <button type="submit" class="btn-primary">Add Transaction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Update Cash/Super Snapshot Modal -->
+  <div class="modal-overlay" id="snapshot-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title" id="snapshot-modal-title">Update Balance</h3>
+        <button class="modal-close" onclick="closeSnapshotModal()">✕</button>
+      </div>
+      <form id="snapshot-form" onsubmit="submitSnapshot(event)">
+        <input type="hidden" id="snapshot-type" value="cash">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="snapshot-date">Date (1st of month)</label>
+            <input type="date" id="snapshot-date" required>
+          </div>
+          <div class="form-group">
+            <label for="snapshot-amount">Balance (AUD)</label>
+            <input type="number" step="0.01" id="snapshot-amount" placeholder="0.00" required>
+          </div>
+        </div>
+        <div class="currency-disclaimer">
+          Enter the <strong>end-of-month</strong> balance as of the 1st. This will update the net worth calculation across all charts.
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" onclick="closeSnapshotModal()">Cancel</button>
+          <button type="submit" class="btn-primary">Save Balance</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Custom JS -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
