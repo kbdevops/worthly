@@ -1,7 +1,17 @@
+# Sensitive financial data (use template files to set up)
+transactions.json
+cash_accounts.json
+super_holdings.json
+snapshots.json
+country_overrides.json
+
 # Price cache (rebuilt from yfinance on deploy)
 prices.db
 
-# Raw import files (sensitive, normalized data is in transactions.json)
+# Holding metadata cache (regenerated on sync)
+holding_meta.json
+
+# Raw import files
 *.xlsx
 *.csv
 

@@ -1,0 +1,78 @@
+# NetWorth k3s deployment
+# Apply: kubectl apply -f k3s-deploy.yaml
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: worthly-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worthly
+  labels:
+    app: worthly
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worthly
+  template:
+    metadata:
+      labels:
+        app: worthly
+    spec:
+      containers:
+        - name: worthly
+          image: worthly:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5050
+          volumeMounts:
+            - name: data
+              mountPath: /app
+              subPath: ""
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: worthly-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worthly
+spec:
+  selector:
+    app: worthly
+  ports:
+    - port: 5050
+      targetPort: 5050
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: worthly
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: worthly.home
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: worthly
+                port:
+                  number: 5050

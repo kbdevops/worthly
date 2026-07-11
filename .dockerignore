@@ -1,0 +1,12 @@
+transactions.json
+cash_accounts.json
+super_holdings.json
+snapshots.json
+country_overrides.json
+prices.db
+holding_meta.json
+*.xlsx
+*.csv
+__pycache__
+.git
+.DS_Store
