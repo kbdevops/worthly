@@ -1055,9 +1055,11 @@ tr:hover td {
   }
   .sidebar-overlay {
     display: block;
+    pointer-events: none;
   }
   .sidebar-overlay.active {
     display: block;
+    pointer-events: auto;
   }
   .main-layout {
     padding: 20px;
