@@ -1067,39 +1067,62 @@ tr:hover td {
 }
 
 @media (max-width: 600px) {
-  .metrics-grid {
-    grid-template-columns: 1fr;
+  /* ─── Layout ─── */
+  .main-layout { padding: 12px; }
+  .content-container { padding: 8px; }
+  .app-header { flex-wrap: wrap; gap: 8px; }
+  .header-title { font-size: 20px; }
+
+  /* ─── Metrics / CGT summary ─── */
+  .metrics-grid { grid-template-columns: 1fr; }
+  #cgt-summary-cards.metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  .metric-card { padding: 16px; }
+  .metric-value { font-size: 22px; }
+
+  /* ─── Charts ─── */
+  canvas { max-height: 220px; }
+
+  /* ─── Tables ─── */
+  .table-responsive {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -8px;
+    width: calc(100% + 16px);
+    padding: 0 8px;
   }
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-  .form-group.full-width {
-    grid-column: span 1;
-  }
-  .app-header {
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .content-container {
-    padding: 12px;
-  }
-  .main-layout {
-    padding: 12px;
-  }
-  .modal-card {
-    width: 95vw;
-    margin: 10px;
-    padding: 20px;
-  }
-  .ledger-filters {
-    flex-direction: column;
-    width: 100%;
-  }
+  table { min-width: 600px; font-size: 12px; }
+  th, td { padding: 8px 10px; font-size: 12px; white-space: nowrap; }
+
+  /* ─── Holdings cards ─── */
+  .holding-card { padding: 14px 16px; }
+  .holding-card-ticker { font-size: 17px; }
+  .holding-card-header { gap: 8px; }
+  .holding-card-metrics { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .holding-card-footer { flex-direction: column; align-items: flex-start; }
+  .holding-card-stats { gap: 12px; }
+  .holding-card-name { max-width: 200px; }
+
+  /* ─── Ledger filters ─── */
+  .ledger-filters { flex-direction: column; width: 100%; }
   .ledger-filters input,
-  .ledger-filters select {
-    width: 100%;
-  }
-  canvas {
-    max-height: 250px;
-  }
+  .ledger-filters select { width: 100%; min-width: unset; }
+
+  /* ─── Tax / CGT ─── */
+  #section-tax .metrics-grid { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* ─── Form / Modal ─── */
+  .form-grid { grid-template-columns: 1fr; }
+  .form-group.full-width { grid-column: span 1; }
+  .modal-card { width: 95vw; margin: 10px; padding: 20px; }
+  .modal-header { padding: 16px 20px; }
+  .modal-footer { flex-direction: column; gap: 8px; }
+  .modal-footer button { width: 100%; }
+
+  /* ─── Sidebar footer (sync panel) ─── */
+  .sync-panel { padding: 12px; }
+  .sync-button { font-size: 11px; padding: 6px 12px; }
+
+  /* ─── Table header actions ─── */
+  .table-header-custom { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .table-header-custom .action-btn-primary { width: 100%; justify-content: center; }
 }
