@@ -55,6 +55,9 @@ function switchTab(tabId) {
   } else if (tabId === 'sync') {
     headingEl.textContent = 'Data Sync & Cache';
     fetchSyncStatus();
+  } else if (tabId === 'tax') {
+    headingEl.textContent = 'Capital Gains Tax';
+    onCgtFYChange();
   }
 
   // Persist active tab so refresh stays on same page
@@ -959,6 +962,61 @@ async function fetchSnapshotsTable(type) {
     });
   } catch (e) {
     console.error('Failed to load snapshots table', e);
+  }
+}
+
+// ─── Tax / CGT Tab ──────────────────────────────────────────
+
+function onCgtFYChange() {
+  const fyVal = document.getElementById('cgt-fy-select').value;
+  const [from, to] = fyVal.split('|');
+  document.getElementById('cgt-from').value = from;
+  document.getElementById('cgt-to').value = to;
+  fetchCGT();
+}
+
+async function fetchCGT() {
+  const from = document.getElementById('cgt-from').value;
+  const to = document.getElementById('cgt-to').value;
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  try {
+    const res = await fetch(`/api/cgt?${params}`);
+    const data = await res.json();
+
+    document.getElementById('cgt-total-gain').textContent = fmtCurrency(data.total_gain);
+    document.getElementById('cgt-losses').textContent = '-' + fmtCurrency(data.losses_applied);
+    document.getElementById('cgt-discount').textContent = '-' + fmtCurrency(data.cgt_discount);
+    document.getElementById('cgt-net-gain').textContent = fmtCurrency(data.net_gain);
+
+    document.getElementById('cgt-count-badge').textContent = `${data.gains.length} disposals`;
+
+    const tbody = document.getElementById('cgt-table-body');
+    if (!data.gains.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:32px;">No disposals in this period.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = '';
+    data.gains.forEach(g => {
+      const gainClass = g.gain >= 0 ? 'text-success' : 'text-danger';
+      const sign = g.gain >= 0 ? '+' : '';
+      tbody.innerHTML += `
+        <tr>
+          <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">${g.date}</td>
+          <td style="font-weight:700;">${g.ticker}</td>
+          <td>${g.units.toLocaleString()}</td>
+          <td style="font-weight:600;">${fmtCurrency(g.proceeds)}</td>
+          <td>${fmtCurrency(g.cost_base)}</td>
+          <td class="${gainClass}" style="font-weight:700;">${sign}${fmtCurrency(g.gain)}</td>
+          <td>${g.held_12m ? '<span class="badge badge-buy">Yes</span>' : '<span class="badge badge-sell">No</span>'}</td>
+          <td>${g.discount_eligible ? '<span class="badge badge-buy">50%</span>' : '<span class="badge" style="background:rgba(100,100,100,0.1);color:var(--text-muted);">—</span>'}</td>
+        </tr>`;
+    });
+  } catch (e) {
+    console.error('Failed to fetch CGT', e);
   }
 }
 
