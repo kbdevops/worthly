@@ -19,15 +19,16 @@ from datetime import datetime, date, timedelta
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "transactions.json")
-SNAPSHOT_FILE = os.path.join(BASE_DIR, "snapshots.json")
-CASH_ACCOUNTS_FILE = os.path.join(BASE_DIR, "cash_accounts.json")
-SUPER_HOLDINGS_FILE = os.path.join(BASE_DIR, "super_holdings.json")
-COUNTRY_OVERRIDES_FILE = os.path.join(BASE_DIR, "country_overrides.json")
-HOLDING_META_FILE = os.path.join(BASE_DIR, "holding_meta.json")
-DB_FILE = os.path.join(BASE_DIR, "prices.db")
-CSV_FILE = os.path.join(BASE_DIR, "all_trades.csv")
-EXCEL_FILE = os.path.join(BASE_DIR, "AllTradesReport.xlsx")
+DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
+DATA_FILE = os.path.join(DATA_DIR, "transactions.json")
+SNAPSHOT_FILE = os.path.join(DATA_DIR, "snapshots.json")
+CASH_ACCOUNTS_FILE = os.path.join(DATA_DIR, "cash_accounts.json")
+SUPER_HOLDINGS_FILE = os.path.join(DATA_DIR, "super_holdings.json")
+COUNTRY_OVERRIDES_FILE = os.path.join(DATA_DIR, "country_overrides.json")
+HOLDING_META_FILE = os.path.join(DATA_DIR, "holding_meta.json")
+DB_FILE = os.path.join(DATA_DIR, "prices.db")
+CSV_FILE = os.path.join(DATA_DIR, "all_trades.csv")
+EXCEL_FILE = os.path.join(DATA_DIR, "AllTradesReport.xlsx")
 
 # yfinance suffixes for exchanges
 EXCHANGE_SUFFIX = {

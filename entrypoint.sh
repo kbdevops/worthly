@@ -1,9 +1,11 @@
 #!/bin/sh
-# Copy template files to real data files if they don't exist (first run)
+# Copy template files to the data directory if they don't exist (first run)
+DATA_DIR="${DATA_DIR:-/app}"
+
 for f in transactions cash_accounts super_holdings snapshots country_overrides; do
-  if [ ! -f "/app/${f}.json" ]; then
-    cp "/app/${f}.example.json" "/app/${f}.json"
-    echo "[entrypoint] Created ${f}.json from template"
+  if [ ! -f "${DATA_DIR}/${f}.json" ]; then
+    cp "/app/${f}.example.json" "${DATA_DIR}/${f}.json"
+    echo "[entrypoint] Created ${f}.json from template in ${DATA_DIR}"
   fi
 done
 

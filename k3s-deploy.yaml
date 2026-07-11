@@ -1,5 +1,9 @@
-# NetWorth k3s deployment
+# NetWorth k3s deployment (reference manifest)
 # Apply: kubectl apply -f k3s-deploy.yaml
+#
+# This mounts a PVC at /app/data for financial data files.
+# Set DATA_DIR=/app/data so the app reads/writes from the volume.
+# On first deploy, the entrypoint copies .example.json templates into the volume.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -20,6 +24,8 @@ metadata:
     app: worthly
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: worthly
@@ -34,13 +40,14 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5050
-          volumeMounts:
-            - name: data
-              mountPath: /app
-              subPath: ""
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
+            - name: DATA_DIR
+              value: "/app/data"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
       volumes:
         - name: data
           persistentVolumeClaim:

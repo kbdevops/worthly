@@ -108,91 +108,35 @@ Three tables:
 
 ## Docker / k3s Deployment
 
-### Dockerfile (create alongside app.py)
+### Environment variables
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-EXPOSE 5050
-CMD ["python", "app.py"]
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATA_DIR` | (app directory) | Path where JSON data files + SQLite DB are stored |
+
+Set `DATA_DIR` to a mounted volume to persist financial data outside the container.
 
 ### Build and run
 
 ```bash
 docker build -t worthly:latest .
 docker run -d -p 5050:5050 \
-  -v $(pwd)/transactions.json:/app/transactions.json \
-  -v $(pwd)/cash_accounts.json:/app/cash_accounts.json \
-  -v $(pwd)/super_holdings.json:/app/super_holdings.json \
-  -v $(pwd)/snapshots.json:/app/snapshots.json \
-  -v $(pwd)/country_overrides.json:/app/country_overrides.json \
-  -v $(pwd)/prices.db:/app/prices.db \
-  -v $(pwd)/holding_meta.json:/app/holding_meta.json \
+  -v $(pwd)/data:/app/data \
+  -e DATA_DIR=/app/data \
   --name worthly \
   worthly:latest
 ```
 
+On first run, the entrypoint copies `.example.json` templates into `$DATA_DIR` if the real files don't exist.
+
 ### k3s Deployment
 
-For k3s, mount the data files as a PersistentVolume or ConfigMap (for small JSONs) and use a PVC for `prices.db`.
+See `k3s-deploy.yaml` for a reference manifest with PVC, Deployment (Recreate strategy), Service, and Traefik Ingress.
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: worthly
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: worthly
-  template:
-    metadata:
-      labels:
-        app: worthly
-    spec:
-      containers:
-        - name: worthly
-          image: worthly:latest
-          ports:
-            - containerPort: 5050
-          volumeMounts:
-            - name: data
-              mountPath: /app/data
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: worthly-data
-```
-
-### First deploy
-
-On first deploy, copy the `.example.json` files to the mounted volume to use as starting templates. The app will create `prices.db` and `holding_meta.json` automatically. Click "Sync All" on the Data Sync tab to populate prices and metadata from Yahoo Finance.
-
-### Ingress (optional)
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: worthly
-spec:
-  rules:
-    - host: worthly.home
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: worthly
-                port:
-                  number: 5050
-```
+Key points:
+- `strategy: Recreate` — avoids two pods hitting the same SQLite file
+- Mount volume at `/app/data` (not `/app` — that hides the image)
+- Set `DATA_DIR=/app/data` so the app reads/writes from the volume
 
 ## Port & Debug
 
