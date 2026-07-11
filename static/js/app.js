@@ -38,6 +38,16 @@ function updateHeaderDate() {
   document.getElementById('header-date').textContent = today.toLocaleDateString('en-US', options);
 }
 
+// Mobile sidebar toggle
+function toggleSidebar() {
+  const sidebar = document.getElementById('app-sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  const hamburger = document.getElementById('hamburger-btn');
+  const isOpen = sidebar.classList.toggle('open');
+  overlay.classList.toggle('active', isOpen);
+  hamburger.classList.toggle('active', isOpen);
+}
+
 // Tab switcher
 function switchTab(tabId) {
   document.querySelectorAll('.tab-section').forEach(sec => sec.classList.remove('active'));
@@ -58,6 +68,12 @@ function switchTab(tabId) {
   } else if (tabId === 'tax') {
     headingEl.textContent = 'Capital Gains Tax';
     onCgtFYChange();
+  }
+
+  // Close mobile sidebar after navigation (only if open)
+  const sidebar = document.getElementById('app-sidebar');
+  if (sidebar.classList.contains('open')) {
+    toggleSidebar();
   }
 
   // Persist active tab so refresh stays on same page
