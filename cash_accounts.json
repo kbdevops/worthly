@@ -1,0 +1,7 @@
+[
+  {"institution": "Other", "type": "Cheque Account", "name": "Brokerage Account", "balance": 550.00, "country": "AU"},
+  {"institution": "Other", "type": "Other Account", "name": "CIH", "balance": 10010.00, "country": "AU"},
+  {"institution": "Commonwealth Bank of Australia", "type": "Cheque Account", "name": "CommBank Blow", "balance": 500.00, "country": "AU"},
+  {"institution": "ING Bank Australia", "type": "Cheque Account", "name": "ING Blow", "balance": 1212.43, "country": "AU"},
+  {"institution": "ING Bank Australia", "type": "Savings Account", "name": "ING Grow", "balance": 74256.14, "country": "AU"}
+]

@@ -21,6 +21,10 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, "transactions.json")
 SNAPSHOT_FILE = os.path.join(BASE_DIR, "snapshots.json")
+CASH_ACCOUNTS_FILE = os.path.join(BASE_DIR, "cash_accounts.json")
+SUPER_HOLDINGS_FILE = os.path.join(BASE_DIR, "super_holdings.json")
+COUNTRY_OVERRIDES_FILE = os.path.join(BASE_DIR, "country_overrides.json")
+HOLDING_META_FILE = os.path.join(BASE_DIR, "holding_meta.json")
 DB_FILE = os.path.join(BASE_DIR, "prices.db")
 CSV_FILE = os.path.join(BASE_DIR, "all_trades.csv")
 EXCEL_FILE = os.path.join(BASE_DIR, "AllTradesReport.xlsx")
@@ -295,6 +299,99 @@ def save_transactions(txns):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(txns, f, indent=2)
 
+# ─── Cash Accounts, Super Holdings, Country Overrides ───────
+
+def load_cash_accounts():
+    if not os.path.exists(CASH_ACCOUNTS_FILE):
+        return []
+    with open(CASH_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_cash_accounts(accounts):
+    with open(CASH_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(accounts, f, indent=2)
+
+def load_super_holdings():
+    if not os.path.exists(SUPER_HOLDINGS_FILE):
+        return []
+    with open(SUPER_HOLDINGS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_super_holdings(holdings):
+    with open(SUPER_HOLDINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(holdings, f, indent=2)
+
+def load_country_overrides():
+    if not os.path.exists(COUNTRY_OVERRIDES_FILE):
+        return {}
+    with open(COUNTRY_OVERRIDES_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_country_overrides(overrides):
+    with open(COUNTRY_OVERRIDES_FILE, "w", encoding="utf-8") as f:
+        json.dump(overrides, f, indent=2)
+
+def load_holding_meta():
+    if not os.path.exists(HOLDING_META_FILE):
+        return {}
+    with open(HOLDING_META_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_holding_meta(meta):
+    with open(HOLDING_META_FILE, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+
+def fetch_holding_meta(ticker, exchange):
+    """Fetch sector, industry, logo from yfinance for a ticker. Returns dict or None."""
+    meta = load_holding_meta()
+    ysym = yf_symbol(ticker, exchange)
+    if ysym in meta:
+        return meta[ysym]
+
+    try:
+        t = yf.Ticker(ysym)
+        info = t.info
+        website = info.get("website", "")
+        logo_url = ""
+        if website:
+            # Use Google Favicons service to pull the company's logo
+            logo_url = f"https://www.google.com/s2/favicons?domain={website.replace('https://','').replace('http://','').split('/')[0]}&sz=64"
+
+        entry = {
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
+            "longName": info.get("longName", ""),
+            "website": website,
+            "logo_url": logo_url,
+        }
+        meta[ysym] = entry
+        save_holding_meta(meta)
+        return entry
+    except Exception as e:
+        print(f"[meta] Failed to fetch metadata for {ysym}: {e}")
+        return None
+
+def get_holding_country(ticker, exchange, name):
+    """Determine country for a holding: override > exchange heuristic > 'Unknown'."""
+    sym = yf_symbol(ticker, exchange)
+    overrides = load_country_overrides()
+    if sym in overrides:
+        return overrides[sym]
+    # Heuristic: US exchanges → US, ASX → AU, else based on name
+    ex_upper = (exchange or "").upper()
+    if ex_upper in ("NASDAQ", "NYSE", "US"):
+        return "US"
+    if ex_upper == "ASX":
+        return "AU"
+    return "Unknown"
+
+def get_total_cash():
+    """Sum all cash account balances."""
+    accounts = load_cash_accounts()
+    return round(sum(a.get("balance", 0) for a in accounts), 2)
+
+# ─── End Config Helpers ────────────────────────────────────
+
 def save_snapshots_to_json():
     """Export all snapshots from DB to snapshots.json."""
     conn = db()
@@ -483,8 +580,63 @@ def index():
 
 @app.route("/api/transactions", methods=["GET"])
 def get_transactions():
-    """Retrieve list of transactions."""
-    return jsonify(load_transactions())
+    """Retrieve list of transactions enriched with current price and gain/loss."""
+    txns = load_transactions()
+    if not txns:
+        return jsonify([])
+
+    # Get latest prices for all symbols
+    conn = db()
+    latest_prices = {}
+    rows = conn.execute("""
+        SELECT symbol, close FROM prices
+        WHERE (symbol, date) IN (
+            SELECT symbol, MAX(date) FROM prices GROUP BY symbol
+        )
+    """).fetchall()
+    for sym, close in rows:
+        latest_prices[sym] = close
+    conn.close()
+
+    audusd = latest_prices.get("AUDUSD=X", 0.65)
+
+    meta = load_holding_meta()
+    enriched = []
+    for t in txns:
+        entry = dict(t)
+        ysym = yf_symbol(t["ticker"], t["exchange"])
+        m = meta.get(ysym, {})
+        entry["logo_url"] = m.get("logo_url", "")
+        entry["currency_label"] = t.get("currency", "AUD")
+        ysym = yf_symbol(t["ticker"], t["exchange"])
+        current_price = latest_prices.get(ysym, 0.0)
+
+        if t["action"].lower() == "buy":
+            if t.get("currency", "AUD") == "USD":
+                current_price_aud = current_price / audusd
+            else:
+                current_price_aud = current_price
+            current_value = current_price_aud * t["units"]
+            entry["current_price"] = round(current_price, 4)
+            entry["current_value_aud"] = round(current_value, 2)
+            entry["gain_aud"] = round(current_value - abs(t["value"]), 2)
+            entry["gain_pct"] = round((current_value - abs(t["value"])) / abs(t["value"]) * 100, 2) if t["value"] != 0 else 0.0
+        elif t["action"].lower() == "sell":
+            # For sells, "gain" is the realized gain — the sell value minus the proportional cost
+            # Simplified: show the sell proceeds as the reference
+            entry["current_price"] = round(current_price, 4)
+            entry["current_value_aud"] = round(t["value"], 2)
+            entry["gain_aud"] = 0.0
+            entry["gain_pct"] = 0.0
+        else:
+            entry["current_price"] = 0.0
+            entry["current_value_aud"] = 0.0
+            entry["gain_aud"] = 0.0
+            entry["gain_pct"] = 0.0
+
+        enriched.append(entry)
+
+    return jsonify(enriched)
 
 @app.route("/api/transactions", methods=["POST"])
 def add_transaction():
@@ -509,11 +661,17 @@ def add_transaction():
         conn.close()
         
         # Calculate signed AUD value
-        # Buy: (units * price + brokerage) in local currency -> convert to AUD
-        # Sell: (-units * price + brokerage) in local currency -> convert to AUD
-        sign = 1 if action == "buy" else -1
-        local_total = (sign * units * price) + brokerage
-        aud_value = local_total / exch_rate
+        if action == "split":
+            # Split: units are additional shares, zero cost, zero cash flow
+            price = 0.0
+            brokerage = 0.0
+            aud_value = 0.0
+        elif action == "sell":
+            # Sell: negative cash flow
+            aud_value = (-units * price + brokerage) / exch_rate
+        else:
+            # Buy: positive cash flow
+            aud_value = (units * price + brokerage) / exch_rate
         
         # Determine name if possible, or use ticker
         name = data.get("name", "").strip() or f"{ticker} Stock"
@@ -575,13 +733,57 @@ def sync_data():
     ok_fx, msg_fx = sync_symbol(conn, "AUDUSD=X", min_date, end, force=force)
     results.append({"symbol": "AUDUSD=X", "ok": ok_fx, "message": msg_fx})
     
-    # Sync stock symbols
+    # Sync stock symbols and fetch metadata
     for sym, grp in df.groupby("sym"):
         ok, msg = sync_symbol(conn, sym, grp["date"].min(), end, force=force)
         results.append({"symbol": sym, "ok": ok, "message": msg})
-        
+        # Fetch holding metadata (logo, sector, industry) — non-blocking, best-effort
+        ticker = grp.iloc[0]["ticker"]
+        exchange = grp.iloc[0]["exchange"]
+        fetch_holding_meta(ticker, exchange)
+
     conn.close()
     return jsonify({"results": results, "at": datetime.now().isoformat()})
+
+@app.route("/api/sync-status", methods=["GET"])
+def get_sync_status():
+    """Return full sync status: prices + metadata for all cached symbols."""
+    conn = db()
+    rows = conn.execute("""
+        SELECT
+            s.symbol,
+            s.last_synced,
+            s.cached_from,
+            s.cached_to,
+            (SELECT COUNT(*) FROM prices p WHERE p.symbol = s.symbol) as record_count,
+            (SELECT MIN(p.date) FROM prices p WHERE p.symbol = s.symbol) as actual_from,
+            (SELECT MAX(p.date) FROM prices p WHERE p.symbol = s.symbol) as actual_to
+        FROM sync_log s
+        ORDER BY s.symbol
+    """).fetchall()
+    conn.close()
+
+    # Merge with holding metadata
+    meta = load_holding_meta()
+    result = []
+    for r in rows:
+            sym = r[0]
+            m = meta.get(sym, {})
+            result.append({
+                "symbol": sym,
+                "last_synced": r[1],
+                "cached_from": r[2],
+                "cached_to": r[3],
+                "record_count": r[4],
+                "actual_from": r[5],
+                "actual_to": r[6],
+                "sector": m.get("sector", ""),
+                "industry": m.get("industry", ""),
+                "website": m.get("website", ""),
+                "logo_url": m.get("logo_url", ""),
+                "has_meta": bool(m.get("sector") or m.get("website")),
+            })
+    return jsonify(result)
 
 @app.route("/api/performance", methods=["GET"])
 def get_performance():
@@ -672,17 +874,40 @@ def get_portfolio():
 
     conn = db()
     latest_prices = {}
+    prev_prices = {}
     rows = conn.execute("""
-        SELECT symbol, close, date 
-        FROM prices 
+        SELECT symbol, close, date
+        FROM prices
         WHERE (symbol, date) IN (
-            SELECT symbol, MAX(date) 
-            FROM prices 
+            SELECT symbol, MAX(date)
+            FROM prices
             GROUP BY symbol
         )
     """).fetchall()
     for sym, close, dt in rows:
         latest_prices[sym] = close
+
+    # Get previous close for daily change calculation
+    prev_rows = conn.execute("""
+        SELECT p.symbol, p.close
+        FROM prices p
+        INNER JOIN (
+            SELECT symbol, MAX(date) as max_date
+            FROM prices
+            GROUP BY symbol
+        ) latest ON p.symbol = latest.symbol
+        WHERE p.date < latest.max_date
+        AND (p.symbol, p.date) IN (
+            SELECT symbol, MAX(date)
+            FROM prices
+            WHERE (symbol, date) NOT IN (
+                SELECT symbol, MAX(date) FROM prices GROUP BY symbol
+            )
+            GROUP BY symbol
+        )
+    """).fetchall()
+    for sym, close in prev_rows:
+        prev_prices[sym] = close
     conn.close()
 
     audusd = latest_prices.get("AUDUSD=X", 0.65)
@@ -739,13 +964,20 @@ def get_portfolio():
             continue
         
         current_price = latest_prices.get(sym, 0.0)
+        prev_price = prev_prices.get(sym, current_price)  # fallback to current if no prev
         if h["currency"] == "USD":
             current_price_aud = current_price / audusd
+            prev_price_aud = prev_price / audusd
         else:
             current_price_aud = current_price
-            
+            prev_price_aud = prev_price
+
         value_aud = h["units"] * current_price_aud
         total_portfolio_value += value_aud
+
+        # Daily change
+        daily_change = (current_price_aud - prev_price_aud) * h["units"]
+        daily_change_pct = ((current_price_aud - prev_price_aud) / prev_price_aud * 100) if prev_price_aud > 0 else 0.0
         
         avg_price_aud = h["cost_aud"] / h["units"] if h["units"] > 0 else 0.0
         avg_price_local = h["cost_local"] / h["units"] if h["units"] > 0 else 0.0
@@ -753,10 +985,15 @@ def get_portfolio():
         return_aud = value_aud - h["cost_aud"]
         return_pct = (return_aud / h["cost_aud"] * 100) if h["cost_aud"] > 0 else 0.0
         
+        meta = fetch_holding_meta(h["ticker"], h["exchange"])
+
         active_holdings.append({
             "ticker": h["ticker"],
             "exchange": h["exchange"],
             "name": h["name"],
+            "sector": meta.get("sector", "") if meta else "",
+            "industry": meta.get("industry", "") if meta else "",
+            "logo_url": meta.get("logo_url", "") if meta else "",
             "currency": h["currency"],
             "units": round(h["units"], 4),
             "cost_aud": round(h["cost_aud"], 2),
@@ -767,6 +1004,8 @@ def get_portfolio():
             "value_aud": round(value_aud, 2),
             "return_aud": round(return_aud, 2),
             "return_pct": round(return_pct, 2),
+            "daily_change": round(daily_change, 2),
+            "daily_change_pct": round(daily_change_pct, 2),
             "buys_count": h["buys_count"],
             "sells_count": h["sells_count"]
         })
@@ -906,6 +1145,112 @@ def _get_latest_portfolio_value():
             active_value += val
     return total_value, active_value, passive_value
 
+@app.route("/api/cgt", methods=["GET"])
+def get_cgt():
+    """Calculate Australian CGT for sells within a date range."""
+    from_date = request.args.get("from", "")
+    to_date = request.args.get("to", "")
+
+    txns = load_transactions()
+    if not txns:
+        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date})
+
+    # Filter sells in the selected period
+    sells = [t for t in txns if t["action"].lower() == "sell"]
+    if from_date:
+        sells = [t for t in sells if t["date"] >= from_date]
+    if to_date:
+        sells = [t for t in sells if t["date"] <= to_date]
+
+    if not sells:
+        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date})
+
+    # Walk chronologically to compute average cost basis at time of each sell
+    txns_sorted = sorted(txns, key=lambda x: x["date"])
+    holdings = {}  # sym -> {units, cost_aud, first_buy_date}
+
+    gains = []
+    for t in txns_sorted:
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        if sym not in holdings:
+            holdings[sym] = {"units": 0.0, "cost_aud": 0.0, "first_buy_date": None}
+
+        h = holdings[sym]
+
+        if t["action"].lower() == "buy":
+            h["units"] += t["units"]
+            h["cost_aud"] += t["value"]
+            if h["first_buy_date"] is None:
+                h["first_buy_date"] = t["date"]
+        elif t["action"].lower() == "split":
+            h["units"] += t["units"]
+        elif t["action"].lower() == "sell":
+            if h["units"] <= 0:
+                continue
+
+            avg_cost = h["cost_aud"] / h["units"] if h["units"] > 0 else 0
+            cost_of_sold = avg_cost * t["units"]
+            proceeds = abs(t["value"])
+            gain = proceeds - cost_of_sold
+
+            # Check if holding was >12 months at sale time
+            held_12m = False
+            if h["first_buy_date"]:
+                buy_dt = pd.Timestamp(h["first_buy_date"])
+                sell_dt = pd.Timestamp(t["date"])
+                held_12m = (sell_dt - buy_dt).days >= 365
+
+            # Only include this sell if it's in the selected date range
+            in_range = True
+            if from_date and t["date"] < from_date:
+                in_range = False
+            if to_date and t["date"] > to_date:
+                in_range = False
+
+            if in_range:
+                gains.append({
+                    "date": t["date"],
+                    "ticker": t["ticker"],
+                    "name": t.get("name", ""),
+                    "units": t["units"],
+                    "proceeds": round(proceeds, 2),
+                    "cost_base": round(cost_of_sold, 2),
+                    "gain": round(gain, 2),
+                    "held_12m": held_12m,
+                    "discount_eligible": held_12m and gain > 0,
+                })
+
+            # Update holding after sale
+            h["units"] -= t["units"]
+            h["cost_aud"] -= cost_of_sold
+
+    # Calculate CGT summary
+    total_gain = sum(g["gain"] for g in gains)
+    total_losses = sum(g["gain"] for g in gains if g["gain"] < 0)
+    total_discountable = sum(g["gain"] for g in gains if g["discount_eligible"])
+
+    # Apply losses first to non-discounted gains, then to discounted
+    losses_remaining = abs(total_losses)
+    # Losses applied to gains eligible for discount
+    discounted_after_losses = max(0, total_discountable - losses_remaining)
+    losses_remaining = max(0, losses_remaining - total_discountable)
+    # Remaining non-discounted gains absorb any leftover losses
+    non_discounted = sum(g["gain"] for g in gains if g["gain"] > 0 and not g["discount_eligible"])
+    non_discounted_after_losses = max(0, non_discounted - losses_remaining)
+
+    cgt_discount = round(discounted_after_losses * 0.5, 2)
+    net_gain = round(discounted_after_losses * 0.5 + non_discounted_after_losses, 2)
+    losses_applied = round(abs(total_losses), 2)
+
+    return jsonify({
+        "gains": gains,
+        "total_gain": round(total_gain, 2),
+        "losses_applied": losses_applied,
+        "cgt_discount": cgt_discount,
+        "net_gain": net_gain,
+        "from": from_date,
+        "to": to_date,
+    })
 @app.route("/api/snapshots", methods=["GET"])
 def get_snapshots():
     """Return all cash + super snapshots sorted by date."""
@@ -936,18 +1281,18 @@ def add_snapshot():
 
 @app.route("/api/breakdown", methods=["GET"])
 def get_breakdown():
-    """Return current asset breakdown: cash, super, stocks-active, stocks-passive."""
+    """Return current asset breakdown: cash (from accounts), super (from snapshot), stocks."""
     conn = db()
     today = date.today().isoformat()
     row = conn.execute(
-        "SELECT super, cash FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
+        "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
     ).fetchone()
     conn.close()
-    cash = row[1] if row else 0.0
     super_val = row[0] if row else 0.0
+    cash = get_total_cash()
     portfolio_val, active_val, passive_val = _get_latest_portfolio_value()
     return jsonify({
-        "cash": round(cash, 2),
+        "cash": cash,
         "super": round(super_val, 2),
         "stocks_active": round(active_val, 2),
         "stocks_passive": round(passive_val, 2),
@@ -957,15 +1302,14 @@ def get_breakdown():
 
 @app.route("/api/allocation", methods=["GET"])
 def get_allocation():
-    """Return country allocation: Australia vs US."""
+    """Return dynamic country allocation using overrides, super holdings, and cash accounts."""
     conn = db()
     today = date.today().isoformat()
     row = conn.execute(
-        "SELECT super, cash FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
+        "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
     ).fetchone()
     conn.close()
-    cash = row[1] if row else 0.0
-    super_val = row[0] if row else 0.0
+    super_total = row[0] if row else 0.0
 
     txns = load_transactions()
     conn = db()
@@ -986,7 +1330,10 @@ def get_allocation():
     for t in txns_sorted:
         sym = yf_symbol(t["ticker"], t["exchange"])
         if sym not in holdings:
-            holdings[sym] = {"exchange": t["exchange"], "currency": t.get("currency") or "AUD", "units": 0.0}
+            holdings[sym] = {
+                "ticker": t["ticker"], "exchange": t["exchange"],
+                "name": t.get("name", ""), "currency": t.get("currency") or "AUD", "units": 0.0
+            }
         h = holdings[sym]
         qty = t["units"]
         if t["action"].lower() == "buy":
@@ -996,8 +1343,8 @@ def get_allocation():
         elif t["action"].lower() == "sell":
             h["units"] = max(0, h["units"] - qty)
 
-    au_value = cash + super_val
-    us_value = 0.0
+    # Aggregate by dynamic country labels
+    countries = {}
     for sym, h in holdings.items():
         if h["units"] <= 1e-5:
             continue
@@ -1005,19 +1352,76 @@ def get_allocation():
         if h["currency"] == "USD":
             price = price / audusd
         val = h["units"] * price
-        if h["exchange"].upper() in ["ASX"]:
-            au_value += val
-        else:
-            us_value += val
+        country = get_holding_country(h["ticker"], h["exchange"], h["name"])
+        countries[country] = countries.get(country, 0) + val
 
-    total = au_value + us_value
-    return jsonify({
-        "australia": round(au_value, 2),
-        "us": round(us_value, 2),
-        "australia_pct": round(au_value / total * 100, 2) if total > 0 else 0.0,
-        "us_pct": round(us_value / total * 100, 2) if total > 0 else 0.0,
-        "total": round(total, 2),
-    })
+    # Super: distribute across countries from super_holdings.json
+    super_holdings = load_super_holdings()
+    if super_holdings:
+        for sh in super_holdings:
+            c = sh.get("country", "Unknown")
+            pct = sh.get("allocation_pct", 0) / 100.0
+            countries[c] = countries.get(c, 0) + (super_total * pct)
+    else:
+        countries["AU"] = countries.get("AU", 0) + super_total
+
+    # Cash accounts: distribute by country
+    cash_accounts = load_cash_accounts()
+    for ca in cash_accounts:
+        c = ca.get("country", "AU")
+        countries[c] = countries.get(c, 0) + ca.get("balance", 0)
+
+    total = sum(countries.values())
+    result = {"countries": {}, "total": round(total, 2)}
+    for country, value in sorted(countries.items(), key=lambda x: x[1], reverse=True):
+        result["countries"][country] = {
+            "value": round(value, 2),
+            "pct": round(value / total * 100, 2) if total > 0 else 0.0
+        }
+    return jsonify(result)
+
+# ─── Config CRUD Endpoints ─────────────────────────────────
+
+@app.route("/api/cash-accounts", methods=["GET"])
+def get_cash_accounts():
+    return jsonify(load_cash_accounts())
+
+@app.route("/api/cash-accounts", methods=["POST"])
+def save_cash_accounts_route():
+    data = request.json
+    try:
+        save_cash_accounts(data)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/super-holdings", methods=["GET"])
+def get_super_holdings_route():
+    return jsonify(load_super_holdings())
+
+@app.route("/api/super-holdings", methods=["POST"])
+def save_super_holdings_route():
+    data = request.json
+    try:
+        save_super_holdings(data)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/country-overrides", methods=["GET"])
+def get_country_overrides_route():
+    return jsonify(load_country_overrides())
+
+@app.route("/api/country-overrides", methods=["POST"])
+def save_country_overrides_route():
+    data = request.json
+    try:
+        save_country_overrides(data)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+# ─── End Config CRUD ───────────────────────────────────────
 
 @app.route("/api/networth", methods=["GET"])
 def get_networth():
@@ -1072,6 +1476,13 @@ def get_networth():
             prices = prices / fx_rates
         portfolio_value += units_df[sym] * prices
 
+    # Cumulative cash flow (cost basis) for return calculation
+    cash_flow_changes = pd.Series(0.0, index=all_dates)
+    for _, row in df.iterrows():
+        cash_flow_changes.loc[row["date"]] += row["value"]
+    cash_flow = cash_flow_changes.cumsum()
+    return_val = portfolio_value - cash_flow
+
     # Build cash + super timeline (forward-filled from snapshots)
     snapshots = conn.execute("SELECT date, super, cash FROM snapshots ORDER BY date").fetchall()
     conn.close()
@@ -1097,6 +1508,7 @@ def get_networth():
         "cash": cash_series.round(2).tolist(),
         "super": super_series.round(2).tolist(),
         "net_worth": net_worth.round(2).tolist(),
+        "return_val": return_val.round(2).tolist(),
     })
 
 @app.route("/api/monthly-change", methods=["GET"])

@@ -50,12 +50,16 @@
           Holdings
         </button>
         <button class="nav-item" id="nav-transactions" onclick="switchTab('transactions')">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
           Transactions
         </button>
-        <button class="nav-item" id="nav-networth" onclick="switchTab('networth')">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
-          Net Worth
+        <button class="nav-item" id="nav-tax" onclick="switchTab('tax')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>
+          Tax
+        </button>
+        <button class="nav-item" id="nav-sync" onclick="switchTab('sync')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+          Data Sync
         </button>
       </nav>
       
@@ -83,13 +87,7 @@
           <h1 class="header-title" id="page-main-heading">Portfolio Overview</h1>
           <p class="header-subtitle" id="header-date">Retrieving updates...</p>
         </div>
-        <div class="header-actions">
-          <button class="action-btn-primary" id="add-txn-trigger" onclick="openAddModal()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            New Transaction
-          </button>
-        </div>
-      </header>
+              </header>
       
       <!-- Content Container -->
       <div class="content-container">
@@ -161,6 +159,26 @@
             </div>
           </div>
 
+          <!-- Charts Row 2: Monthly Change + Country Allocation -->
+          <div class="charts-row">
+            <div class="chart-container-large card">
+              <div class="chart-header">
+                <h2 class="chart-title">Net Worth Change (Month-over-Month)</h2>
+              </div>
+              <div class="chart-wrapper" style="height: 250px;">
+                <canvas id="monthlyChangeChartCanvas"></canvas>
+              </div>
+            </div>
+            <div class="chart-container-small card">
+              <div class="chart-header">
+                <h2 class="chart-title">Country Allocation</h2>
+              </div>
+              <div class="chart-wrapper doughnut-wrapper">
+                <canvas id="allocationCountryChart"></canvas>
+              </div>
+            </div>
+          </div>
+
           <!-- Individual Holding Performance Bar Chart -->
           <div class="full-row-chart card">
             <div class="chart-header">
@@ -187,10 +205,15 @@
               </div>
               <div class="metric-value" id="holdings-cash-value">$0.00</div>
               <div class="metric-desc" id="holdings-cash-date">Last updated: --</div>
-              <button class="sync-button" style="margin-top:12px;" onclick="openSnapshotModal('cash')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                Update Cash
-              </button>
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="sync-button" style="flex:1;" onclick="toggleCashAccounts()" title="Edit cash accounts">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                  Edit Accounts
+                </button>
+                <button class="sync-button" style="width:36px;flex:none;" onclick="toggleHistory('cash')" title="View history">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                </button>
+              </div>
             </div>
             <div class="metric-card card">
               <div class="metric-header">
@@ -201,59 +224,92 @@
               </div>
               <div class="metric-value" id="holdings-super-value">$0.00</div>
               <div class="metric-desc" id="holdings-super-date">Last updated: --</div>
-              <button class="sync-button" style="margin-top:12px;" onclick="openSnapshotModal('super')">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-                Update Super
-              </button>
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="sync-button" style="flex:1;" onclick="toggleSuperHoldings()" title="Edit super holdings">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                  Edit Holdings
+                </button>
+                <button class="sync-button" style="width:36px;flex:none;" onclick="toggleHistory('super')" title="View history">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                </button>
+              </div>
             </div>
           </div>
 
-          <!-- Stocks Table -->
-          <div class="table-container card">
+          <!-- Cash Accounts Breakdown (collapsible) -->
+          <div class="table-container card" id="cash-accounts-section" style="display:none;">
+            <div class="table-header-custom">
+              <h2 class="table-title">Cash Accounts</h2>
+              <button class="sync-button" style="width:auto; padding:6px 14px; font-size:11px;" onclick="addCashAccount()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Add
+              </button>
+            </div>
+            <div class="table-responsive">
+              <table id="cash-accounts-table">
+                <thead>
+                  <tr><th>Institution</th><th>Type</th><th>Name</th><th>Balance</th><th>Country</th><th></th></tr>
+                </thead>
+                <tbody id="cash-accounts-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Super Holdings Breakdown (collapsible) -->
+          <div class="table-container card" id="super-holdings-section" style="display:none;">
+            <div class="table-header-custom">
+              <h2 class="table-title">Super Holdings</h2>
+              <button class="sync-button" style="width:auto; padding:6px 14px; font-size:11px;" onclick="addSuperHolding()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                Add
+              </button>
+            </div>
+            <div class="table-responsive">
+              <table id="super-holdings-table">
+                <thead>
+                  <tr><th>Name</th><th>Class</th><th>Allocation %</th><th>Country</th><th>Value</th><th></th></tr>
+                </thead>
+                <tbody id="super-holdings-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Stocks & ETFs — Rich Cards -->
+          <div class="card">
             <div class="table-header-custom">
               <h2 class="table-title">Stocks & ETFs</h2>
               <span class="table-badge" id="holdings-count-badge">0 Assets</span>
             </div>
-            <div class="table-responsive">
-              <table id="holdings-table">
-                <thead>
-                  <tr>
-                    <th>Asset</th>
-                    <th>Market</th>
-                    <th>Shares</th>
-                    <th>Avg Cost (Local)</th>
-                    <th>Avg Cost (AUD)</th>
-                    <th>Current Price</th>
-                    <th>Market Value (AUD)</th>
-                    <th>Return (AUD)</th>
-                    <th>Weight</th>
-                  </tr>
-                </thead>
-                <tbody id="holdings-table-body">
-                  <!-- Injected via JavaScript -->
-                </tbody>
-              </table>
+            <div id="holdings-cards-container">
+              <!-- Injected via JavaScript -->
             </div>
           </div>
 
         </section>
 
-        <!-- Tab 3: Transactions -->
+        <!-- Tab 3: Transactions Ledger -->
         <section id="section-transactions" class="tab-section">
-          <div class="table-container card">
-            <div class="table-header-custom flex-header">
+          <div class="card">
+            <div class="table-header-custom" style="flex-wrap:wrap;gap:12px;">
               <h2 class="table-title">Transaction Ledger</h2>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <button class="action-btn-primary" onclick="openAddModal()" style="padding:8px 16px;font-size:13px;">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  Add Transaction
+                </button>
+              </div>
               <div class="ledger-filters">
-                <input type="text" id="ledger-search" placeholder="Search by ticker..." oninput="filterLedger()">
+                <input type="text" id="ledger-search" placeholder="Search ticker..." oninput="filterLedger()">
                 <select id="ledger-type-filter" onchange="filterLedger()">
                   <option value="all">All Actions</option>
-                  <option value="buy">Buy Only</option>
-                  <option value="sell">Sell Only</option>
+                  <option value="buy">Buy</option>
+                  <option value="sell">Sell</option>
+                  <option value="split">Split</option>
                 </select>
                 <select id="ledger-market-filter" onchange="filterLedger()">
                   <option value="all">All Markets</option>
                   <option value="asx">ASX</option>
-                  <option value="us">US</option>
+                  <option value="us">US Markets</option>
                 </select>
               </div>
             </div>
@@ -262,73 +318,156 @@
                 <thead>
                   <tr>
                     <th>Date</th>
-                    <th>Symbol</th>
+                    <th>Ticker</th>
                     <th>Market</th>
                     <th>Action</th>
-                    <th>Shares</th>
+                    <th>Currency</th>
+                    <th>Units</th>
                     <th>Price</th>
                     <th>Brokerage</th>
-                    <th>Total Cost (AUD)</th>
-                    <th>Exchange Rate</th>
-                    <th>Delete</th>
+                    <th>Cost (AUD)</th>
+                    <th>FX Rate</th>
+                    <th>Now (AUD)</th>
+                    <th>Gain/Loss</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody id="ledger-table-body">
-                  <!-- Injected via JavaScript -->
+                  <tr><td colspan="13" style="text-align:center;color:var(--text-secondary);padding:32px;">Loading transactions...</td></tr>
                 </tbody>
               </table>
             </div>
           </div>
         </section>
 
-        <!-- Tab 4: Net Worth -->
-        <section id="section-networth" class="tab-section">
-
-          <!-- Charts Row: Asset Breakdown + Country Allocation -->
-          <div class="charts-row">
-            <div class="chart-container-large card">
-              <div class="chart-header">
-                <h2 class="chart-title">Net Worth Change (Month-over-Month)</h2>
-              </div>
-              <div class="chart-wrapper" style="height: 300px;">
-                <canvas id="monthlyChangeChartCanvas"></canvas>
-              </div>
-            </div>
-            <div class="chart-container-small card">
-              <div class="chart-header">
-                <h2 class="chart-title">Country Allocation</h2>
-              </div>
-              <div class="chart-wrapper doughnut-wrapper">
-                <canvas id="allocationCountryChart"></canvas>
-              </div>
-            </div>
-          </div>
-
-          <!-- Snapshot History Table -->
-          <div class="table-container card">
+        <!-- Tab 4: Data Sync Status -->
+        <section id="section-sync" class="tab-section">
+          <div class="card">
             <div class="table-header-custom">
-              <h2 class="table-title">Cash & Super History</h2>
-              <span class="table-badge" id="snapshots-count-badge">0 Months</span>
+              <h2 class="table-title">Price Cache Status</h2>
+              <div style="display:flex;gap:8px;align-items:center;">
+                <span class="table-badge" id="sync-status-count">0 symbols</span>
+                <button class="sync-button" id="sync-tab-btn" onclick="syncDataTab()" style="padding:8px 16px;font-size:13px;">
+                  <svg id="sync-tab-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                  Sync All
+                </button>
+              </div>
             </div>
-            <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
-              <table id="snapshots-table">
+            <div class="table-responsive">
+              <table id="sync-status-table">
                 <thead>
                   <tr>
-                    <th>Date</th>
-                    <th>Super</th>
-                    <th>Cash</th>
-                    <th>Combined</th>
+                    <th>Symbol</th>
+                    <th>Prices</th>
+                    <th>Date Range</th>
+                    <th>Company Info</th>
+                    <th>Yahoo Finance</th>
+                    <th>Google</th>
                   </tr>
                 </thead>
-                <tbody id="snapshots-table-body"></tbody>
+                <tbody id="sync-status-tbody">
+                  <tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:32px;">Loading sync status...</td></tr>
+                </tbody>
               </table>
             </div>
           </div>
+        </section>
 
+        <!-- Tab 5: Tax / CGT -->
+        <section id="section-tax" class="tab-section">
+          <div class="card" style="margin-bottom:16px;">
+            <div class="table-header-custom">
+              <h2 class="table-title">Capital Gains Tax</h2>
+            </div>
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;padding:0 24px 20px;">
+              <div class="form-group">
+                <label>Financial Year</label>
+                <select id="cgt-fy-select" onchange="onCgtFYChange()">
+                  <option value="2025-07-01|2026-06-30">FY2026 (Jul 2025 – Jun 2026)</option>
+                  <option value="2024-07-01|2025-06-30">FY2025 (Jul 2024 – Jun 2025)</option>
+                  <option value="2023-07-01|2024-06-30">FY2024 (Jul 2023 – Jun 2024)</option>
+                  <option value="2022-07-01|2023-06-30">FY2023 (Jul 2022 – Jun 2023)</option>
+                  <option value="2021-07-01|2022-06-30">FY2022 (Jul 2021 – Jun 2022)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>or Custom Range</label>
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input type="date" id="cgt-from" style="padding:8px 12px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-primary);border-radius:10px;font-family:var(--font-family);font-size:13px;">
+                  <span style="color:var(--text-muted);">to</span>
+                  <input type="date" id="cgt-to" style="padding:8px 12px;background:var(--bg-primary);border:1px solid var(--border-color);color:var(--text-primary);border-radius:10px;font-family:var(--font-family);font-size:13px;">
+                </div>
+              </div>
+              <button class="btn-primary" onclick="fetchCGT()" style="padding:10px 20px;font-size:13px;">Calculate</button>
+            </div>
+
+            <!-- Summary cards -->
+            <div class="metrics-grid" style="grid-template-columns: repeat(4, 1fr);padding:0 24px 20px;" id="cgt-summary-cards">
+              <div class="metric-card card">
+                <div class="metric-title">Total Capital Gains</div>
+                <div class="metric-value" id="cgt-total-gain">$0.00</div>
+              </div>
+              <div class="metric-card card">
+                <div class="metric-title">Losses Applied</div>
+                <div class="metric-value" id="cgt-losses" style="color:var(--color-danger);">$0.00</div>
+              </div>
+              <div class="metric-card card">
+                <div class="metric-title">CGT Discount 50%</div>
+                <div class="metric-value" id="cgt-discount" style="color:var(--color-success);">$0.00</div>
+              </div>
+              <div class="metric-card card">
+                <div class="metric-title">Net Capital Gain</div>
+                <div class="metric-value" id="cgt-net-gain">$0.00</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="table-header-custom">
+              <h2 class="table-title">Disposal Details</h2>
+              <span class="table-badge" id="cgt-count-badge">0 disposals</span>
+            </div>
+            <div class="table-responsive">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Ticker</th>
+                    <th>Units</th>
+                    <th>Proceeds (AUD)</th>
+                    <th>Cost Base (AUD)</th>
+                    <th>Gain/Loss</th>
+                    <th>Held >12m</th>
+                    <th>Discount Applied</th>
+                  </tr>
+                </thead>
+                <tbody id="cgt-table-body">
+                  <tr><td colspan="8" style="text-align:center;color:var(--text-secondary);padding:32px;">Select a financial year and click Calculate.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </section>
 
       </div>
     </main>
+
+    <!-- History Slideout Panel -->
+    <div class="history-slideout" id="history-slideout">
+      <div class="history-header">
+        <h3 id="history-title">Cash History</h3>
+        <button class="modal-close" onclick="toggleHistory()">✕</button>
+      </div>
+      <div class="history-body">
+        <table id="snapshots-table">
+          <thead>
+            <tr><th>Date</th><th id="history-col-header">Balance</th></tr>
+          </thead>
+          <tbody id="snapshots-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
   </div>
 
   <!-- Add Transaction Modal -->
@@ -363,9 +502,10 @@
           </div>
           <div class="form-group">
             <label for="f-action">Action</label>
-            <select id="f-action">
+            <select id="f-action" onchange="onActionChange()">
               <option value="buy">Buy</option>
               <option value="sell">Sell</option>
+              <option value="split">Stock Split</option>
             </select>
           </div>
           <div class="form-group">
@@ -387,36 +527,6 @@
         <div class="modal-footer">
           <button type="button" class="btn-secondary" onclick="closeAddModal()">Cancel</button>
           <button type="submit" class="btn-primary">Add Transaction</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- Update Cash/Super Snapshot Modal -->
-  <div class="modal-overlay" id="snapshot-modal">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h3 class="modal-title" id="snapshot-modal-title">Update Balance</h3>
-        <button class="modal-close" onclick="closeSnapshotModal()">✕</button>
-      </div>
-      <form id="snapshot-form" onsubmit="submitSnapshot(event)">
-        <input type="hidden" id="snapshot-type" value="cash">
-        <div class="form-grid">
-          <div class="form-group">
-            <label for="snapshot-date">Date (1st of month)</label>
-            <input type="date" id="snapshot-date" required>
-          </div>
-          <div class="form-group">
-            <label for="snapshot-amount">Balance (AUD)</label>
-            <input type="number" step="0.01" id="snapshot-amount" placeholder="0.00" required>
-          </div>
-        </div>
-        <div class="currency-disclaimer">
-          Enter the <strong>end-of-month</strong> balance as of the 1st. This will update the net worth calculation across all charts.
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn-secondary" onclick="closeSnapshotModal()">Cancel</button>
-          <button type="submit" class="btn-primary">Save Balance</button>
         </div>
       </form>
     </div>
