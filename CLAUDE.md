@@ -9,11 +9,11 @@ Personal portfolio & net worth tracking dashboard. Flask backend, vanilla JS fro
 pip install -r requirements.txt
 
 # Create data files from templates (first time only)
-cp transactions.example.json transactions.json
-cp cash_accounts.example.json cash_accounts.json
-cp super_holdings.example.json super_holdings.json
-cp snapshots.example.json snapshots.json
-cp country_overrides.example.json country_overrides.json
+cp data/transactions.example.json transactions.json
+cp data/cash_accounts.example.json cash_accounts.json
+cp data/super_holdings.example.json super_holdings.json
+cp data/snapshots.example.json snapshots.json
+cp data/country_overrides.example.json country_overrides.json
 
 # Run the app
 python app.py  # port 5050, debug mode
@@ -119,7 +119,7 @@ Set `DATA_DIR` to a mounted volume to persist financial data outside the contain
 ### Build and run
 
 ```bash
-docker build -t worthly:latest .
+docker build -t worthly:latest -f deploy/Dockerfile .
 docker run -d -p 5050:5050 \
   -v $(pwd)/data:/app/data \
   -e DATA_DIR=/app/data \
@@ -131,7 +131,7 @@ On first run, the entrypoint copies `.example.json` templates into `$DATA_DIR` i
 
 ### k3s Deployment
 
-See `k3s-deploy.yaml` for a reference manifest with PVC, Deployment (Recreate strategy), Service, and Traefik Ingress.
+See `deploy/k3s/k3s-deploy.yaml` for a reference manifest with PVC, Deployment (Recreate strategy), Service, and Traefik Ingress.
 
 Key points:
 - `strategy: Recreate` — avoids two pods hitting the same SQLite file
