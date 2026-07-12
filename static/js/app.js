@@ -985,6 +985,8 @@ async function fetchSnapshotsTable(type) {
 
 function onCgtFYChange() {
   const fyVal = document.getElementById('cgt-fy-select').value;
+  const fyText = document.getElementById('cgt-fy-select').selectedOptions[0].text.split(' ')[0];
+  document.getElementById('cgt-fy-label').textContent = fyText;
   const [from, to] = fyVal.split('|');
   document.getElementById('cgt-from').value = from;
   document.getElementById('cgt-to').value = to;
@@ -1001,6 +1003,13 @@ async function fetchCGT() {
   try {
     const res = await fetch(`/api/cgt?${params}`);
     const data = await res.json();
+
+    const fyLabel = document.getElementById('cgt-fy-label');
+    if (data.from && data.to) {
+      const fromYear = data.from.substring(0, 4);
+      const toYear = data.to.substring(0, 4);
+      fyLabel.textContent = `FY${toYear}`;
+    }
 
     document.getElementById('cgt-total-gain').textContent = fmtCurrency(data.total_gain);
     document.getElementById('cgt-losses').textContent = '-' + fmtCurrency(data.losses_applied);
