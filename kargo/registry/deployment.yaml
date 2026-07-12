@@ -1,0 +1,81 @@
+---
+# Local Docker registry for k3s — used by Kargo to discover local images.
+# Accessible within the cluster at registry.registry:5000 (HTTPS)
+# Exposed externally via Traefik at registry.worthly.internal
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: registry
+  labels:
+    app: registry
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_HTTP_TLS_CERTIFICATE
+              value: /certs/registry.crt
+            - name: REGISTRY_HTTP_TLS_KEY
+              value: /certs/registry.key
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+      volumes:
+        - name: data
+          hostPath:
+            path: /home/obiwan/k8s_data/registry
+            type: DirectoryOrCreate
+        - name: certs
+          hostPath:
+            path: /home/obiwan/k8s_data/registry-certs
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: registry
+spec:
+  selector:
+    app: registry
+  ports:
+    - port: 5000
+      targetPort: 5000
+  type: ClusterIP
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: registry
+  namespace: registry
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      match: Host(`registry.worthly.internal`)
+      services:
+        - name: registry
+          port: 5000

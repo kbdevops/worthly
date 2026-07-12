@@ -1,0 +1,27 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: worthly-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  destination:
+    namespace: worthly
+    server: https://kubernetes.default.svc
+  source:
+    path: base/worthly-prod
+    repoURL: https://github.com/kbdevops/homelab-k8s
+    targetRevision: main
+    kustomize:
+      images:
+        # Kargo's argocd-update step updates this image tag
+        - ghcr.io/kbdevops/worthly:latest
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

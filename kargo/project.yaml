@@ -1,0 +1,13 @@
+---
+# Kargo Project — marks the 'kargo' namespace as a Kargo project.
+# The namespace already has the label kargo.akuity.io/project: "true"
+# from namespace.yaml. This Project resource is the internal representation.
+#
+# Promotion policy is determined by Stage requestedFreight sources:
+#   - dev: sources.direct=true → auto-promotes from warehouse
+#   - prod: sources.stages=[dev] → manual promotion from dev
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Project
+metadata:
+  name: worthly
+  namespace: kargo

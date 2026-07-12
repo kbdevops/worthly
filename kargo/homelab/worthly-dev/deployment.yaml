@@ -1,0 +1,42 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worthly
+  labels:
+    app: worthly
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: worthly
+  template:
+    metadata:
+      labels:
+        app: worthly
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: worthly
+          image: ghcr.io/kbdevops/worthly:latest  # Tag managed by Kargo
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5050
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: DATA_DIR
+              value: "/app/data"
+            - name: TZ
+              value: "Australia/Melbourne"
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          hostPath:
+            path: /home/obiwan/k8s_data/worthly-dev
+            type: DirectoryOrCreate

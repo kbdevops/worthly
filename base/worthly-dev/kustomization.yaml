@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # Add whatever manifests you have here (deployment.yaml, service.yaml, etc.)
+  # For now, even an empty or minimal kustomization will let it parse.
+  - deployment.yaml 
+
+images:
+  - name: registry.registry:5000/worthly
+    newTag: temporary-placeholder

@@ -1,0 +1,13 @@
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: worthly
+  namespace: kargo
+spec:
+  subscriptions:
+    - image:
+        repoURL: registry.registry:5000/worthly
+        insecure: true
+        discoveryLimit: 20
+        imageSelectionStrategy: NewestBuild
