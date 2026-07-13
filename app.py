@@ -486,15 +486,44 @@ def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
             errors.append(str(e))
             print(f"[sync] Failed to fetch {symbol} {f_start.date()} -> {f_end.date()}: {e}")
 
-    # Mark range as cached if no error occurred
-    if not errors and (any_rows_fetched or row is not None or ranges_to_fetch):
-        all_from = min([r[0] for r in ranges_to_fetch] + ([pd.Timestamp(row[0])] if row else []))
-        all_to = max([r[1] for r in ranges_to_fetch] + ([pd.Timestamp(row[1])] if row else []))
-        conn.execute(
-            "INSERT OR REPLACE INTO sync_log (symbol, last_synced, cached_from, cached_to) "
-            "VALUES (?, ?, ?, ?)",
-            (symbol, now.isoformat(), all_from.strftime("%Y-%m-%d"), all_to.strftime("%Y-%m-%d")),
-        )
+    # Fetch today's intraday price so we have live data even before market close.
+    # yfinance daily history() excludes the incomplete current day; intraday 1m
+    # data includes it as soon as the first trade prints.
+    try:
+        intraday = yf.Ticker(symbol).history(period="1d", interval="1m")
+        if not intraday.empty:
+            intraday.index = intraday.index.tz_localize(None)
+            latest = intraday.iloc[-1]
+            latest_date = latest.name.strftime("%Y-%m-%d")
+            latest_close = float(latest["Close"])
+            # Only insert if this date is not already covered by daily history
+            existing = conn.execute(
+                "SELECT 1 FROM prices WHERE symbol = ? AND date = ?",
+                (symbol, latest_date),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
+                    (symbol, latest_date, latest_close),
+                )
+                any_rows_fetched = True
+    except Exception as e:
+        print(f"[sync] Failed to fetch intraday for {symbol}: {e}")
+
+    # Update sync_log using the ACTUAL date range present in the prices table,
+    # not the requested range.  This prevents cached_to from being advanced to
+    # today when no data was actually stored (e.g. daily history was empty and
+    # intraday also failed).
+    if not errors:
+        actual_range = conn.execute(
+            "SELECT MIN(date), MAX(date) FROM prices WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        if actual_range and actual_range[0] is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_log (symbol, last_synced, cached_from, cached_to) "
+                "VALUES (?, ?, ?, ?)",
+                (symbol, now.isoformat(), actual_range[0], actual_range[1]),
+            )
     conn.commit()
 
     if not ranges_to_fetch:
