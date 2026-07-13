@@ -1,43 +1,60 @@
 # Worthly — Net Worth & Portfolio Dashboard
 
-A personal net worth and portfolio tracking dashboard with multi-currency support (AUD/USD), real-time Yahoo Finance prices, and Australian CGT calculations.
+Personal net worth and portfolio tracking dashboard with multi-currency support (AUD/USD), real-time Yahoo Finance prices, and Australian CGT calculations.
 
-Built with Flask + vanilla JS + Chart.js. Deployable on k3s.
+Built with Flask + React (Vite + TypeScript) + SQLite. All data stored in a single `prices.db` file.
 
 **Key features:**
-- **Holistic net worth** — portfolio + cash + super + country allocation in one dashboard
+- Holistic net worth — portfolio + cash + super + country allocation
 - Multi-currency (AUD base, USD holdings auto-converted at historical FX rates)
-- **5 tabs:** Dashboard, Holdings (rich cards with logos & industry), Transactions (ledger with per-trade P&L), Tax (Australian CGT calculator), Data Sync
-- Transaction ingestion from Excel, CSV, or manual entry
-- Yahoo Finance price cache with 15-min cooldown
-- Per-holding daily change, company metadata (sector/industry/logos)
+- 5 tabs: Dashboard, Holdings, Tax (Australian CGT), Milestones, Data Sync
+- Customisable dashboard — time range, show/hide widgets, drag-to-reorder, configurable stat cards, 5 themes
+- Transactions live inside Holdings — click any holding for full trade history, per-lot gain/loss, add/delete
+- Milestones tab — goals with live metric tracking (portfolio, net worth, cash, super, return) and achievements log
+- All-time portfolio high tracked automatically, available as a dashboard stat card
+- Yahoo Finance price cache with background auto-sync after market close
+- Per-holding daily change, company metadata (sector/industry/logo)
 
 ## Quick Start
 
 ```bash
+# Backend
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp transactions.example.json transactions.json
-cp cash_accounts.example.json cash_accounts.json
-cp super_holdings.example.json super_holdings.json
-cp snapshots.example.json snapshots.json
-cp country_overrides.example.json country_overrides.json
-python app.py
+python app.py  # runs on port 5050
 ```
 
-Open `http://localhost:5050` — click "Sync All" on the Data Sync tab to populate prices and metadata.
+```bash
+# Frontend (dev)
+cd frontend && npm install && npm run dev  # runs on port 5173, proxies /api → 5050
+```
 
-## Docker / k3s
+Open `http://localhost:5173` in dev mode, or `http://localhost:5050` for the production build.
+
+Click **Sync Prices** on the Data Sync tab to populate prices and metadata on first run.
+
+## Production build
 
 ```bash
-docker build -t worthly .
+cd frontend && npm run build
+python app.py  # serves built React from frontend/dist/
+```
+
+Open `http://localhost:5050`.
+
+## Docker
+
+```bash
+docker build -t worthly -f deploy/Dockerfile .
 docker run -d -p 5050:5050 \
-  -v $(pwd)/transactions.json:/app/transactions.json \
   -v $(pwd)/prices.db:/app/prices.db \
+  -e DATA_DIR=/app \
   --name worthly worthly
 ```
 
-Or `kubectl apply -f k3s-deploy.yaml` with a PersistentVolumeClaim for data persistence.
+Mount `prices.db` to persist all data across container restarts.
 
-## Documentation
+## Architecture
 
-- **[CLAUDE.md](CLAUDE.md)** — Full architecture, API reference, data schemas, deployment guide (for humans and AI agents)
+See [CLAUDE.md](CLAUDE.md) for full API reference, data schemas, and deployment details.
+

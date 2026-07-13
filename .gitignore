@@ -1,15 +1,6 @@
-# Sensitive financial data (use template files to set up)
-transactions.json
-cash_accounts.json
-super_holdings.json
-snapshots.json
-country_overrides.json
-
-# Price cache (rebuilt from yfinance on deploy)
+# SQLite database (all data stored here)
 prices.db
-
-# Holding metadata cache (regenerated on sync)
-holding_meta.json
+*.db-journal
 
 # Raw import files
 *.xlsx
@@ -19,6 +10,12 @@ holding_meta.json
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+*.egg-info/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/node_modules/
 
 # macOS
 .DS_Store

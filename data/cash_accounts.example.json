@@ -1,4 +1,0 @@
-[
-  {"institution": "Example Bank", "type": "Savings Account", "name": "High Interest Saver", "balance": 50000.00, "country": "AU"},
-  {"institution": "Example Bank", "type": "Cheque Account", "name": "Everyday Account", "balance": 2500.00, "country": "AU"}
-]

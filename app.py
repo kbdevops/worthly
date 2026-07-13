@@ -1,31 +1,24 @@
 """
-Net Worth Tracker - Production Ready
-------------------------------------
-Flask application with SQLite caching, multi-currency support (AUD to USD),
-and detailed portfolio analytics.
-
-Ingests transaction data from all_trades.csv on startup if transactions.json is missing.
-Caches historical closing prices and exchange rates from Yahoo Finance.
+Net Worth Tracker
+-----------------
+Flask application with SQLite backend, multi-currency support (AUD base),
+and detailed portfolio analytics. All data stored in prices.db.
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 import yfinance as yf
 import pandas as pd
 import json
 import os
 import sqlite3
 from datetime import datetime, date, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
-DATA_FILE = os.path.join(DATA_DIR, "transactions.json")
-SNAPSHOT_FILE = os.path.join(DATA_DIR, "snapshots.json")
-CASH_ACCOUNTS_FILE = os.path.join(DATA_DIR, "cash_accounts.json")
-SUPER_HOLDINGS_FILE = os.path.join(DATA_DIR, "super_holdings.json")
-COUNTRY_OVERRIDES_FILE = os.path.join(DATA_DIR, "country_overrides.json")
-HOLDING_META_FILE = os.path.join(DATA_DIR, "holding_meta.json")
+FRONTEND_DIST = os.path.join(BASE_DIR, "frontend", "dist")
 DB_FILE = os.path.join(DATA_DIR, "prices.db")
 CSV_FILE = os.path.join(DATA_DIR, "all_trades.csv")
 EXCEL_FILE = os.path.join(DATA_DIR, "AllTradesReport.xlsx")
@@ -66,6 +59,94 @@ def db():
             cash REAL NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            units REAL NOT NULL,
+            price REAL NOT NULL,
+            currency TEXT NOT NULL,
+            brokerage REAL NOT NULL DEFAULT 0,
+            brokerage_currency TEXT NOT NULL DEFAULT 'AUD',
+            exch_rate REAL NOT NULL DEFAULT 1.0,
+            value REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cash_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            institution TEXT,
+            type TEXT,
+            name TEXT,
+            balance REAL NOT NULL DEFAULT 0,
+            country TEXT NOT NULL DEFAULT 'AU'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS super_holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            class TEXT,
+            allocation_pct REAL NOT NULL,
+            country TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS country_overrides (
+            symbol TEXT PRIMARY KEY,
+            country TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS holding_meta (
+            symbol TEXT PRIMARY KEY,
+            sector TEXT,
+            industry TEXT,
+            long_name TEXT,
+            website TEXT,
+            logo_url TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS milestones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT,
+            category TEXT NOT NULL,
+            value REAL,
+            type TEXT DEFAULT 'achievement',
+            target_value REAL,
+            current_value REAL,
+            is_achieved INTEGER DEFAULT 0,
+            linked_metric TEXT,
+            achieved_date TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS records (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+    # Migrate existing milestones table
+    for col, defn in [
+        ("type", "TEXT DEFAULT 'achievement'"),
+        ("target_value", "REAL"),
+        ("current_value", "REAL"),
+        ("is_achieved", "INTEGER DEFAULT 0"),
+        ("linked_metric", "TEXT"),
+        ("achieved_date", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} {defn}")
+        except:
+            pass
     conn.commit()
     return conn
 
@@ -275,72 +356,114 @@ def ingest_csv_to_json():
     return transactions
 
 def load_transactions():
-    """Load transactions. Prioritizes Excel, then CSV, then existing JSON."""
+    """Load transactions from DB. Re-ingests from Excel/CSV if source file is newer than JSON marker."""
     if os.path.exists(EXCEL_FILE):
         if not os.path.exists(DATA_FILE) or os.path.getmtime(EXCEL_FILE) > os.path.getmtime(DATA_FILE):
-            return ingest_excel_to_json()
-            
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE) as f:
-                txns = json.load(f)
-                if txns:
-                    return txns
-        except Exception:
-            pass
-            
+            txns = ingest_excel_to_json()
+            save_transactions(txns)
+            return txns
+
     if os.path.exists(CSV_FILE):
         if not os.path.exists(DATA_FILE) or os.path.getmtime(CSV_FILE) > os.path.getmtime(DATA_FILE):
-            return ingest_csv_to_json()
-            
-    return []
+            txns = ingest_csv_to_json()
+            save_transactions(txns)
+            return txns
+
+    conn = db()
+    rows = conn.execute(
+        "SELECT date, exchange, ticker, name, action, units, price, currency, "
+        "brokerage, brokerage_currency, exch_rate, value FROM transactions ORDER BY date, id"
+    ).fetchall()
+    conn.close()
+    cols = ["date", "exchange", "ticker", "name", "action", "units", "price",
+            "currency", "brokerage", "brokerage_currency", "exch_rate", "value"]
+    return [dict(zip(cols, row)) for row in rows]
 
 def save_transactions(txns):
-    """Save transactions to transactions.json."""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(txns, f, indent=2)
+    """Save transactions to DB (full replace, sorted by date)."""
+    txns_sorted = sorted(txns, key=lambda x: x.get("date", ""))
+    cols = ("date", "exchange", "ticker", "name", "action", "units", "price",
+            "currency", "brokerage", "brokerage_currency", "exch_rate", "value")
+    conn = db()
+    conn.execute("DELETE FROM transactions")
+    conn.executemany(
+        f"INSERT INTO transactions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+        [[t.get(c, 0 if c in ("units","price","brokerage","exch_rate","value") else "") for c in cols] for t in txns_sorted]
+    )
+    conn.commit()
+    conn.close()
 
 # ─── Cash Accounts, Super Holdings, Country Overrides ───────
 
 def load_cash_accounts():
-    if not os.path.exists(CASH_ACCOUNTS_FILE):
-        return []
-    with open(CASH_ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    conn = db()
+    rows = conn.execute(
+        "SELECT institution, type, name, balance, country FROM cash_accounts ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return [{"institution": r[0], "type": r[1], "name": r[2], "balance": r[3], "country": r[4]} for r in rows]
 
 def save_cash_accounts(accounts):
-    with open(CASH_ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(accounts, f, indent=2)
+    conn = db()
+    conn.execute("DELETE FROM cash_accounts")
+    conn.executemany(
+        "INSERT INTO cash_accounts (institution, type, name, balance, country) VALUES (?,?,?,?,?)",
+        [(a.get("institution",""), a.get("type",""), a.get("name",""), a.get("balance",0), a.get("country","AU")) for a in accounts]
+    )
+    conn.commit()
+    conn.close()
 
 def load_super_holdings():
-    if not os.path.exists(SUPER_HOLDINGS_FILE):
-        return []
-    with open(SUPER_HOLDINGS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    conn = db()
+    rows = conn.execute(
+        "SELECT name, class, allocation_pct, country FROM super_holdings ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return [{"name": r[0], "class": r[1], "allocation_pct": r[2], "country": r[3]} for r in rows]
 
 def save_super_holdings(holdings):
-    with open(SUPER_HOLDINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(holdings, f, indent=2)
+    conn = db()
+    conn.execute("DELETE FROM super_holdings")
+    conn.executemany(
+        "INSERT INTO super_holdings (name, class, allocation_pct, country) VALUES (?,?,?,?)",
+        [(h.get("name",""), h.get("class",""), h.get("allocation_pct",0), h.get("country","")) for h in holdings]
+    )
+    conn.commit()
+    conn.close()
 
 def load_country_overrides():
-    if not os.path.exists(COUNTRY_OVERRIDES_FILE):
-        return {}
-    with open(COUNTRY_OVERRIDES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    conn = db()
+    rows = conn.execute("SELECT symbol, country FROM country_overrides").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
 
 def save_country_overrides(overrides):
-    with open(COUNTRY_OVERRIDES_FILE, "w", encoding="utf-8") as f:
-        json.dump(overrides, f, indent=2)
+    conn = db()
+    conn.execute("DELETE FROM country_overrides")
+    conn.executemany(
+        "INSERT INTO country_overrides (symbol, country) VALUES (?,?)",
+        list(overrides.items())
+    )
+    conn.commit()
+    conn.close()
 
 def load_holding_meta():
-    if not os.path.exists(HOLDING_META_FILE):
-        return {}
-    with open(HOLDING_META_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    conn = db()
+    rows = conn.execute(
+        "SELECT symbol, sector, industry, long_name, website, logo_url FROM holding_meta"
+    ).fetchall()
+    conn.close()
+    return {r[0]: {"sector": r[1], "industry": r[2], "longName": r[3], "website": r[4], "logo_url": r[5]} for r in rows}
 
 def save_holding_meta(meta):
-    with open(HOLDING_META_FILE, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+    conn = db()
+    conn.execute("DELETE FROM holding_meta")
+    conn.executemany(
+        "INSERT INTO holding_meta (symbol, sector, industry, long_name, website, logo_url) VALUES (?,?,?,?,?,?)",
+        [(sym, m.get("sector",""), m.get("industry",""), m.get("longName",""), m.get("website",""), m.get("logo_url","")) for sym, m in meta.items()]
+    )
+    conn.commit()
+    conn.close()
 
 def fetch_holding_meta(ticker, exchange):
     """Fetch sector, industry, logo from yfinance for a ticker. Returns dict or None."""
@@ -393,46 +516,31 @@ def get_total_cash():
 
 # ─── End Config Helpers ────────────────────────────────────
 
-def save_snapshots_to_json():
-    """Export all snapshots from DB to snapshots.json."""
-    conn = db()
-    rows = conn.execute("SELECT date, super, cash FROM snapshots ORDER BY date").fetchall()
-    conn.close()
-    data = [{"date": r[0], "super": r[1], "cash": r[2]} for r in rows]
-    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
 def seed_historical_snapshots():
-    """Seed the snapshots table from snapshots.json (git-tracked source of truth)."""
-    if not os.path.exists(SNAPSHOT_FILE):
-        # Generate initial snapshots.json from hardcoded historical data
-        _create_initial_snapshots_json()
-
-    with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
+    """Seed the snapshots table from snapshots.json on first run (when table is empty)."""
     conn = db()
-    conn.execute("DELETE FROM snapshots")  # Replace with JSON source of truth
-    for entry in data:
-        conn.execute(
-            "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
-            (entry["date"], entry["super"], entry["cash"]),
-        )
-    conn.commit()
+    count = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     conn.close()
-    print(f"[backend] Loaded {len(data)} cash/super snapshots from snapshots.json.")
+    if count > 0:
+        return
 
-def _create_initial_snapshots_json():
-    """One-time: create snapshots.json from example data (placeholder values only)."""
-    data = [
-        ("2024-01-01", 100000, 50000),
-        ("2024-02-01", 102000, 52000),
-        ("2024-03-01", 104000, 54000),
-    ]
-    json_data = [{"date": d, "super": s, "cash": c} for d, s, c in data]
-    with open(SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-        json.dump(json_data, f, indent=2)
-    print(f"[backend] Created snapshots.json with {len(json_data)} sample entries.")
+    if not os.path.exists(SNAPSHOT_FILE):
+        return
+
+    try:
+        with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        conn = db()
+        for entry in data:
+            conn.execute(
+                "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
+                (entry["date"], entry["super"], entry["cash"]),
+            )
+        conn.commit()
+        conn.close()
+        print(f"[backend] Loaded {len(data)} cash/super snapshots from snapshots.json.")
+    except Exception as e:
+        print(f"[backend] Failed to seed snapshots: {e}")
 
 def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
     """Fetch and cache only missing historical daily close prices for symbol.
@@ -532,10 +640,15 @@ def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
         return False, "; ".join(errors)
     return True, "Synced successfully"
 
-@app.route("/")
-def index():
-    """Render dashboard shell."""
-    return render_template("index.html")
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve_spa(path):
+    if path.startswith("api/"):
+        return jsonify({"error": "not found"}), 404
+    full = os.path.join(FRONTEND_DIST, path)
+    if path and os.path.exists(full):
+        return send_from_directory(FRONTEND_DIST, path)
+    return send_from_directory(FRONTEND_DIST, "index.html")
 
 @app.route("/api/transactions", methods=["GET"])
 def get_transactions():
@@ -660,48 +773,64 @@ def add_transaction():
 
 @app.route("/api/transactions/<int:idx>", methods=["DELETE"])
 def delete_transaction(idx):
-    """Delete a transaction by index."""
-    txns = load_transactions()
-    if 0 <= idx < len(txns):
-        txns.pop(idx)
-        save_transactions(txns)
+    """Delete a transaction by its position in the date-ordered list."""
+    conn = db()
+    row = conn.execute(
+        "SELECT id FROM transactions ORDER BY date, id LIMIT 1 OFFSET ?", (idx,)
+    ).fetchone()
+    if row:
+        conn.execute("DELETE FROM transactions WHERE id = ?", (row[0],))
+        conn.commit()
+        conn.close()
         return jsonify({"ok": True})
+    conn.close()
     return jsonify({"ok": False, "error": "Index out of range"}), 404
+
+def _run_sync(force=False):
+    """Core sync logic — fetch missing prices and metadata for all holdings."""
+    txns = load_transactions()
+    if not txns:
+        return []
+
+    df = pd.DataFrame(txns)
+    df["date"] = pd.to_datetime(df["date"])
+    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+
+    end = pd.Timestamp(date.today())
+    # Roll back to Friday if min transaction date falls on a weekend
+    min_date = df["date"].min()
+    if min_date.weekday() == 5:   # Saturday
+        min_date -= timedelta(days=1)
+    elif min_date.weekday() == 6: # Sunday
+        min_date -= timedelta(days=2)
+
+    conn = db()
+    results = []
+
+    ok_fx, msg_fx = sync_symbol(conn, "AUDUSD=X", min_date, end, force=force)
+    results.append({"symbol": "AUDUSD=X", "ok": ok_fx, "message": msg_fx})
+
+    for sym, grp in df.groupby("sym"):
+        sym_start = grp["date"].min()
+        if sym_start.weekday() == 5:
+            sym_start -= timedelta(days=1)
+        elif sym_start.weekday() == 6:
+            sym_start -= timedelta(days=2)
+        ok, msg = sync_symbol(conn, sym, sym_start, end, force=force)
+        results.append({"symbol": sym, "ok": ok, "message": msg})
+        fetch_holding_meta(grp.iloc[0]["ticker"], grp.iloc[0]["exchange"])
+
+    conn.close()
+    return results
+
 
 @app.route("/api/sync", methods=["POST"])
 def sync_data():
     """Trigger update of cached price data and exchange rates."""
-    txns = load_transactions()
-    if not txns:
-        return jsonify({"results": [], "message": "No transactions to sync"})
-
     force = request.args.get("force", "").lower() == "true"
-    
-    df = pd.DataFrame(txns)
-    df["date"] = pd.to_datetime(df["date"])
-    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
-    
-    # We want data up to today
-    end = pd.Timestamp(date.today())
-    min_date = df["date"].min()
-    
-    conn = db()
-    results = []
-    
-    # Sync exchange rates
-    ok_fx, msg_fx = sync_symbol(conn, "AUDUSD=X", min_date, end, force=force)
-    results.append({"symbol": "AUDUSD=X", "ok": ok_fx, "message": msg_fx})
-    
-    # Sync stock symbols and fetch metadata
-    for sym, grp in df.groupby("sym"):
-        ok, msg = sync_symbol(conn, sym, grp["date"].min(), end, force=force)
-        results.append({"symbol": sym, "ok": ok, "message": msg})
-        # Fetch holding metadata (logo, sector, industry) — non-blocking, best-effort
-        ticker = grp.iloc[0]["ticker"]
-        exchange = grp.iloc[0]["exchange"]
-        fetch_holding_meta(ticker, exchange)
-
-    conn.close()
+    results = _run_sync(force=force)
+    if not results:
+        return jsonify({"results": [], "message": "No transactions to sync"})
     return jsonify({"results": results, "at": datetime.now().isoformat()})
 
 @app.route("/api/sync-status", methods=["GET"])
@@ -992,7 +1121,9 @@ def get_stats():
             "worst_performer": "-",
             "worst_performer_pct": 0.0,
             "usd_allocation_pct": 0.0,
-            "audusd_rate": 0.65
+            "audusd_rate": 0.65,
+            "all_time_high": 0.0,
+            "all_time_high_date": None,
         })
 
     # Fetch latest exchange rate and holdings
@@ -1019,7 +1150,9 @@ def get_stats():
             "worst_performer": "-",
             "worst_performer_pct": 0.0,
             "usd_allocation_pct": 0.0,
-            "audusd_rate": audusd
+            "audusd_rate": audusd,
+            "all_time_high": 0.0,
+            "all_time_high_date": None,
         })
 
     total_value = sum(h["value_aud"] for h in holdings)
@@ -1034,6 +1167,21 @@ def get_stats():
     best_h = max(holdings, key=lambda x: x["return_pct"])
     worst_h = min(holdings, key=lambda x: x["return_pct"])
 
+    # Track all-time portfolio high
+    today = date.today().isoformat()
+    conn2 = db()
+    row = conn2.execute("SELECT value, date FROM records WHERE key = 'portfolio_high'").fetchone()
+    if row is None or total_value > row[0]:
+        conn2.execute(
+            "INSERT OR REPLACE INTO records (key, value, date) VALUES ('portfolio_high', ?, ?)",
+            (round(total_value, 2), today)
+        )
+        conn2.commit()
+        ath_value, ath_date = round(total_value, 2), today
+    else:
+        ath_value, ath_date = round(row[0], 2), row[1]
+    conn2.close()
+
     return jsonify({
         "total_value": round(total_value, 2),
         "total_principal": round(total_cost, 2),
@@ -1044,7 +1192,9 @@ def get_stats():
         "worst_performer": f"{worst_h['ticker']} ({worst_h['return_pct']:+.1f}%)",
         "worst_performer_pct": round(worst_h["return_pct"], 2),
         "usd_allocation_pct": round(usd_allocation_pct, 2),
-        "audusd_rate": round(audusd, 4)
+        "audusd_rate": round(audusd, 4),
+        "all_time_high": ath_value,
+        "all_time_high_date": ath_date,
     })
 
 def _get_latest_portfolio_value():
@@ -1233,7 +1383,146 @@ def add_snapshot():
         )
         conn.commit()
         conn.close()
-        save_snapshots_to_json()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/milestones", methods=["GET"])
+def get_milestones():
+    """Return all milestones with live current values for linked metrics."""
+    # Get live metrics once
+    live = {}
+    try:
+        portfolio_val, active_val, passive_val = _get_latest_portfolio_value()
+        cash = get_total_cash()
+        conn2 = db()
+        today = date.today().isoformat()
+        row = conn2.execute("SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)).fetchone()
+        conn2.close()
+        super_val = row[0] if row else 0.0
+        holdings = get_portfolio()
+        stats_data = {}
+        if isinstance(holdings, list) and holdings:
+            total_cost = sum(h.get("cost_aud", 0) for h in holdings)
+            total_val = sum(h.get("value_aud", 0) for h in holdings)
+            stats_data["return_pct"] = round((total_val - total_cost) / total_cost * 100, 2) if total_cost else 0
+            stats_data["return_aud"] = round(total_val - total_cost, 2)
+        live = {
+            "portfolio": round(portfolio_val, 2),
+            "networth": round(portfolio_val + cash + super_val, 2),
+            "cash": round(cash, 2),
+            "super": round(super_val, 2),
+            "return_pct": stats_data.get("return_pct", 0),
+            "return_aud": stats_data.get("return_aud", 0),
+        }
+    except:
+        pass
+
+    conn = db()
+    rows = conn.execute(
+        "SELECT id, date, title, description, category, value, type, target_value, current_value, is_achieved, linked_metric, achieved_date FROM milestones ORDER BY date DESC"
+    ).fetchall()
+
+    results = []
+    for r in rows:
+        mtype = r[6] or "achievement"
+        linked = r[10]
+        current_val = r[8]
+        is_achieved = bool(r[9])
+        achieved_date = r[11]
+
+        # Override current_value from live data if linked
+        if mtype == "goal" and linked and linked in live:
+            current_val = live[linked]
+            # Auto-mark achieved
+            target = r[7]
+            if target and current_val >= target and not is_achieved:
+                is_achieved = True
+                achieved_date = date.today().isoformat()
+                conn.execute("UPDATE milestones SET is_achieved=1, achieved_date=?, current_value=? WHERE id=?",
+                             (achieved_date, current_val, r[0]))
+            elif not is_achieved:
+                conn.execute("UPDATE milestones SET current_value=? WHERE id=?", (current_val, r[0]))
+
+        results.append({
+            "id": r[0],
+            "date": r[1],
+            "title": r[2],
+            "description": r[3],
+            "category": r[4],
+            "value": r[5],
+            "type": mtype,
+            "target_value": r[7],
+            "current_value": current_val,
+            "is_achieved": is_achieved,
+            "linked_metric": linked,
+            "achieved_date": achieved_date,
+        })
+    conn.commit()
+    conn.close()
+    return jsonify(results)
+
+@app.route("/api/milestones", methods=["POST"])
+def add_milestone():
+    data = request.json
+    try:
+        conn = db()
+        mtype = data.get("type", "achievement")
+        linked = data.get("linked_metric")
+        is_achieved = False
+        achieved_date = None
+        current_val = data.get("current_value")
+        if mtype == "goal" and current_val is not None and data.get("target_value") is not None:
+            if current_val >= data["target_value"]:
+                is_achieved = True
+                achieved_date = date.today().isoformat()
+        conn.execute(
+            "INSERT INTO milestones (date, title, description, category, value, type, target_value, current_value, is_achieved, linked_metric, achieved_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (data["date"], data["title"], data.get("description", ""), data["category"],
+             data.get("value"), mtype, data.get("target_value"), current_val,
+             int(is_achieved), linked, achieved_date)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/milestones/<int:milestone_id>", methods=["PUT"])
+def update_milestone(milestone_id):
+    data = request.json
+    try:
+        conn = db()
+        mtype = data.get("type", "achievement")
+        linked = data.get("linked_metric")
+        is_achieved = data.get("is_achieved", False)
+        achieved_date = data.get("achieved_date")
+        current_val = data.get("current_value")
+        if mtype == "goal" and current_val is not None and data.get("target_value") is not None:
+            if current_val >= data["target_value"] and not is_achieved:
+                is_achieved = True
+                achieved_date = date.today().isoformat()
+        conn.execute(
+            "UPDATE milestones SET date=?,title=?,description=?,category=?,value=?,type=?,target_value=?,current_value=?,is_achieved=?,linked_metric=?,achieved_date=? WHERE id=?",
+            (data["date"], data["title"], data.get("description", ""), data["category"],
+             data.get("value"), mtype, data.get("target_value"), current_val,
+             int(is_achieved), linked, achieved_date, milestone_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/milestones/<int:milestone_id>", methods=["DELETE"])
+def delete_milestone(milestone_id):
+    """Delete a milestone by ID."""
+    try:
+        conn = db()
+        conn.execute("DELETE FROM milestones WHERE id = ?", (milestone_id,))
+        conn.commit()
+        conn.close()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -1556,9 +1845,25 @@ def get_monthly_change():
 
     return jsonify({"months": months, "change": changes, "change_pct": changes_pct})
 
-# Ingest CSV automatically on backend startup
-load_transactions()
+# On startup: seed snapshots if DB is empty, then start background price sync
 seed_historical_snapshots()
+
+# Background price sync — runs automatically after market close (UTC times)
+# ASX closes ~06:00 UTC, NYSE/NASDAQ closes ~21:00 UTC
+def _scheduled_sync():
+    print(f"[scheduler] Auto-sync triggered at {datetime.now().isoformat()}")
+    try:
+        results = _run_sync()
+        ok = sum(1 for r in results if r.get("ok"))
+        print(f"[scheduler] Sync complete: {ok}/{len(results)} symbols OK")
+    except Exception as e:
+        print(f"[scheduler] Sync failed: {e}")
+
+_scheduler = BackgroundScheduler()
+_scheduler.add_job(_scheduled_sync, "cron", hour=6, minute=15, id="asx_close")   # after ASX close
+_scheduler.add_job(_scheduled_sync, "cron", hour=21, minute=15, id="us_close")   # after NYSE/NASDAQ close
+_scheduler.start()
+print("[scheduler] Auto-sync scheduled: 06:15 UTC (ASX), 21:15 UTC (NYSE/NASDAQ)")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5050)
