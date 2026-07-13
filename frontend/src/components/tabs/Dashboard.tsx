@@ -254,7 +254,11 @@ export default function Dashboard() {
   }
 
   // ── Widget renderers ─────────────────────────────────────────────────────
-  const tooltipStyle = { contentStyle: { background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }, labelStyle: { color: '#94a3b8' } }
+  const tooltipStyle = {
+    contentStyle: { background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 },
+    labelStyle: { color: '#94a3b8' },
+    itemStyle: { color: '#e2e8f0' },
+  }
 
   const ranges: Range[] = ['1M', '3M', '6M', '1Y', 'All']
 
@@ -353,8 +357,8 @@ export default function Dashboard() {
         return (
           <div className={CARD} style={CARD_BG}>
             <p className="text-sm font-medium text-slate-300 mb-4">Holding Performance</p>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={perfData} layout="vertical">
+            <ResponsiveContainer width="100%" height={Math.max(220, perfData.length * 36)}>
+              <BarChart data={perfData} layout="vertical" margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                 <XAxis type="number" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => v + '%'} />
                 <YAxis type="category" dataKey="ticker" tick={{ fill: '#94a3b8', fontSize: 11 }} tickLine={false} axisLine={false} width={50} />
                 <Tooltip formatter={(v) => fmtPct(v as number)} {...tooltipStyle} />
