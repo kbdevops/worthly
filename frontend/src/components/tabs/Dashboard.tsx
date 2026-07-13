@@ -21,38 +21,6 @@ const CARD = 'rounded-xl p-5 border border-[var(--border)]'
 const CARD_BG = { background: 'var(--bg-card)' }
 const COLORS = ['#6366f1','#a855f7','#06b6d4','#10b981','#f59e0b','#ef4444','#3b82f6','#ec4899','#14b8a6','#f97316']
 
-// ── Recharts v3 custom axis tick ─────────────────────────────────────────────
-// In Recharts v3, passing a plain object to `tick={{ fill: ... }}` no longer
-// reliably sets the SVG `<text>` fill — labels fall back to black and disappear
-// on the dark themed cards. A React element with an explicit `fill` attribute
-// fixes the issue. `orientation`: 'bottom' (x-axis) or 'left' (y-axis).
-const fmtAxisK  = (v: number) => '$' + (v / 1000).toFixed(0) + 'k'
-const fmtAxisPct = (v: number) => v + '%'
-const fmtAxisId  = (v: unknown) => String(v)
-
-function AxisTick({ x = 0, y = 0, payload, formatter = fmtAxisId, orientation = 'bottom' }: {
-  x?: number; y?: number
-  payload?: { value?: any }
-  formatter?: (v: any) => string
-  orientation?: 'bottom' | 'left' | 'right' | 'top'
-}) {
-  const isLeft = orientation === 'left'
-  const label = formatter(payload?.value ?? 0)
-  return (
-    <text
-      x={x}
-      y={y}
-      textAnchor={isLeft ? 'end' : 'middle'}
-      fill={isLeft ? '#94a3b8' : '#64748b'}
-      fontSize={11}
-      dx={isLeft ? -8 : 0}
-      dy={isLeft ? 3 : 16}
-    >
-      {label}
-    </text>
-  )
-}
-
 // ── localStorage helpers ──────────────────────────────────────────────────────
 function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
   const [val, setVal] = useState<T>(() => {
@@ -321,8 +289,8 @@ export default function Dashboard() {
             </div>
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={nwData}>
-                <XAxis dataKey="date" tick={<AxisTick formatter={fmtAxisId} />} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                <YAxis tick={<AxisTick orientation="left" formatter={fmtAxisK} />} tickLine={false} axisLine={false} />
+                <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
                 <Tooltip formatter={(v) => fmtCurrency(v as number)} {...tooltipStyle} />
                 {NW_LINES.filter(l => activeLines.includes(l.key)).map(l => (
                   <Line key={l.key} type="monotone" dataKey={l.key} stroke={l.color} dot={false} strokeWidth={l.key === 'Net Worth' ? 2 : 1.5} />
@@ -354,8 +322,8 @@ export default function Dashboard() {
             <p className="text-sm font-medium text-slate-300 mb-4">Monthly Change</p>
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={mcData}>
-                <XAxis dataKey="month" tick={<AxisTick />} tickLine={false} axisLine={false} />
-                <YAxis tick={<AxisTick orientation="left" formatter={fmtAxisK} />} tickLine={false} axisLine={false} />
+                <XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
                 <Tooltip formatter={(v) => fmtCurrencySigned(v as number)} {...tooltipStyle} />
                 <Bar dataKey="change" radius={4}>
                   {mcData.map((d, i) => <Cell key={i} fill={d.change >= 0 ? '#10b981' : '#ef4444'} />)}
@@ -387,8 +355,8 @@ export default function Dashboard() {
             <p className="text-sm font-medium text-slate-300 mb-4">Holding Performance</p>
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={perfData} layout="vertical">
-                <XAxis type="number" tick={<AxisTick formatter={fmtAxisPct} />} tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="ticker" tick={<AxisTick orientation="left" formatter={fmtAxisId} />} tickLine={false} axisLine={false} width={50} />
+                <XAxis type="number" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => v + '%'} />
+                <YAxis type="category" dataKey="ticker" tick={{ fill: '#94a3b8', fontSize: 11 }} tickLine={false} axisLine={false} width={50} />
                 <Tooltip formatter={(v) => fmtPct(v as number)} {...tooltipStyle} />
                 <Bar dataKey="gain_pct" radius={4}>
                   {perfData.map((d, i) => <Cell key={i} fill={d.gain_pct >= 0 ? '#10b981' : '#ef4444'} />)}
