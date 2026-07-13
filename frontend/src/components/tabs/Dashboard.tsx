@@ -133,10 +133,11 @@ export default function Dashboard() {
   }, [])
 
   const [range, setRange] = useLocalStorage<Range>('dash_range', 'All')
-  type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super'
+  type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super' | 'Return'
   const NW_LINES: { key: NWLine; color: string }[] = [
     { key: 'Net Worth', color: '#6366f1' },
     { key: 'Portfolio', color: '#10b981' },
+    { key: 'Return',    color: '#f59e0b' },
     { key: 'Cash',      color: '#06b6d4' },
     { key: 'Super',     color: '#a855f7' },
   ]
@@ -164,6 +165,7 @@ export default function Dashboard() {
           date: d.slice(0, 10),
           'Net Worth': nw.net_worth[idx],
           Portfolio: nw.portfolio[idx],
+          Return: nw.return_val[idx],
           Cash: nw.cash[idx],
           Super: nw.super[idx],
         }
