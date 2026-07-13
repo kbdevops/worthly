@@ -1,18 +1,21 @@
-FROM python:3.11-slim
+FROM node:22-slim AS frontend
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
+FROM python:3.11-slim
 WORKDIR /app
 
-# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
 COPY . .
+COPY --from=frontend /app/frontend/dist ./frontend/dist
 
-# Copy entrypoint
-COPY deploy/entrypoint.sh .
-RUN chmod +x entrypoint.sh
+RUN chmod +x deploy/entrypoint.sh
 
 EXPOSE 5050
 
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["deploy/entrypoint.sh"]

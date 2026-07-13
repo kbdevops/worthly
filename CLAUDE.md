@@ -1,37 +1,38 @@
-# CLAUDE.md — NetWorth (Worthly)
+# CLAUDE.md — Worthly
 
-Personal portfolio & net worth tracking dashboard. Flask backend, vanilla JS frontend, SQLite price cache, multi-currency (AUD base, USD converted). Fetches historical prices from Yahoo Finance.
+Personal portfolio & net worth tracking dashboard. Flask backend, React + TypeScript + Vite frontend, single SQLite database (`prices.db`). Multi-currency (AUD base, USD converted). Fetches historical prices from Yahoo Finance.
 
 ## Quick Start
 
 ```bash
-# Setup
+# Backend
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Create data files from templates (first time only)
-cp data/transactions.example.json transactions.json
-cp data/cash_accounts.example.json cash_accounts.json
-cp data/super_holdings.example.json super_holdings.json
-cp data/snapshots.example.json snapshots.json
-cp data/country_overrides.example.json country_overrides.json
-
-# Run the app
 python app.py  # port 5050, debug mode
+
+# Frontend dev server (separate terminal)
+cd frontend && npm install && npm run dev  # port 5173, proxies /api → 5050
+
+# Production build
+cd frontend && npm run build  # outputs to frontend/dist/, served by Flask
 ```
 
 ## Architecture
 
-### Data files (created from .example.json templates)
+### Database (`prices.db`, auto-created, gitignored)
 
-| File | Purpose |
+Single SQLite file — all app data lives here. Tables:
+
+| Table | Purpose |
 |---|---|
-| `transactions.json` | Array of trade objects (buy/sell/split). Created from `.example.json` template. |
-| `cash_accounts.json` | Array of cash account objects with current balances. |
-| `super_holdings.json` | Array of superannuation fund allocation buckets. |
-| `snapshots.json` | Monthly cash+super snapshots for net worth timeline. |
-| `country_overrides.json` | Dict mapping yfinance symbols to country codes. |
-| `prices.db` | SQLite cache auto-created at runtime (in `.gitignore`). |
-| `holding_meta.json` | Auto-cached company metadata from yfinance — sector, industry, website. Deleted and regenerated on sync. |
+| `transactions` | All buy/sell/split trades |
+| `cash_accounts` | Cash account balances |
+| `super_holdings` | Superannuation fund allocations |
+| `country_overrides` | Manual symbol → country code mappings |
+| `holding_meta` | Cached company metadata (sector, industry, logo) |
+| `prices` | Daily close prices per symbol |
+| `sync_log` | Last sync time and date range per symbol |
+| `snapshots` | Monthly cash + super net worth snapshots |
 
 ### Transaction schema
 
@@ -42,13 +43,13 @@ python app.py  # port 5050, debug mode
   "ticker": "AAPL",
   "name": "Company or ETF name",
   "action": "buy|sell|split",
-  "units": float,
-  "price": float,
+  "units": 10.0,
+  "price": 150.0,
   "currency": "AUD|USD",
-  "brokerage": float,
+  "brokerage": 9.95,
   "brokerage_currency": "AUD|USD",
-  "exch_rate": float,
-  "value": float
+  "exch_rate": 0.65,
+  "value": 2000.0
 }
 ```
 
@@ -56,20 +57,28 @@ python app.py  # port 5050, debug mode
 
 ### Backend (`app.py`)
 
-**Static file serving:** Put files in `static/` — served automatically by Flask.
+Flask app. Serves the React SPA from `frontend/dist/` in production.
+
+**Key constants:**
+- `DB_FILE` — `$DATA_DIR/prices.db`
+- `DATA_DIR` — env var, defaults to app directory
+- `FRONTEND_DIST` — `frontend/dist/`
+- `CSV_FILE` / `EXCEL_FILE` — optional import sources for bulk transaction ingestion
+
+**On startup:** `seed_historical_snapshots()` runs if snapshots table is empty. APScheduler starts background price sync jobs.
 
 **Key endpoints:**
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/` | GET | Serves SPA shell (`templates/index.html`) |
+| `/` | GET | Serves React SPA (`frontend/dist/index.html`) |
 | `/api/transactions` | GET | All transactions enriched with current prices, gain/loss |
-| `/api/transactions` | POST | Add transaction (auto-calculates currency, FX rate, AUD value) |
+| `/api/transactions` | POST | Add transaction (auto-calculates FX rate, AUD value) |
 | `/api/transactions/<idx>` | DELETE | Delete transaction by array index |
 | `/api/portfolio` | GET | Current holdings with cost basis, value, P&L, daily change, metadata |
 | `/api/performance` | GET | Daily time series of portfolio value, principal, return |
 | `/api/stats` | GET | Aggregate stats (total value, return, best/worst performer) |
-| `/api/networth` | GET | Daily net worth = portfolio + cash + super + return |
+| `/api/networth` | GET | Daily net worth = portfolio + cash + super |
 | `/api/breakdown` | GET | Current cash/super/stocks_active/stocks_passive breakdown |
 | `/api/allocation` | GET | Country allocation across all asset types |
 | `/api/sync` | POST | Fetch/cache missing prices + metadata from yfinance. `?force=true` to bypass cooldown |
@@ -82,29 +91,41 @@ python app.py  # port 5050, debug mode
 
 **yfinance symbol mapping:** ASX → `.AX`, LSE → `.L`, TSX → `.TO`, US/NASDAQ/NYSE → no suffix.
 
-**FX handling:** AUD is base currency. `AUDUSD=X` is cached as a price series. USD stock prices are divided by the AUD/USD rate. Fallback rate = 0.65.
+**FX handling:** AUD is base currency. `AUDUSD=X` cached as a price series. USD stock prices divided by AUD/USD rate. Fallback rate = 0.65.
 
 **Portfolio cost basis:** Average cost accounting. Sells reduce cost proportionally. Splits add units without changing cost basis.
 
-**On startup:** `load_transactions()` checks Excel → JSON → CSV priority. `seed_historical_snapshots()` loads from `snapshots.json`.
+**Background sync (APScheduler):** Auto-syncs after market close — 06:15 UTC (ASX) and 21:15 UTC (NYSE/NASDAQ). 15-minute cooldown per symbol for manual syncs.
 
-### Frontend
+### Frontend (`frontend/`)
 
-Single-page app with 5 tabs:
-- **Dashboard** — Net worth timeline (Chart.js line), asset allocation (doughnut), monthly change (bar), per-holding performance (bar), country allocation (doughnut)
-- **Holdings** — Rich cards showing each position (price, daily change, value, cost, return, weight, industry). Cash + super cards with inline-edit accounts.
-- **Transactions** — Full ledger with filters (ticker, action, market). Per-transaction gain/loss. Add transaction modal.
-- **Tax** — Australian CGT calculator. Select financial year, see gains/losses, 50% discount for holdings >12 months, net capital gain.
-- **Data Sync** — Price cache status per symbol (Yahoo Finance + Google source indicators). Sync All button.
+React 19 + TypeScript + Vite 8. TanStack Query v5 for server state. Recharts for all charts. Tailwind CSS v3 (dark theme). Lucide React icons. @dnd-kit for drag-to-reorder.
 
-Active tab is persisted in `localStorage` across refreshes.
+**Key files:**
+- `src/components/tabs/Dashboard.tsx` — customisable dashboard (time range, show/hide, drag-reorder, stat card picker)
+- `src/components/tabs/Holdings.tsx` — position cards
+- `src/components/tabs/Transactions.tsx` — trade ledger
+- `src/components/tabs/Tax.tsx` — CGT calculator
+- `src/components/tabs/Sync.tsx` — price cache status
+- `src/hooks/useApi.ts` — TanStack Query hooks for all endpoints
+- `src/types/index.ts` — TypeScript interfaces matching API responses
+- `src/lib/utils.ts` — `fmtCurrency`, `fmtPct`, `fmtCurrencySigned`
 
-### Prices database (`prices.db`, auto-created, gitignored)
+**Vite dev proxy:** `/api` → `http://localhost:5050`
 
-Three tables:
-- `prices(symbol TEXT, date TEXT, close REAL, PRIMARY KEY(symbol, date))`
-- `sync_log(symbol TEXT PRIMARY KEY, last_synced TEXT, cached_from TEXT, cached_to TEXT)`
-- `snapshots(date TEXT PRIMARY KEY, super REAL, cash REAL)`
+**Dashboard customisation** (persisted in localStorage):
+- Time range picker: 1M / 3M / 6M / 1Y / All on the net worth chart
+- Line toggles: show/hide Net Worth / Portfolio / Cash / Super lines individually
+- Widget visibility: show/hide any of the 5 chart widgets
+- Widget order: drag to reorder via @dnd-kit
+- Stat cards: pick up to 4 from 8 available metrics
+
+**Active tab** persisted in `localStorage`.
+
+**TypeScript notes:**
+- Tooltip formatters must use `(v) => fn(v as number)` pattern (Recharts `ValueType`)
+- Type-only imports use `import type { Foo }` syntax (`verbatimModuleSyntax` enabled)
+- `best_performer` / `worst_performer` in Stats type are `{ ticker, gain_pct } | null`, not strings
 
 ## Docker / k3s Deployment
 
@@ -112,33 +133,28 @@ Three tables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATA_DIR` | (app directory) | Path where JSON data files + SQLite DB are stored |
-
-Set `DATA_DIR` to a mounted volume to persist financial data outside the container.
+| `DATA_DIR` | app directory | Path where `prices.db` is stored |
 
 ### Build and run
 
 ```bash
 docker build -t worthly:latest -f deploy/Dockerfile .
 docker run -d -p 5050:5050 \
-  -v $(pwd)/data:/app/data \
-  -e DATA_DIR=/app/data \
-  --name worthly \
-  worthly:latest
+  -v $(pwd)/prices.db:/app/prices.db \
+  -e DATA_DIR=/app \
+  --name worthly worthly:latest
 ```
 
-On first run, the entrypoint copies `.example.json` templates into `$DATA_DIR` if the real files don't exist.
+Mount `prices.db` to persist all data across container restarts.
 
 ### k3s Deployment
 
-See `deploy/k3s/k3s-deploy.yaml` for a reference manifest with PVC, Deployment (Recreate strategy), Service, and Traefik Ingress.
+See `deploy/k3s/k3s-deploy.yaml` — PVC, Deployment (Recreate strategy), Service, Traefik Ingress.
 
-Key points:
-- `strategy: Recreate` — avoids two pods hitting the same SQLite file
-- Mount volume at `/app/data` (not `/app` — that hides the image)
-- Set `DATA_DIR=/app/data` so the app reads/writes from the volume
+- `strategy: Recreate` — avoids two pods writing to the same SQLite file
+- Mount volume at `/app/data`, set `DATA_DIR=/app/data`
 
 ## Port & Debug
 
 - Default port: `5050`
-- Debug mode: `True` (disable in production by editing `app.run(debug=False, host='0.0.0.0', port=5050)`)
+- Debug mode: `True` — set `app.run(debug=False)` for production
