@@ -555,7 +555,7 @@ def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
         cached_from = pd.Timestamp(row[0])
         cached_to = pd.Timestamp(row[1])
         last_synced = pd.Timestamp(row[2])
-        if now - last_synced < timedelta(minutes=15) and needed_end <= cached_to:
+        if now - last_synced < timedelta(minutes=15) and needed_end < cached_to:
             return True, "Cached recently"
 
     ranges_to_fetch = []
@@ -568,6 +568,10 @@ def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
             ranges_to_fetch.append((needed_start, cached_from - timedelta(days=1)))
         if needed_end > cached_to:
             ranges_to_fetch.append((cached_to + timedelta(days=1), needed_end))
+        else:
+            # Always refetch the most recent day so the daily close overwrites
+            # any stale intraday snapshot that was inserted during trading hours.
+            ranges_to_fetch.append((needed_end - timedelta(days=1), needed_end))
 
     any_rows_fetched = False
     errors = []
