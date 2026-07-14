@@ -11,7 +11,9 @@ import pandas as pd
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -35,7 +37,10 @@ EXCHANGE_SUFFIX = {
 
 def db():
     """Create and return a database connection, initializing tables if they don't exist."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    # WAL lets readers and writers work concurrently instead of blocking on a
+    # single file lock — needed now that sync fetches multiple symbols in parallel.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             symbol TEXT NOT NULL,
@@ -134,6 +139,15 @@ def db():
             date TEXT NOT NULL
         )
     """)
+    # Migrate existing sync_log table — tracks sync health, not just successful ranges
+    for col, defn in [
+        ("last_error", "TEXT"),      # non-null when the most recent sync attempt failed
+        ("last_attempt", "TEXT"),    # timestamp of the most recent attempt, success or not
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE sync_log ADD COLUMN {col} {defn}")
+        except:
+            pass
     # Migrate existing milestones table
     for col, defn in [
         ("type", "TEXT DEFAULT 'achievement'"),
@@ -457,22 +471,31 @@ def load_holding_meta():
     conn.close()
     return {r[0]: {"sector": r[1], "industry": r[2], "longName": r[3], "website": r[4], "logo_url": r[5]} for r in rows}
 
-def save_holding_meta(meta):
+def save_holding_meta_one(symbol, entry):
+    """Upsert a single symbol's metadata. Safe to call concurrently from multiple
+    sync threads — unlike a delete-all-then-reinsert-all pattern, this can't lose
+    another thread's in-flight write."""
     conn = db()
-    conn.execute("DELETE FROM holding_meta")
-    conn.executemany(
-        "INSERT INTO holding_meta (symbol, sector, industry, long_name, website, logo_url) VALUES (?,?,?,?,?,?)",
-        [(sym, m.get("sector",""), m.get("industry",""), m.get("longName",""), m.get("website",""), m.get("logo_url","")) for sym, m in meta.items()]
+    conn.execute(
+        "INSERT INTO holding_meta (symbol, sector, industry, long_name, website, logo_url) VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT(symbol) DO UPDATE SET sector=excluded.sector, industry=excluded.industry, "
+        "long_name=excluded.long_name, website=excluded.website, logo_url=excluded.logo_url",
+        (symbol, entry.get("sector", ""), entry.get("industry", ""), entry.get("longName", ""),
+         entry.get("website", ""), entry.get("logo_url", "")),
     )
     conn.commit()
     conn.close()
 
 def fetch_holding_meta(ticker, exchange):
     """Fetch sector, industry, logo from yfinance for a ticker. Returns dict or None."""
-    meta = load_holding_meta()
     ysym = yf_symbol(ticker, exchange)
-    if ysym in meta:
-        return meta[ysym]
+    conn = db()
+    existing = conn.execute(
+        "SELECT sector, industry, long_name, website, logo_url FROM holding_meta WHERE symbol = ?", (ysym,)
+    ).fetchone()
+    conn.close()
+    if existing:
+        return {"sector": existing[0], "industry": existing[1], "longName": existing[2], "website": existing[3], "logo_url": existing[4]}
 
     try:
         t = yf.Ticker(ysym)
@@ -490,8 +513,7 @@ def fetch_holding_meta(ticker, exchange):
             "website": website,
             "logo_url": logo_url,
         }
-        meta[ysym] = entry
-        save_holding_meta(meta)
+        save_holding_meta_one(ysym, entry)
         return entry
     except Exception as e:
         print(f"[meta] Failed to fetch metadata for {ysym}: {e}")
@@ -544,107 +566,150 @@ def seed_historical_snapshots():
     except Exception as e:
         print(f"[backend] Failed to seed snapshots: {e}")
 
-def sync_symbol(conn, symbol, needed_start, needed_end, force=False):
-    """Fetch and cache only missing historical daily close prices for symbol.
-    Returns (ok, message)."""
-    # 15-minute cooldown check
-    row = conn.execute(
-        "SELECT cached_from, cached_to, last_synced FROM sync_log WHERE symbol = ?", (symbol,)
-    ).fetchone()
-
-    now = pd.Timestamp.now()
-    if row is not None and not force:
-        cached_from = pd.Timestamp(row[0])
-        cached_to = pd.Timestamp(row[1])
-        last_synced = pd.Timestamp(row[2])
-        if now - last_synced < timedelta(minutes=15) and needed_end < cached_to:
-            return True, "Cached recently"
-
-    ranges_to_fetch = []
-    if row is None:
-        ranges_to_fetch.append((needed_start, needed_end))
-    else:
-        cached_from = pd.Timestamp(row[0])
-        cached_to = pd.Timestamp(row[1])
-        if needed_start < cached_from:
-            ranges_to_fetch.append((needed_start, cached_from - timedelta(days=1)))
-        if needed_end > cached_to:
-            ranges_to_fetch.append((cached_to + timedelta(days=1), needed_end))
-        else:
-            # Always refetch the most recent day so the daily close overwrites
-            # any stale intraday snapshot that was inserted during trading hours.
-            ranges_to_fetch.append((needed_end - timedelta(days=1), needed_end))
-
-    any_rows_fetched = False
-    errors = []
-    for f_start, f_end in ranges_to_fetch:
-        if f_start > f_end:
-            continue
+def _fetch_with_retry(fn, attempts=2, delay=1.5):
+    """Run fn() with a couple of retries for transient network/rate-limit errors."""
+    last_exc = None
+    for i in range(attempts):
         try:
-            hist = yf.Ticker(symbol).history(
-                start=f_start, end=f_end + timedelta(days=1)
-            )
-            if hist.empty:
-                continue
-            hist.index = hist.index.tz_localize(None)
-            rows = [
-                (symbol, d.strftime("%Y-%m-%d"), float(c))
-                for d, c in hist["Close"].items()
-            ]
-            conn.executemany(
-                "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
-                rows,
-            )
-            any_rows_fetched = True
+            return fn()
         except Exception as e:
-            errors.append(str(e))
-            print(f"[sync] Failed to fetch {symbol} {f_start.date()} -> {f_end.date()}: {e}")
+            last_exc = e
+            if i < attempts - 1:
+                time.sleep(delay)
+    raise last_exc
 
-    # Fetch today's intraday price so we have live data even before market close.
-    # yfinance daily history() excludes the incomplete current day; intraday 1m
-    # data includes it as soon as the first trade prints.
+def sync_symbol(symbol, needed_start, needed_end, force=False):
+    """Fetch and cache only missing historical daily close prices for symbol.
+    Opens its own DB connection so it's safe to call from a worker thread.
+    Returns (ok, message)."""
+    conn = db()
     try:
-        intraday = yf.Ticker(symbol).history(period="1d", interval="1m")
-        if not intraday.empty:
-            intraday.index = intraday.index.tz_localize(None)
-            latest = intraday.iloc[-1]
-            latest_date = latest.name.strftime("%Y-%m-%d")
-            latest_close = float(latest["Close"])
-            # Only insert if this date is not already covered by daily history
-            existing = conn.execute(
-                "SELECT 1 FROM prices WHERE symbol = ? AND date = ?",
-                (symbol, latest_date),
-            ).fetchone()
-            if not existing:
-                conn.execute(
-                    "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
-                    (symbol, latest_date, latest_close),
-                )
-                any_rows_fetched = True
-    except Exception as e:
-        print(f"[sync] Failed to fetch intraday for {symbol}: {e}")
-
-    # Update sync_log using the ACTUAL date range present in the prices table,
-    # not the requested range.  This prevents cached_to from being advanced to
-    # today when no data was actually stored (e.g. daily history was empty and
-    # intraday also failed).
-    if not errors:
-        actual_range = conn.execute(
-            "SELECT MIN(date), MAX(date) FROM prices WHERE symbol = ?", (symbol,)
+        # 15-minute cooldown check
+        row = conn.execute(
+            "SELECT cached_from, cached_to, last_synced FROM sync_log WHERE symbol = ?", (symbol,)
         ).fetchone()
-        if actual_range and actual_range[0] is not None:
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_log (symbol, last_synced, cached_from, cached_to) "
-                "VALUES (?, ?, ?, ?)",
-                (symbol, now.isoformat(), actual_range[0], actual_range[1]),
-            )
-    conn.commit()
 
-    if not ranges_to_fetch:
-        return True, "Up to date"
-    if errors:
-        return False, "; ".join(errors)
-    return True, "Synced successfully"
+        now = pd.Timestamp.now()
+        if row is not None and not force:
+            cached_to = pd.Timestamp(row[1])
+            last_synced = pd.Timestamp(row[2])
+            if now - last_synced < timedelta(minutes=15) and needed_end < cached_to:
+                return True, "Cached recently"
+
+        ranges_to_fetch = []
+        if row is None:
+            ranges_to_fetch.append((needed_start, needed_end))
+        else:
+            cached_from = pd.Timestamp(row[0])
+            cached_to = pd.Timestamp(row[1])
+            if needed_start < cached_from:
+                ranges_to_fetch.append((needed_start, cached_from - timedelta(days=1)))
+            if needed_end > cached_to:
+                ranges_to_fetch.append((cached_to + timedelta(days=1), needed_end))
+            else:
+                # Always refetch the most recent day so the daily close overwrites
+                # any stale intraday snapshot that was inserted during trading hours.
+                ranges_to_fetch.append((needed_end - timedelta(days=1), needed_end))
+
+        errors = []
+        # Yahoo doesn't publish a daily candle for a day that hasn't closed yet —
+        # asking for "today" via the daily endpoint reliably throws a
+        # "possibly delisted; no price data found" error, every symbol, every day,
+        # until market close. Today's live price comes from the intraday fetch
+        # below instead, so daily requests are capped at the last fully elapsed day.
+        daily_cap = pd.Timestamp(date.today()) - timedelta(days=1)
+        for f_start, f_end in ranges_to_fetch:
+            f_end = min(f_end, daily_cap)
+            if f_start > f_end:
+                continue
+            try:
+                hist = _fetch_with_retry(
+                    lambda: yf.Ticker(symbol).history(start=f_start, end=f_end + timedelta(days=1))
+                )
+                if hist.empty:
+                    continue
+                hist.index = hist.index.tz_localize(None)
+                rows = [
+                    (symbol, d.strftime("%Y-%m-%d"), float(c))
+                    for d, c in hist["Close"].items()
+                ]
+                conn.executemany(
+                    "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
+                    rows,
+                )
+            except Exception as e:
+                msg = str(e)
+                # yfinance raises this for any window with zero rows (market holiday,
+                # exchange-specific non-trading day, etc.) — genuinely benign, not a
+                # sync failure, so don't record it as an error.
+                if "possibly delisted" in msg.lower() or "no price data found" in msg.lower():
+                    print(f"[sync] No data for {symbol} {f_start.date()} -> {f_end.date()} (holiday/non-trading day, not an error)")
+                    continue
+                errors.append(msg)
+                print(f"[sync] Failed to fetch {symbol} {f_start.date()} -> {f_end.date()}: {e}")
+
+        # Fetch today's intraday price so we have live data even before market close.
+        # yfinance daily history() excludes the incomplete current day; intraday 1m
+        # data includes it as soon as the first trade prints.
+        try:
+            intraday = _fetch_with_retry(
+                lambda: yf.Ticker(symbol).history(period="1d", interval="1m")
+            )
+            if not intraday.empty:
+                intraday.index = intraday.index.tz_localize(None)
+                latest = intraday.iloc[-1]
+                latest_date = latest.name.strftime("%Y-%m-%d")
+                latest_close = float(latest["Close"])
+                # Only insert if this date is not already covered by daily history
+                existing = conn.execute(
+                    "SELECT 1 FROM prices WHERE symbol = ? AND date = ?",
+                    (symbol, latest_date),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
+                        (symbol, latest_date, latest_close),
+                    )
+        except Exception as e:
+            # Intraday is best-effort — a failure here alone shouldn't mark the whole
+            # sync as failed as long as daily history above succeeded.
+            print(f"[sync] Failed to fetch intraday for {symbol}: {e}")
+
+        # last_attempt/last_error record every attempt, success or not, so the UI can
+        # show accurate sync health even when a symbol has been failing for days.
+        # last_synced/cached_from/cached_to only advance on a clean, error-free run —
+        # using the ACTUAL date range present in the prices table, not the requested
+        # range, so cached_to isn't advanced to today when nothing was actually stored.
+        if errors:
+            conn.execute(
+                "INSERT INTO sync_log (symbol, last_synced, cached_from, cached_to, last_error, last_attempt) "
+                "VALUES (?, COALESCE((SELECT last_synced FROM sync_log WHERE symbol = ?), ?), "
+                "(SELECT cached_from FROM sync_log WHERE symbol = ?), (SELECT cached_to FROM sync_log WHERE symbol = ?), ?, ?) "
+                "ON CONFLICT(symbol) DO UPDATE SET last_error = excluded.last_error, last_attempt = excluded.last_attempt",
+                (symbol, symbol, now.isoformat(), symbol, symbol, "; ".join(errors), now.isoformat()),
+            )
+        else:
+            actual_range = conn.execute(
+                "SELECT MIN(date), MAX(date) FROM prices WHERE symbol = ?", (symbol,)
+            ).fetchone()
+            if actual_range and actual_range[0] is not None:
+                conn.execute(
+                    "INSERT INTO sync_log (symbol, last_synced, cached_from, cached_to, last_error, last_attempt) "
+                    "VALUES (?, ?, ?, ?, NULL, ?) "
+                    "ON CONFLICT(symbol) DO UPDATE SET last_synced = excluded.last_synced, "
+                    "cached_from = excluded.cached_from, cached_to = excluded.cached_to, "
+                    "last_error = NULL, last_attempt = excluded.last_attempt",
+                    (symbol, now.isoformat(), actual_range[0], actual_range[1], now.isoformat()),
+                )
+        conn.commit()
+
+        if not ranges_to_fetch:
+            return True, "Up to date"
+        if errors:
+            return False, "; ".join(errors)
+        return True, "Synced successfully"
+    finally:
+        conn.close()
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
@@ -793,7 +858,14 @@ def delete_transaction(idx):
     return jsonify({"ok": False, "error": "Index out of range"}), 404
 
 def _run_sync(force=False):
-    """Core sync logic — fetch missing prices and metadata for all holdings."""
+    """Core sync logic — fetch missing prices and metadata for all holdings.
+
+    Each symbol's sync is I/O-bound (yfinance network calls), so they run
+    concurrently in a small thread pool instead of one at a time — this is
+    what actually makes "Sync All" fast instead of a serial 15-20 call chain.
+    sync_symbol and fetch_holding_meta each open/close their own DB connection
+    (WAL mode + busy_timeout handle the concurrent writes), so this is safe.
+    """
     txns = load_transactions()
     if not txns:
         return []
@@ -810,23 +882,35 @@ def _run_sync(force=False):
     elif min_date.weekday() == 6: # Sunday
         min_date -= timedelta(days=2)
 
-    conn = db()
-    results = []
-
-    ok_fx, msg_fx = sync_symbol(conn, "AUDUSD=X", min_date, end, force=force)
-    results.append({"symbol": "AUDUSD=X", "ok": ok_fx, "message": msg_fx})
-
-    for sym, grp in df.groupby("sym"):
-        sym_start = grp["date"].min()
+    def _sync_one(symbol, sym_start):
         if sym_start.weekday() == 5:
             sym_start -= timedelta(days=1)
         elif sym_start.weekday() == 6:
             sym_start -= timedelta(days=2)
-        ok, msg = sync_symbol(conn, sym, sym_start, end, force=force)
-        results.append({"symbol": sym, "ok": ok, "message": msg})
-        fetch_holding_meta(grp.iloc[0]["ticker"], grp.iloc[0]["exchange"])
+        ok, msg = sync_symbol(symbol, sym_start, end, force=force)
+        return {"symbol": symbol, "ok": ok, "message": msg}
 
-    conn.close()
+    jobs = [("AUDUSD=X", min_date)]
+    holdings_by_sym = {}
+    for sym, grp in df.groupby("sym"):
+        jobs.append((sym, grp["date"].min()))
+        holdings_by_sym[sym] = grp.iloc[0]
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(6, len(jobs))) as pool:
+        futures = {pool.submit(_sync_one, sym, start): sym for sym, start in jobs}
+        for fut in as_completed(futures):
+            results.append(fut.result())
+
+    # Sort back to a stable order (thread completion order is non-deterministic)
+    order = {sym: i for i, (sym, _) in enumerate(jobs)}
+    results.sort(key=lambda r: order.get(r["symbol"], 999))
+
+    # Metadata fetches hit yfinance too, so parallelize them the same way.
+    with ThreadPoolExecutor(max_workers=min(6, len(holdings_by_sym) or 1)) as pool:
+        for sym, row in holdings_by_sym.items():
+            pool.submit(fetch_holding_meta, row["ticker"], row["exchange"])
+
     return results
 
 
@@ -841,7 +925,7 @@ def sync_data():
 
 @app.route("/api/sync-status", methods=["GET"])
 def get_sync_status():
-    """Return full sync status: prices + metadata for all cached symbols."""
+    """Return full sync status: prices + metadata + health for all cached symbols."""
     conn = db()
     rows = conn.execute("""
         SELECT
@@ -849,6 +933,8 @@ def get_sync_status():
             s.last_synced,
             s.cached_from,
             s.cached_to,
+            s.last_error,
+            s.last_attempt,
             (SELECT COUNT(*) FROM prices p WHERE p.symbol = s.symbol) as record_count,
             (SELECT MIN(p.date) FROM prices p WHERE p.symbol = s.symbol) as actual_from,
             (SELECT MAX(p.date) FROM prices p WHERE p.symbol = s.symbol) as actual_to
@@ -868,9 +954,11 @@ def get_sync_status():
                 "last_synced": r[1],
                 "cached_from": r[2],
                 "cached_to": r[3],
-                "record_count": r[4],
-                "actual_from": r[5],
-                "actual_to": r[6],
+                "last_error": r[4],
+                "last_attempt": r[5],
+                "record_count": r[6],
+                "actual_from": r[7],
+                "actual_to": r[8],
                 "sector": m.get("sector", ""),
                 "industry": m.get("industry", ""),
                 "website": m.get("website", ""),

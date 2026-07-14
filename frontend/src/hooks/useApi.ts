@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
-  CGTResult, SyncStatus, Milestone,
+  CGTResult, SyncStatus, SyncResponse, Milestone,
 } from '../types'
 
 const get = async <T>(url: string): Promise<T> => {
@@ -129,7 +129,7 @@ export const useSync = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (force?: boolean) =>
-      post(`/api/sync${force ? '?force=true' : ''}`),
+      post<SyncResponse>(`/api/sync${force ? '?force=true' : ''}`),
     onSuccess: () => {
       qc.invalidateQueries()
     },
@@ -162,4 +162,3 @@ export const useDeleteMilestone = () => {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['milestones'] }),
   })
 }
-
