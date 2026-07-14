@@ -83,9 +83,9 @@ function filterByRange<T extends { date: string }>(data: T[], range: Range): T[]
 // ── Stat card ─────────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className={CARD} style={CARD_BG}>
+    <div className={CARD + ' min-w-0'} style={CARD_BG}>
       <p className="text-xs text-slate-400 mb-1">{label}</p>
-      <p className="text-2xl font-bold text-white" style={color ? { color } : {}}>{value}</p>
+      <p className="text-xl sm:text-2xl font-bold text-white truncate" title={value} style={color ? { color } : {}}>{value}</p>
       {sub && <p className="text-xs text-slate-400 mt-1">{sub}</p>}
     </div>
   )
@@ -268,9 +268,9 @@ export default function Dashboard() {
         return (
           <div className={CARD} style={CARD_BG}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <p className="text-sm font-medium text-slate-300">Net Worth Timeline</p>
-                <div className="flex gap-1">
+                <div className="flex gap-1 flex-wrap">
                   {NW_LINES.map(l => (
                     <button
                       key={l.key}
@@ -281,7 +281,7 @@ export default function Dashboard() {
                   ))}
                 </div>
               </div>
-              <div className="flex gap-1">
+              <div className="flex gap-1 flex-wrap">
                 {ranges.map(r => (
                   <button
                     key={r}
