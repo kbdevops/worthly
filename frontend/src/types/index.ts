@@ -147,8 +147,15 @@ export interface Milestone {
   value: number | null
   type: 'achievement' | 'goal'
   target_value: number | null
+  /** target_value converted to AUD at the latest cached FX rate — recalculated live, so it moves with the market when currency is 'USD' */
+  target_value_aud?: number | null
   current_value: number | null
   is_achieved: boolean
+  /** @deprecated superseded by linked_metrics — kept for backward compatibility */
   linked_metric: string | null
+  /** metrics tracked by this goal; when more than one is set they are summed live (e.g. cash + portfolio) */
+  linked_metrics?: string[]
+  /** currency the target_value is expressed in. USD targets are converted to AUD live for progress comparison. */
+  currency?: 'AUD' | 'USD'
   achieved_date: string | null
 }
