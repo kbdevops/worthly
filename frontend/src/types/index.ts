@@ -132,10 +132,23 @@ export interface SyncStatus {
   last_synced: string
   cached_from: string
   cached_to: string
+  last_error: string | null
+  last_attempt: string | null
   record_count: number
   actual_from: string
   actual_to: string
   has_meta: boolean
+}
+
+export interface SyncResult {
+  symbol: string
+  ok: boolean
+  message: string
+}
+
+export interface SyncResponse {
+  results: SyncResult[]
+  message?: string
 }
 
 export interface Milestone {
