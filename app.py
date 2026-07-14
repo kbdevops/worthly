@@ -142,6 +142,8 @@ def db():
         ("is_achieved", "INTEGER DEFAULT 0"),
         ("linked_metric", "TEXT"),
         ("achieved_date", "TEXT"),
+        ("linked_metrics", "TEXT"),   # comma-separated list, e.g. "cash,portfolio" — supersedes linked_metric
+        ("currency", "TEXT DEFAULT 'AUD'"),  # currency the target/current value is expressed in: AUD or USD
     ]:
         try:
             conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} {defn}")
@@ -1393,13 +1395,27 @@ def add_snapshot():
 
 @app.route("/api/milestones", methods=["GET"])
 def get_milestones():
-    """Return all milestones with live current values for linked metrics."""
+    """Return all milestones with live current values for linked metrics.
+
+    Goals can track multiple metrics at once (e.g. cash + portfolio), which are
+    summed live. Targets can be set in AUD or USD — a USD target is converted to
+    its AUD equivalent using the latest cached AUDUSD=X rate on every request, so
+    the goal's progress moves with the exchange rate rather than freezing at the
+    rate that was in effect when the milestone was created.
+    """
     # Get live metrics once
     live = {}
+    audusd = 0.65
     try:
+        conn2 = db()
+        fx_row = conn2.execute(
+            "SELECT close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date DESC LIMIT 1"
+        ).fetchone()
+        if fx_row and fx_row[0]:
+            audusd = fx_row[0]
+
         portfolio_val, active_val, passive_val = _get_latest_portfolio_value()
         cash = get_total_cash()
-        conn2 = db()
         today = date.today().isoformat()
         row = conn2.execute("SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)).fetchone()
         conn2.close()
@@ -1424,23 +1440,37 @@ def get_milestones():
 
     conn = db()
     rows = conn.execute(
-        "SELECT id, date, title, description, category, value, type, target_value, current_value, is_achieved, linked_metric, achieved_date FROM milestones ORDER BY date DESC"
+        "SELECT id, date, title, description, category, value, type, target_value, current_value, "
+        "is_achieved, linked_metric, achieved_date, linked_metrics, currency FROM milestones ORDER BY date DESC"
     ).fetchall()
 
     results = []
     for r in rows:
         mtype = r[6] or "achievement"
-        linked = r[10]
+        linked_legacy = r[10]
         current_val = r[8]
         is_achieved = bool(r[9])
         achieved_date = r[11]
+        linked_metrics_raw = r[12]
+        currency = r[13] or "AUD"
+        target_value = r[7]
 
-        # Override current_value from live data if linked
-        if mtype == "goal" and linked and linked in live:
-            current_val = live[linked]
-            # Auto-mark achieved
-            target = r[7]
-            if target and current_val >= target and not is_achieved:
+        # New multi-metric field wins; fall back to the legacy single-metric field
+        metrics = (
+            [m.strip() for m in linked_metrics_raw.split(",") if m.strip()]
+            if linked_metrics_raw else ([linked_legacy] if linked_legacy else [])
+        )
+
+        # A target set in USD is re-converted to its AUD equivalent at the *current*
+        # rate every time this endpoint runs, so it fluctuates with the market
+        # rather than being fixed at entry time.
+        target_value_aud = target_value
+        if target_value is not None and currency == "USD" and audusd:
+            target_value_aud = target_value / audusd
+
+        if mtype == "goal" and metrics and all(m in live for m in metrics):
+            current_val = round(sum(live[m] for m in metrics), 2)
+            if target_value_aud is not None and current_val >= target_value_aud and not is_achieved:
                 is_achieved = True
                 achieved_date = date.today().isoformat()
                 conn.execute("UPDATE milestones SET is_achieved=1, achieved_date=?, current_value=? WHERE id=?",
@@ -1456,10 +1486,13 @@ def get_milestones():
             "category": r[4],
             "value": r[5],
             "type": mtype,
-            "target_value": r[7],
+            "target_value": target_value,
+            "target_value_aud": round(target_value_aud, 2) if target_value_aud is not None else None,
             "current_value": current_val,
             "is_achieved": is_achieved,
-            "linked_metric": linked,
+            "linked_metric": linked_legacy,
+            "linked_metrics": metrics,
+            "currency": currency,
             "achieved_date": achieved_date,
         })
     conn.commit()
@@ -1472,19 +1505,35 @@ def add_milestone():
     try:
         conn = db()
         mtype = data.get("type", "achievement")
-        linked = data.get("linked_metric")
+
+        # Accept either the new multi-metric list or the legacy single metric
+        metrics = data.get("linked_metrics") or ([data["linked_metric"]] if data.get("linked_metric") else [])
+        linked_metrics_str = ",".join(metrics) if metrics else None
+        linked = metrics[0] if metrics else None  # keep legacy column populated for backward compat
+
+        currency = data.get("currency") or "AUD"
+        target_value = data.get("target_value")
+        target_value_aud = target_value
+        if target_value is not None and currency == "USD":
+            fx_row = conn.execute(
+                "SELECT close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+            audusd = fx_row[0] if fx_row and fx_row[0] else 0.65
+            target_value_aud = target_value / audusd
+
         is_achieved = False
         achieved_date = None
         current_val = data.get("current_value")
-        if mtype == "goal" and current_val is not None and data.get("target_value") is not None:
-            if current_val >= data["target_value"]:
+        if mtype == "goal" and current_val is not None and target_value_aud is not None:
+            if current_val >= target_value_aud:
                 is_achieved = True
                 achieved_date = date.today().isoformat()
         conn.execute(
-            "INSERT INTO milestones (date, title, description, category, value, type, target_value, current_value, is_achieved, linked_metric, achieved_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO milestones (date, title, description, category, value, type, target_value, current_value, "
+            "is_achieved, linked_metric, achieved_date, linked_metrics, currency) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (data["date"], data["title"], data.get("description", ""), data["category"],
-             data.get("value"), mtype, data.get("target_value"), current_val,
-             int(is_achieved), linked, achieved_date)
+             data.get("value"), mtype, target_value, current_val,
+             int(is_achieved), linked, achieved_date, linked_metrics_str, currency)
         )
         conn.commit()
         conn.close()
@@ -1498,19 +1547,34 @@ def update_milestone(milestone_id):
     try:
         conn = db()
         mtype = data.get("type", "achievement")
-        linked = data.get("linked_metric")
+
+        metrics = data.get("linked_metrics") or ([data["linked_metric"]] if data.get("linked_metric") else [])
+        linked_metrics_str = ",".join(metrics) if metrics else None
+        linked = metrics[0] if metrics else None
+
+        currency = data.get("currency") or "AUD"
+        target_value = data.get("target_value")
+        target_value_aud = target_value
+        if target_value is not None and currency == "USD":
+            fx_row = conn.execute(
+                "SELECT close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+            audusd = fx_row[0] if fx_row and fx_row[0] else 0.65
+            target_value_aud = target_value / audusd
+
         is_achieved = data.get("is_achieved", False)
         achieved_date = data.get("achieved_date")
         current_val = data.get("current_value")
-        if mtype == "goal" and current_val is not None and data.get("target_value") is not None:
-            if current_val >= data["target_value"] and not is_achieved:
+        if mtype == "goal" and current_val is not None and target_value_aud is not None:
+            if current_val >= target_value_aud and not is_achieved:
                 is_achieved = True
                 achieved_date = date.today().isoformat()
         conn.execute(
-            "UPDATE milestones SET date=?,title=?,description=?,category=?,value=?,type=?,target_value=?,current_value=?,is_achieved=?,linked_metric=?,achieved_date=? WHERE id=?",
+            "UPDATE milestones SET date=?,title=?,description=?,category=?,value=?,type=?,target_value=?,current_value=?,"
+            "is_achieved=?,linked_metric=?,achieved_date=?,linked_metrics=?,currency=? WHERE id=?",
             (data["date"], data["title"], data.get("description", ""), data["category"],
-             data.get("value"), mtype, data.get("target_value"), current_val,
-             int(is_achieved), linked, achieved_date, milestone_id)
+             data.get("value"), mtype, target_value, current_val,
+             int(is_achieved), linked, achieved_date, linked_metrics_str, currency, milestone_id)
         )
         conn.commit()
         conn.close()

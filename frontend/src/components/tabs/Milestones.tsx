@@ -46,13 +46,21 @@ function MilestoneCard({ m, onEdit, onDelete }: { m: Milestone; onEdit: () => vo
   const Icon = cat.icon
   const isGoal = m.type === 'goal'
   const achieved = m.is_achieved || !isGoal
-  const pct = isGoal && m.target_value && m.current_value != null
-    ? Math.min(100, (m.current_value / m.target_value) * 100)
+  const metrics = (m.linked_metrics && m.linked_metrics.length > 0) ? m.linked_metrics : (m.linked_metric ? [m.linked_metric] : [])
+  const currency = m.currency || 'AUD'
+  // Progress is always computed against the AUD-converted target — current_value is
+  // already a live AUD figure, and target_value_aud is the same target re-converted
+  // at today's FX rate when the target was set in USD.
+  const targetAud = m.target_value_aud ?? m.target_value
+  const pct = isGoal && targetAud && m.current_value != null
+    ? Math.min(100, (m.current_value / targetAud) * 100)
     : 100
-  const remaining = isGoal && m.target_value && m.current_value != null
-    ? Math.max(0, m.target_value - m.current_value)
+  const remaining = isGoal && targetAud && m.current_value != null
+    ? Math.max(0, targetAud - m.current_value)
     : null
-  const metricFmt = METRICS.find(x => x.id === m.linked_metric)?.fmt || fmtCurrency
+  const metricFmt = metrics.length === 1
+    ? (METRICS.find(x => x.id === metrics[0])?.fmt || fmtCurrency)
+    : fmtCurrency
 
   return (
     <div
@@ -91,25 +99,33 @@ function MilestoneCard({ m, onEdit, onDelete }: { m: Milestone; onEdit: () => vo
                 <span className="text-xs text-slate-500">
                   {new Date(m.date).toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' })}
                 </span>
-                {isGoal && m.linked_metric && (
+                {isGoal && metrics.length > 0 && (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-500">
-                    {METRICS.find(x => x.id === m.linked_metric)?.label}
+                    {metrics.map(id => METRICS.find(x => x.id === id)?.label || id).join(' + ')}
                   </span>
+                )}
+                {isGoal && currency === 'USD' && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-medium">USD target</span>
                 )}
               </div>
               {m.description && <p className="text-xs text-slate-400 mb-2">{m.description}</p>}
 
               {isGoal && m.target_value != null && (
                 <div className="space-y-1.5">
-                  <div className="flex items-center gap-2 text-xs">
+                  <div className="flex items-center gap-2 text-xs flex-wrap">
                     <span className="text-slate-400">{m.current_value != null ? metricFmt(m.current_value) : '—'}</span>
                     <span className="text-slate-600">of</span>
-                    <span className="text-slate-300 font-medium">{metricFmt(m.target_value)}</span>
+                    <span className="text-slate-300 font-medium">
+                      {currency === 'USD' ? `US${metricFmt(m.target_value)}` : metricFmt(m.target_value)}
+                    </span>
+                    {currency === 'USD' && targetAud != null && (
+                      <span className="text-slate-600">(≈ {fmtCurrency(targetAud)} AUD live)</span>
+                    )}
                   </div>
                   {!achieved && remaining != null && (
                     <div className="flex items-center gap-1.5">
                       <Zap size={10} className="text-amber-400" />
-                      <span className="text-xs text-amber-300 font-medium">{metricFmt(remaining)} remaining</span>
+                      <span className="text-xs text-amber-300 font-medium">{fmtCurrency(remaining)} remaining</span>
                     </div>
                   )}
                   {achieved && m.achieved_date && (
@@ -155,7 +171,8 @@ export default function Milestones() {
     date: new Date().toISOString().slice(0, 10),
     title: '', description: '', category: 'financial',
     value: '', type: 'achievement' as 'achievement' | 'goal',
-    target_value: '', linked_metric: '' as string,
+    target_value: '', linked_metrics: [] as string[],
+    currency: 'AUD' as 'AUD' | 'USD',
     is_achieved: false, achieved_date: null as string | null,
   }
   const [form, setForm] = useState(blank)
@@ -167,10 +184,21 @@ export default function Milestones() {
       date: m.date, title: m.title, description: m.description || '',
       category: m.category, value: m.value != null ? String(m.value) : '',
       type: m.type, target_value: m.target_value != null ? String(m.target_value) : '',
-      linked_metric: m.linked_metric || '', is_achieved: m.is_achieved,
+      linked_metrics: (m.linked_metrics && m.linked_metrics.length > 0) ? m.linked_metrics : (m.linked_metric ? [m.linked_metric] : []),
+      currency: (m.currency as 'AUD' | 'USD') || 'AUD',
+      is_achieved: m.is_achieved,
       achieved_date: m.achieved_date,
     })
     setShowModal(true)
+  }
+
+  function toggleMetric(id: string) {
+    setForm(f => ({
+      ...f,
+      linked_metrics: f.linked_metrics.includes(id)
+        ? f.linked_metrics.filter(x => x !== id)
+        : [...f.linked_metrics, id],
+    }))
   }
 
   function handleSubmit() {
@@ -178,7 +206,9 @@ export default function Milestones() {
     const payload = {
       date: form.date, title: form.title.trim(), description: form.description.trim(),
       category: form.category, value: form.value ? parseFloat(form.value) : null,
-      type: form.type, linked_metric: form.linked_metric || null,
+      type: form.type, linked_metrics: form.linked_metrics.length > 0 ? form.linked_metrics : null,
+      linked_metric: form.linked_metrics[0] || null,
+      currency: form.currency,
       target_value: form.target_value ? parseFloat(form.target_value) : null,
       current_value: null, is_achieved: false, achieved_date: null,
     }
@@ -303,21 +333,45 @@ export default function Milestones() {
               {form.type === 'goal' && (
                 <>
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1.5">Track Metric</label>
-                    <p className="text-xs text-slate-500 mb-2">Auto-updates progress from live app data — no manual entry needed.</p>
-                    <select value={form.linked_metric} onChange={e => setForm({ ...form, linked_metric: e.target.value })}
-                      className="w-full px-3 py-2 rounded-lg text-sm text-slate-300 focus:outline-none"
-                      style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
-                      <option value="">— pick a metric —</option>
-                      {METRICS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                    </select>
+                    <label className="block text-xs text-slate-400 mb-1.5">Track Metric{form.linked_metrics.length > 1 ? 's' : ''}</label>
+                    <p className="text-xs text-slate-500 mb-2">
+                      Auto-updates progress from live app data — no manual entry needed. Pick more than one to track their combined total (e.g. Cash + Portfolio).
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {METRICS.map(m => {
+                        const on = form.linked_metrics.includes(m.id)
+                        return (
+                          <button key={m.id} type="button" onClick={() => toggleMetric(m.id)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                            style={on
+                              ? { background: 'var(--accent)', color: '#fff', border: '1px solid var(--accent)' }
+                              : { background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: '#94a3b8' }}
+                          >{m.label}</button>
+                        )
+                      })}
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs text-slate-400 mb-1.5">Target Value</label>
-                    <input type="number" value={form.target_value} onChange={e => setForm({ ...form, target_value: e.target.value })}
-                      placeholder="e.g. 100000"
-                      className="w-full px-3 py-2 rounded-lg text-sm text-slate-300 placeholder-slate-600 focus:outline-none"
-                      style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }} />
+                    <div className="flex gap-2">
+                      <input type="number" value={form.target_value} onChange={e => setForm({ ...form, target_value: e.target.value })}
+                        placeholder="e.g. 100000"
+                        className="flex-1 px-3 py-2 rounded-lg text-sm text-slate-300 placeholder-slate-600 focus:outline-none"
+                        style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }} />
+                      <div className="flex rounded-lg overflow-hidden border border-[var(--border)]">
+                        {(['AUD', 'USD'] as const).map(c => (
+                          <button key={c} type="button" onClick={() => setForm({ ...form, currency: c })}
+                            className="px-3 py-2 text-xs font-medium transition-all"
+                            style={form.currency === c ? { background: 'var(--accent)', color: '#fff' } : { background: 'var(--bg-elevated)', color: '#94a3b8' }}
+                          >{c}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {form.currency === 'USD' && (
+                      <p className="text-xs text-slate-500 mt-1.5">
+                        Progress is compared against this target's live AUD equivalent — it moves as the AUD/USD rate moves, it isn't locked in at today's rate.
+                      </p>
+                    )}
                   </div>
                 </>
               )}
