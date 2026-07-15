@@ -141,6 +141,13 @@ def db():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS holding_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            symbols TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS dividends (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
@@ -1248,12 +1255,13 @@ def get_performance():
         "return_pct": return_pct.round(2).tolist(),
     })
 
-@app.route("/api/portfolio", methods=["GET"])
-def get_portfolio():
-    """Return detailed analytics of current active holdings."""
+def _compute_active_holdings():
+    """Core holdings computation shared by /api/portfolio and anything else that
+    needs per-holding value/cost/return (e.g. holding groups) — returns a plain
+    list of dicts, not a Flask Response, so it's safe to call from other routes."""
     txns = load_transactions()
     if not txns:
-        return jsonify([])
+        return []
 
     conn = db()
     latest_prices = {}
@@ -1294,10 +1302,10 @@ def get_portfolio():
     conn.close()
 
     audusd = latest_prices.get("AUDUSD=X", 0.65)
-    
+
     # Sort chronologically to compute cost bases properly
     txns_sorted = sorted(txns, key=lambda x: x["date"])
-    
+
     holdings = {}
     for t in txns_sorted:
         sym = yf_symbol(t["ticker"], t["exchange"])
@@ -1313,10 +1321,10 @@ def get_portfolio():
                 "buys_count": 0,
                 "sells_count": 0
             }
-        
+
         h = holdings[sym]
         qty = t["units"]
-        
+
         if t["action"].lower() == "buy":
             h["units"] += qty
             h["cost_aud"] += t["value"]
@@ -1345,7 +1353,7 @@ def get_portfolio():
     for sym, h in holdings.items():
         if h["units"] <= 1e-5:
             continue
-        
+
         current_price = latest_prices.get(sym, 0.0)
         prev_price = prev_prices.get(sym, current_price)  # fallback to current if no prev
         if h["currency"] == "USD":
@@ -1361,16 +1369,17 @@ def get_portfolio():
         # Daily change
         daily_change = (current_price_aud - prev_price_aud) * h["units"]
         daily_change_pct = ((current_price_aud - prev_price_aud) / prev_price_aud * 100) if prev_price_aud > 0 else 0.0
-        
+
         avg_price_aud = h["cost_aud"] / h["units"] if h["units"] > 0 else 0.0
         avg_price_local = h["cost_local"] / h["units"] if h["units"] > 0 else 0.0
-        
+
         return_aud = value_aud - h["cost_aud"]
         return_pct = (return_aud / h["cost_aud"] * 100) if h["cost_aud"] > 0 else 0.0
-        
+
         meta = fetch_holding_meta(h["ticker"], h["exchange"])
 
         active_holdings.append({
+            "symbol": sym,
             "ticker": h["ticker"],
             "exchange": h["exchange"],
             "name": h["name"],
@@ -1399,7 +1408,142 @@ def get_portfolio():
 
     # Sort holdings by value descending
     active_holdings.sort(key=lambda x: x["value_aud"], reverse=True)
-    return jsonify(active_holdings)
+    return active_holdings
+
+@app.route("/api/portfolio", methods=["GET"])
+def get_portfolio():
+    """Return detailed analytics of current active holdings."""
+    return jsonify(_compute_active_holdings())
+
+@app.route("/api/holding-groups", methods=["GET"])
+def get_holding_groups():
+    """Return every group with computed aggregates — value, capital gain (unrealized),
+    income (net dividends received), currency, and blended return % — plus a grand
+    total row summing across every grouped holding. Mirrors the aggregates in a
+    Sharesight custom-group report."""
+    conn = db()
+    rows = conn.execute("SELECT id, name, symbols FROM holding_groups ORDER BY id").fetchall()
+    conn.close()
+
+    holdings_by_symbol = {h["symbol"]: h for h in _compute_active_holdings()}
+
+    div_conn = db()
+    div_rows = div_conn.execute("SELECT symbol, net_amount_aud FROM dividends").fetchall()
+    div_conn.close()
+    income_by_symbol = {}
+    for sym, net in div_rows:
+        income_by_symbol[sym] = income_by_symbol.get(sym, 0.0) + net
+
+    def _aggregate(symbols):
+        value = capital_gain = cost_basis = income = 0.0
+        currencies = set()
+        for sym in symbols:
+            h = holdings_by_symbol.get(sym)
+            if h:
+                value += h["value_aud"]
+                capital_gain += h["return_aud"]
+                cost_basis += h["cost_aud"]
+                currencies.add(h["currency"])
+            income += income_by_symbol.get(sym, 0.0)
+        return_pct = ((capital_gain + income) / cost_basis * 100) if cost_basis > 0 else 0.0
+        currency = currencies.pop() if len(currencies) == 1 else ("Mixed" if len(currencies) > 1 else "AUD")
+        return {
+            "value": round(value, 2), "capital_gain": round(capital_gain, 2),
+            "income": round(income, 2), "currency": currency, "return_pct": round(return_pct, 2),
+            "cost_basis": round(cost_basis, 2),
+        }
+
+    groups = []
+    all_grouped_symbols = []
+    for gid, name, symbols_str in rows:
+        symbols = [s.strip() for s in symbols_str.split(",") if s.strip()]
+        all_grouped_symbols.extend(symbols)
+        agg = _aggregate(symbols)
+        groups.append({"id": gid, "name": name, "symbols": symbols, **agg})
+
+    grand_total = _aggregate(all_grouped_symbols)
+    return jsonify({"groups": groups, "grand_total": grand_total})
+
+@app.route("/api/holding-groups", methods=["POST"])
+def add_holding_group():
+    data = request.json
+    try:
+        symbols = data.get("symbols", [])
+        conn = db()
+        conn.execute(
+            "INSERT INTO holding_groups (name, symbols) VALUES (?, ?)",
+            (data["name"], ",".join(symbols)),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/holding-groups/<int:group_id>", methods=["PUT"])
+def update_holding_group(group_id):
+    data = request.json
+    try:
+        symbols = data.get("symbols", [])
+        conn = db()
+        conn.execute(
+            "UPDATE holding_groups SET name = ?, symbols = ? WHERE id = ?",
+            (data["name"], ",".join(symbols), group_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/holding-groups/<int:group_id>", methods=["DELETE"])
+def delete_holding_group(group_id):
+    conn = db()
+    conn.execute("DELETE FROM holding_groups WHERE id = ?", (group_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+def _build_daily_portfolio_value_series(conn):
+    """Full daily portfolio-value series (same construction as /api/networth), as a
+    pandas Series indexed by date. Shared by anything needing day-level portfolio
+    value history — currently just the Daily ATH stat."""
+    txns = load_transactions()
+    if not txns:
+        return None
+    df = pd.DataFrame(txns)
+    df["date"] = pd.to_datetime(df["date"])
+    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+    start = df["date"].min()
+    end = pd.Timestamp(date.today())
+    all_dates = pd.date_range(start, end, freq="D")
+
+    price_data = {}
+    symbols_to_read = list(df["sym"].unique()) + ["AUDUSD=X"]
+    for sym in symbols_to_read:
+        rows = conn.execute("SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (sym,)).fetchall()
+        if rows:
+            s = pd.Series({pd.Timestamp(d): c for d, c in rows}).reindex(all_dates).ffill().bfill()
+            s = s.fillna(0.0 if sym != "AUDUSD=X" else 1.0)
+        else:
+            s = pd.Series(0.0 if sym != "AUDUSD=X" else 1.0, index=all_dates)
+        price_data[sym] = s
+
+    fx_rates = price_data["AUDUSD=X"]
+    units_changes = pd.DataFrame(0.0, index=all_dates, columns=df["sym"].unique())
+    sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    for _, row in df.iterrows():
+        sign = -1 if row["action"].lower() == "sell" else 1
+        units_changes.loc[row["date"], row["sym"]] += sign * row["units"]
+    units_df = units_changes.cumsum()
+
+    portfolio_value = pd.Series(0.0, index=all_dates)
+    for sym in df["sym"].unique():
+        prices = price_data[sym]
+        if sym_currency[sym] == "USD":
+            prices = prices / fx_rates
+        portfolio_value += units_df[sym] * prices
+    return portfolio_value
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
@@ -1430,9 +1574,7 @@ def get_stats():
     audusd = float(audusd_row[0]) if audusd_row else 0.65
 
     # Retrieve holdings breakdown
-    import json
-    holdings_resp = get_portfolio()
-    holdings = json.loads(holdings_resp.get_data(as_text=True))
+    holdings = _compute_active_holdings()
     
     if not holdings:
         return jsonify({
@@ -1475,6 +1617,21 @@ def get_stats():
         ath_value, ath_date = round(total_value, 2), today
     else:
         ath_value, ath_date = round(row[0], 2), row[1]
+
+    # Daily ATH — the single best day-over-day dollar increase in portfolio value ever
+    # recorded (market-driven only — deliberately portfolio value, not net worth, so a
+    # manually-entered cash/super update never gets misread as a market "gain").
+    daily_ath_value, daily_ath_date = 0.0, None
+    try:
+        pv_series = _build_daily_portfolio_value_series(conn2)
+        if pv_series is not None and len(pv_series) > 1:
+            daily_diffs = pv_series.diff().dropna()
+            if not daily_diffs.empty:
+                best_idx = daily_diffs.idxmax()
+                daily_ath_value = round(float(daily_diffs.loc[best_idx]), 2)
+                daily_ath_date = best_idx.strftime("%Y-%m-%d")
+    except Exception as e:
+        print(f"[stats] daily_ath calc failed (non-fatal): {e}")
     conn2.close()
 
     return jsonify({
@@ -1490,6 +1647,8 @@ def get_stats():
         "audusd_rate": round(audusd, 4),
         "all_time_high": ath_value,
         "all_time_high_date": ath_date,
+        "daily_ath": daily_ath_value,
+        "daily_ath_date": daily_ath_date,
     })
 
 def _get_latest_portfolio_value():
@@ -1709,9 +1868,9 @@ def get_milestones():
         row = conn2.execute("SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)).fetchone()
         conn2.close()
         super_val = row[0] if row else 0.0
-        holdings = get_portfolio()
+        holdings = _compute_active_holdings()
         stats_data = {}
-        if isinstance(holdings, list) and holdings:
+        if holdings:
             total_cost = sum(h.get("cost_aud", 0) for h in holdings)
             total_val = sum(h.get("value_aud", 0) for h in holdings)
             stats_data["return_pct"] = round((total_val - total_cost) / total_cost * 100, 2) if total_cost else 0
