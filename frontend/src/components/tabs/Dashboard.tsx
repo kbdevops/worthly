@@ -245,11 +245,7 @@ export default function Dashboard() {
       if (statKeys.length === 1) return
       setStatKeys(statKeys.filter(k => k !== key))
     } else {
-      if (statKeys.length >= 4) {
-        setStatKeys([...statKeys.slice(1), key])
-      } else {
-        setStatKeys([...statKeys, key])
-      }
+      setStatKeys([...statKeys, key])
     }
   }
 
@@ -399,7 +395,7 @@ export default function Dashboard() {
 
           {/* Stat cards */}
           <div>
-            <p className="text-xs text-slate-400 mb-2">Stat Cards <span className="text-slate-600">(pick up to 4)</span></p>
+            <p className="text-xs text-slate-400 mb-2">Stat Cards <span className="text-slate-600">(pick any)</span></p>
             <div className="flex flex-wrap gap-2">
               {STAT_OPTIONS.map(opt => {
                 const on = statKeys.includes(opt.key)
