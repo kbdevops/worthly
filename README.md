@@ -1,9 +1,9 @@
 # Worthly
 
-**Self-hosted net worth & portfolio dashboard** — multi-currency (AUD/USD), live Yahoo Finance prices, Australian CGT calculations, and dividend/franking tracking. Your data, your server, no third party ever sees it.
+**Self-hosted net worth & portfolio dashboard** - multi-currency (AUD/USD), live Yahoo Finance prices, Australian CGT calculations, and dividend/franking tracking. Your data, your server, no third party ever sees it.
 
 <!--
-  Badge row — the build badge only works once this repo has run at least one
+  Badge row - the build badge only works once this repo has run at least one
   GitHub Actions workflow on `main`. Swap kbdevops/worthly if the repo moves.
 -->
 [![Build](https://github.com/kbdevops/worthly/actions/workflows/build.yaml/badge.svg)](https://github.com/kbdevops/worthly/actions)
@@ -71,7 +71,7 @@ npm install
 npm run dev     # runs on port 5173, proxies /api → 5050
 ```
 
-Open **http://localhost:5173** in dev mode (or **http://localhost:5050** if you've built the frontend for production — see below).
+Open **http://localhost:5173** in dev mode (or **http://localhost:5050** if you've built the frontend for production - see below).
 
 On first run, go to the **Data Sync** tab and click **Sync All** to populate prices and metadata for your holdings.
 
@@ -92,7 +92,7 @@ docker run -d -p 5050:5050 \
   --name worthly worthly
 ```
 
-Mount a volume at `DATA_DIR` (defaults to the app directory if unset) — this is where `prices.db`, your transaction history, and everything else lives. Without a persistent volume, all data is lost when the container is recreated.
+Mount a volume at `DATA_DIR` (defaults to the app directory if unset) - this is where `prices.db`, your transaction history, and everything else lives. Without a persistent volume, all data is lost when the container is recreated.
 
 ## Configuration
 
@@ -100,33 +100,35 @@ Mount a volume at `DATA_DIR` (defaults to the app directory if unset) — this i
 |---|---|---|
 | `DATA_DIR` | app directory | Where `prices.db` and CSV/Excel imports live |
 
-There's no built-in authentication — Worthly assumes it's running somewhere you already trust (a home network, a VPN, behind your own reverse-auth proxy). If you're exposing it beyond that, put an auth layer in front of it (Traefik BasicAuth middleware, Tailscale, OAuth2 Proxy, etc.) before you do.
+There's no built-in authentication - Worthly assumes it's running somewhere you already trust (a home network, a VPN, behind your own reverse-auth proxy). If you're exposing it beyond that, put an auth layer in front of it (Traefik BasicAuth middleware, Tailscale, OAuth2 Proxy, etc.) before you do.
 
 ## Tech Stack
 
 - **Backend**: Flask, SQLite, `yfinance`, APScheduler (for the twice-daily background price sync)
 - **Frontend**: React 19 + TypeScript + Vite, Tailwind, Recharts, `@dnd-kit` (drag-to-reorder widgets)
-- **Data**: everything lives in a single `prices.db` SQLite file — no external database to run
+- **Data**: everything lives in a single `prices.db` SQLite file - no external database to run
 
 ## Project Structure
 
 ```
 worthly/
-├── app.py                   # Flask app — all API routes, sync logic, CGT calc
+├── app.py                   # Flask app - all API routes, sync logic, CGT calc
 ├── requirements.txt
+├── docs/
+│   └── media/               # Video assets for documentation (Dashboard, Holdings, etc.)
 ├── frontend/
 │   └── src/
 │       ├── components/tabs/ # Dashboard, Holdings, Tax, Dividends, Milestones, Sync
-│       ├── hooks/useApi.ts  # React Query hooks — one per API endpoint
+│       ├── hooks/useApi.ts  # React Query hooks - one per API endpoint
 │       └── types/           # Shared TypeScript types matching the API responses
 ├── deploy/
 │   ├── Dockerfile
 │   └── entrypoint.sh
-└── CLAUDE.md                 # Full API reference and data schemas
+└── CLAUDE.md                # Full API reference and data schemas
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the complete API reference, database schema, and architectural notes.
 
 ## Contributing
 
-Issues and PRs welcome. This started as a personal project, so some assumptions (single user, AUD base currency, Australian tax rules) are baked in fairly deep — if you want to use it differently, open an issue to discuss before a large PR.
+Issues and PRs welcome. This started as a personal project, so some assumptions (single user, AUD base currency, Australian tax rules) are baked in fairly deep - if you want to use it differently, open an issue to discuss before a large PR.
