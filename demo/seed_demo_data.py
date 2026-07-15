@@ -1,11 +1,17 @@
 """
 seed_demo_data.py
 ------------------
-Builds demo/fake.db: a Worthly database with the exact same schema as your
+Builds demo/prices.db: a Worthly database with the exact same schema as your
 real prices.db, but every dollar figure is fabricated. Ticker symbols are
 real (AAPL, MSFT, NVDA, VAS.AX, etc.) so that when you point the app at this
 file and click Sync, it pulls genuine live prices — the demo looks authentic
 on camera without any real portfolio data ever being in it.
+
+IMPORTANT: this must be named prices.db, not fake.db or anything else —
+app.py's DB_FILE is always DATA_DIR + "prices.db" (the filename itself is
+hardcoded, only the directory is configurable via DATA_DIR). Naming the
+output anything else means the app silently falls back to a fresh empty
+database instead of failing loudly.
 
 This is intentionally standalone and does NOT import app.py — importing it
 would also start the real background price-sync scheduler as a side effect,
@@ -14,13 +20,13 @@ is a plain copy of what app.py's db() function creates.
 
 Usage:
     python3 demo/seed_demo_data.py
-    DATA_DIR=demo python3 app.py     # now the app reads demo/fake.db instead
+    DATA_DIR=demo python3 app.py     # now the app reads demo/prices.db instead
 """
 import sqlite3
 import os
 from datetime import date, timedelta
 
-OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake.db")
+OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prices.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
@@ -113,6 +119,20 @@ FAKE_MILESTONES = [
      None, "goal", 1000000, None, 0, None, None, "networth", "AUD"),
 ]
 
+# Monthly snapshots of super + cash (the app has no automated way to track these day-to-day —
+# they're points you log yourself). Monthly Change and historical Net Worth both read exclusively
+# from this table, so without it those widgets have nothing to plot at all, even after a price sync.
+# Gently increasing values over ~18 months to look like genuine, non-uniform progress.
+FAKE_SNAPSHOTS = [
+    (540, 195000, 28000), (510, 198000, 26500), (480, 202000, 30000),
+    (450, 206000, 27000), (420, 211000, 31500), (390, 214000, 29000),
+    (360, 219000, 33000), (330, 223000, 30500), (300, 228000, 35000),
+    (270, 231000, 32000), (240, 236000, 37500), (210, 240000, 34000),
+    (180, 244000, 39000), (150, 247000, 36000), (120, 250000, 40500),
+    (90,  253000, 38000), (60,  256000, 42000), (30,  260000, 41500),
+    (0,   264000, 44450),  # today — cash matches FAKE_CASH_ACCOUNTS total
+]
+
 
 def main():
     if os.path.exists(OUT_PATH):
@@ -148,6 +168,12 @@ def main():
             "current_value, is_achieved, linked_metric, achieved_date, linked_metrics, currency) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             row,
+        )
+
+    for days_ago, super_val, cash_val in FAKE_SNAPSHOTS:
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?,?,?)",
+            (d(days_ago), super_val, cash_val),
         )
 
     conn.commit()
