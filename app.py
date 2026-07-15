@@ -139,6 +139,26 @@ def db():
             date TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dividends (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            exchange TEXT NOT NULL,
+            per_share REAL NOT NULL,
+            units REAL NOT NULL,
+            currency TEXT NOT NULL,
+            gross_amount REAL NOT NULL,
+            gross_amount_aud REAL NOT NULL,
+            franking_pct REAL NOT NULL DEFAULT 0,
+            franking_credit_aud REAL NOT NULL DEFAULT 0,
+            withholding_tax_pct REAL NOT NULL DEFAULT 0,
+            net_amount_aud REAL NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
+            UNIQUE(symbol, date)
+        )
+    """)
     # Migrate existing sync_log table — tracks sync health, not just successful ranges
     for col, defn in [
         ("last_error", "TEXT"),      # non-null when the most recent sync attempt failed
@@ -974,7 +994,180 @@ def get_sync_status():
             })
     return jsonify(result)
 
-@app.route("/api/performance", methods=["GET"])
+AU_FRANKING_TAX_RATE = 0.30  # Australian corporate tax rate used to gross up franked dividends
+US_TREATY_WITHHOLDING_PCT = 15.0  # Withholding on US-source dividends under the AU-US tax treaty
+
+def _units_held_on(symbol_txns, as_of):
+    """Cumulative units held for a symbol's transactions as of (and including) a date."""
+    units = 0.0
+    for t in symbol_txns:
+        if t["date"] > as_of:
+            continue
+        if t["action"].lower() == "buy":
+            units += t["units"]
+        elif t["action"].lower() == "sell":
+            units -= t["units"]
+        elif t["action"].lower() == "split":
+            units += t["units"]
+    return units
+
+def _compute_dividend_row(conn, symbol, ticker, exchange, currency, ex_date, per_share, units, source="manual", franking_pct=0.0):
+    """Compute the full AUD-converted, franking/withholding-aware dividend record for one payment."""
+    gross_amount = per_share * units
+    exch_rate = get_historical_exchange_rate(conn, ex_date) if currency == "USD" else 1.0
+    gross_amount_aud = gross_amount / exch_rate if currency == "USD" else gross_amount
+
+    withholding_tax_pct = US_TREATY_WITHHOLDING_PCT if currency == "USD" else 0.0
+    # Franking credits are a tax offset, not a cash reduction — franked AU dividends
+    # are paid in full; withholding is what actually reduces the cash you receive.
+    franking_credit_aud = gross_amount_aud * (franking_pct / 100.0) * (AU_FRANKING_TAX_RATE / (1 - AU_FRANKING_TAX_RATE)) if currency != "USD" else 0.0
+    net_amount_aud = gross_amount_aud * (1 - withholding_tax_pct / 100.0)
+
+    return {
+        "date": ex_date, "symbol": symbol, "ticker": ticker, "exchange": exchange,
+        "per_share": per_share, "units": round(units, 4), "currency": currency,
+        "gross_amount": round(gross_amount, 2), "gross_amount_aud": round(gross_amount_aud, 2),
+        "franking_pct": franking_pct, "franking_credit_aud": round(franking_credit_aud, 2),
+        "withholding_tax_pct": withholding_tax_pct, "net_amount_aud": round(net_amount_aud, 2),
+        "source": source,
+    }
+
+@app.route("/api/dividends", methods=["GET"])
+def get_dividends():
+    conn = db()
+    rows = conn.execute("""
+        SELECT id, date, symbol, ticker, exchange, per_share, units, currency,
+               gross_amount, gross_amount_aud, franking_pct, franking_credit_aud,
+               withholding_tax_pct, net_amount_aud, source
+        FROM dividends ORDER BY date DESC
+    """).fetchall()
+    conn.close()
+    cols = ["id", "date", "symbol", "ticker", "exchange", "per_share", "units", "currency",
+            "gross_amount", "gross_amount_aud", "franking_pct", "franking_credit_aud",
+            "withholding_tax_pct", "net_amount_aud", "source"]
+    return jsonify([dict(zip(cols, r)) for r in rows])
+
+@app.route("/api/dividends", methods=["POST"])
+def add_dividend():
+    """Manually add a dividend payment yfinance didn't catch."""
+    data = request.json
+    try:
+        conn = db()
+        row = _compute_dividend_row(
+            conn, yf_symbol(data["ticker"], data["exchange"]), data["ticker"], data["exchange"],
+            data.get("currency") or get_currency_from_exchange(data["exchange"]),
+            data["date"], float(data["per_share"]), float(data["units"]),
+            source="manual", franking_pct=float(data.get("franking_pct", 0)),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO dividends (date, symbol, ticker, exchange, per_share, units, currency, "
+            "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (row["date"], row["symbol"], row["ticker"], row["exchange"], row["per_share"], row["units"],
+             row["currency"], row["gross_amount"], row["gross_amount_aud"], row["franking_pct"],
+             row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"]),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/dividends/<int:div_id>", methods=["PUT"])
+def update_dividend(div_id):
+    """Mainly used to fill in franking_pct on an auto-fetched row — nobody publishes
+    franking data programmatically, so this always has to be a manual edit."""
+    data = request.json
+    try:
+        conn = db()
+        existing = conn.execute(
+            "SELECT symbol, ticker, exchange, per_share, units, currency, date FROM dividends WHERE id = ?", (div_id,)
+        ).fetchone()
+        if not existing:
+            conn.close()
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        symbol, ticker, exchange, per_share, units, currency, ex_date = existing
+        franking_pct = float(data.get("franking_pct", 0))
+        row = _compute_dividend_row(conn, symbol, ticker, exchange, currency, ex_date, per_share, units,
+                                     source=data.get("source", "manual"), franking_pct=franking_pct)
+        conn.execute(
+            "UPDATE dividends SET franking_pct=?, franking_credit_aud=?, net_amount_aud=? WHERE id=?",
+            (row["franking_pct"], row["franking_credit_aud"], row["net_amount_aud"], div_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/dividends/<int:div_id>", methods=["DELETE"])
+def delete_dividend(div_id):
+    conn = db()
+    conn.execute("DELETE FROM dividends WHERE id = ?", (div_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+@app.route("/api/dividends/sync", methods=["POST"])
+def sync_dividends():
+    """Pull dividend history from yfinance for every symbol ever held, sized by the
+    units actually held on each ex-dividend date. Franking % is never set by this —
+    there's no feed for it — existing rows keep whatever franking_pct was already
+    entered; only genuinely new payments are inserted (at franking_pct=0, since a
+    reasonable default can't be assumed)."""
+    txns = load_transactions()
+    if not txns:
+        return jsonify({"results": [], "message": "No transactions to sync dividends for"})
+
+    by_symbol = {}
+    for t in txns:
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        by_symbol.setdefault(sym, {"ticker": t["ticker"], "exchange": t["exchange"],
+                                    "currency": t.get("currency") or get_currency_from_exchange(t["exchange"]),
+                                    "txns": []})["txns"].append(t)
+
+    conn = db()
+    results = []
+    for sym, info in by_symbol.items():
+        try:
+            divs = _fetch_with_retry(lambda: yf.Ticker(sym).dividends)
+            if divs is None or divs.empty:
+                results.append({"symbol": sym, "ok": True, "message": "No dividend history"})
+                continue
+            divs.index = divs.index.tz_localize(None)
+            inserted = 0
+            for ts, per_share in divs.items():
+                ex_date = ts.strftime("%Y-%m-%d")
+                units = _units_held_on(info["txns"], ex_date)
+                if units <= 1e-5:
+                    continue  # wasn't held on this ex-date
+                existing = conn.execute(
+                    "SELECT franking_pct FROM dividends WHERE symbol = ? AND date = ?", (sym, ex_date)
+                ).fetchone()
+                franking_pct = existing[0] if existing else 0.0
+                row = _compute_dividend_row(conn, sym, info["ticker"], info["exchange"], info["currency"],
+                                             ex_date, float(per_share), units,
+                                             source="yfinance", franking_pct=franking_pct)
+                conn.execute(
+                    "INSERT INTO dividends (date, symbol, ticker, exchange, per_share, units, currency, "
+                    "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(symbol, date) DO UPDATE SET per_share=excluded.per_share, units=excluded.units, "
+                    "gross_amount=excluded.gross_amount, gross_amount_aud=excluded.gross_amount_aud, "
+                    "net_amount_aud=excluded.net_amount_aud",
+                    (row["date"], row["symbol"], row["ticker"], row["exchange"], row["per_share"], row["units"],
+                     row["currency"], row["gross_amount"], row["gross_amount_aud"], row["franking_pct"],
+                     row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"]),
+                )
+                inserted += 1
+            conn.commit()
+            results.append({"symbol": sym, "ok": True, "message": f"{inserted} payment(s) synced"})
+        except Exception as e:
+            results.append({"symbol": sym, "ok": False, "message": str(e)})
+    conn.close()
+    return jsonify({"results": results})
+
+
 def get_performance():
     """Return historical timeline of portfolio value, principal, and return."""
     txns = load_transactions()
