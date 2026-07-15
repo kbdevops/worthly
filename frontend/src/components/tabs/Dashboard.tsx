@@ -37,7 +37,7 @@ function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
 }
 
 // ── Stat card config ──────────────────────────────────────────────────────────
-type StatKey = 'net_worth' | 'portfolio' | 'super' | 'cash' | 'total_return' | 'return_pct' | 'best' | 'worst' | 'all_time_high'
+type StatKey = 'net_worth' | 'portfolio' | 'super' | 'cash' | 'total_return' | 'return_pct' | 'best' | 'worst' | 'daily_ath'
 
 const STAT_OPTIONS: { key: StatKey; label: string }[] = [
   { key: 'net_worth',     label: 'Total Net Worth' },
@@ -48,7 +48,7 @@ const STAT_OPTIONS: { key: StatKey; label: string }[] = [
   { key: 'return_pct',    label: 'Total Return (%)' },
   { key: 'best',          label: 'Best Performer' },
   { key: 'worst',         label: 'Worst Performer' },
-  { key: 'all_time_high', label: 'Portfolio All-Time High' },
+  { key: 'daily_ath',     label: 'Best Day Ever' },
 ]
 
 // ── Widget definitions ────────────────────────────────────────────────────────
@@ -150,7 +150,12 @@ export default function Dashboard() {
   }
   const [order, setOrder] = useLocalStorage<WidgetId[]>('dash_order', DEFAULT_ORDER)
   const [visible, setVisible] = useLocalStorage<Record<WidgetId, boolean>>('dash_visible', DEFAULT_VISIBLE)
-  const [statKeys, setStatKeys] = useLocalStorage<StatKey[]>('dash_stats', DEFAULT_STATS)
+  const [statKeys, setStatKeysRaw] = useLocalStorage<StatKey[]>('dash_stats', DEFAULT_STATS)
+  // Guard against stale keys from before a StatKey was renamed/removed (e.g. the old
+  // 'all_time_high' → 'daily_ath' swap) — an unmatched key would otherwise render a blank card.
+  const VALID_STAT_KEYS = new Set(STAT_OPTIONS.map(o => o.key))
+  const cleanedStatKeys = statKeys.filter(k => VALID_STAT_KEYS.has(k))
+  const setStatKeys = setStatKeysRaw
   const [showCustomise, setShowCustomise] = useState(false)
 
   // ── Data transforms ──────────────────────────────────────────────────────
@@ -212,11 +217,11 @@ export default function Dashboard() {
       case 'return_pct':   return { label: 'Total Return (%)',  value: fmtPct(returnPct), color: returnPct >= 0 ? '#10b981' : '#ef4444' }
       case 'best':         return { label: 'Best Performer',    value: stats?.best_performer ?? '—', sub: stats?.best_performer ? fmtPct(stats.best_performer_pct) : undefined, color: '#10b981' }
       case 'worst':        return { label: 'Worst Performer',   value: stats?.worst_performer ?? '—', sub: stats?.worst_performer ? fmtPct(stats.worst_performer_pct) : undefined, color: '#ef4444' }
-      case 'all_time_high': {
-        const athDate = stats?.all_time_high_date
-          ? new Date(stats.all_time_high_date).toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' })
+      case 'daily_ath': {
+        const athDate = stats?.daily_ath_date
+          ? new Date(stats.daily_ath_date).toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' })
           : undefined
-        return { label: 'Portfolio All-Time High', value: fmtCurrency(stats?.all_time_high ?? 0), sub: athDate, color: '#f59e0b' }
+        return { label: 'Best Day Ever', value: fmtCurrencySigned(stats?.daily_ath ?? 0), sub: athDate ? `on ${athDate}` : undefined, color: '#f59e0b' }
       }
     }
   }
@@ -458,7 +463,7 @@ export default function Dashboard() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-        {statKeys.map(key => {
+        {cleanedStatKeys.map(key => {
           const c = resolveStatCard(key)
           return <StatCard key={key} {...c} />
         })}

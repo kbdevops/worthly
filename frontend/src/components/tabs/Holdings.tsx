@@ -1,11 +1,12 @@
 import { useState, useMemo } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3 } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3, Pencil, Check, Layers } from 'lucide-react'
 import {
   useCashAccounts, useSuperHoldings, usePortfolio, useSnapshots, useBreakdown,
   useSaveCashAccounts, useSaveSuperHoldings, useAddSnapshot,
   useTransactions, useAddTransaction, useDeleteTransaction,
+  useHoldingGroups, useAddHoldingGroup, useUpdateHoldingGroup, useDeleteHoldingGroup,
 } from '../../hooks/useApi'
-import { fmtCurrency, fmtPct, fmtDate } from '../../lib/utils'
+import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import type { CashAccount, SuperHolding, Snapshot, Holding } from '../../types'
 import HistorySlideout from '../layout/HistorySlideout'
 
@@ -298,16 +299,24 @@ export default function Holdings() {
   const { data: portfolio = [] } = usePortfolio()
   const { data: snapshots = [] } = useSnapshots()
   const { data: bd } = useBreakdown()
+  const { data: groupsData } = useHoldingGroups()
 
   const saveCash = useSaveCashAccounts()
   const saveSuper = useSaveSuperHoldings()
   const addSnapshot = useAddSnapshot()
+  const addGroup = useAddHoldingGroup()
+  const updateGroup = useUpdateHoldingGroup()
+  const deleteGroup = useDeleteHoldingGroup()
 
   const [showCash, setShowCash] = useState(false)
   const [showSuper, setShowSuper] = useState(false)
+  const [showGroups, setShowGroups] = useState(true)
+  const [editingSuperBalance, setEditingSuperBalance] = useState(false)
+  const [superBalanceInput, setSuperBalanceInput] = useState('')
   const [historyType, setHistoryType] = useState<'cash' | 'super' | null>(null)
   const [selectedHolding, setSelectedHolding] = useState<Holding | null>(null)
   const [showAddTxn, setShowAddTxn] = useState(false)
+  const [groupModal, setGroupModal] = useState<{ id: number | null; name: string; symbols: string[] } | null>(null)
 
   const updateCashField = (idx: number, field: keyof CashAccount, value: string | number) => {
     const updated = cashAccounts.map((a, i) =>
@@ -350,7 +359,45 @@ export default function Holdings() {
     addSnapshot.mutate({ date: monthStart, super: lastSuper, cash: cashTotal })
   }
 
+  const startEditSuperBalance = () => {
+    setSuperBalanceInput(String(bd?.super ?? 0))
+    setEditingSuperBalance(true)
+  }
+
+  const confirmEditSuperBalance = () => {
+    const newSuper = parseFloat(superBalanceInput)
+    if (isNaN(newSuper)) { setEditingSuperBalance(false); return }
+    const today = new Date().toISOString().slice(0, 10)
+    const cashTotal = cashAccounts.reduce((s, a) => s + a.balance, 0)
+    addSnapshot.mutate({ date: today, super: newSuper, cash: cashTotal })
+    setEditingSuperBalance(false)
+  }
+
   const activeHoldings = portfolio.filter(h => h.units > 0)
+
+  const openAddGroup = () => setGroupModal({ id: null, name: '', symbols: [] })
+  const openEditGroup = (g: { id: number; name: string; symbols: string[] }) =>
+    setGroupModal({ id: g.id, name: g.name, symbols: g.symbols })
+
+  const toggleGroupSymbol = (symbol: string) => {
+    if (!groupModal) return
+    setGroupModal({
+      ...groupModal,
+      symbols: groupModal.symbols.includes(symbol)
+        ? groupModal.symbols.filter(s => s !== symbol)
+        : [...groupModal.symbols, symbol],
+    })
+  }
+
+  const saveGroup = () => {
+    if (!groupModal || !groupModal.name.trim() || groupModal.symbols.length === 0) return
+    if (groupModal.id) {
+      updateGroup.mutate({ id: groupModal.id, name: groupModal.name.trim(), symbols: groupModal.symbols })
+    } else {
+      addGroup.mutate({ name: groupModal.name.trim(), symbols: groupModal.symbols })
+    }
+    setGroupModal(null)
+  }
 
   return (
     <div className="space-y-6">
@@ -418,7 +465,31 @@ export default function Holdings() {
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
           <div>
             <p className="text-xs text-slate-400">Superannuation</p>
-            <p className="text-2xl font-bold text-white">{fmtCurrency(bd?.super ?? 0)}</p>
+            {editingSuperBalance ? (
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="number"
+                  autoFocus
+                  value={superBalanceInput}
+                  onChange={e => setSuperBalanceInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') confirmEditSuperBalance(); if (e.key === 'Escape') setEditingSuperBalance(false) }}
+                  className="text-2xl font-bold text-white bg-transparent border-b border-[var(--accent)] focus:outline-none w-40"
+                />
+                <button onClick={confirmEditSuperBalance} className="p-1.5 rounded-lg text-emerald-400 hover:bg-white/10">
+                  <Check size={16} />
+                </button>
+                <button onClick={() => setEditingSuperBalance(false)} className="p-1.5 rounded-lg text-slate-500 hover:bg-white/10">
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <p className="text-2xl font-bold text-white">{fmtCurrency(bd?.super ?? 0)}</p>
+                <button onClick={startEditSuperBalance} title="Update super balance" className="p-1 rounded text-slate-500 hover:text-white hover:bg-white/10">
+                  <Pencil size={13} />
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex gap-2">
             <button onClick={() => setHistoryType('super')} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10">
@@ -429,6 +500,9 @@ export default function Holdings() {
             </button>
           </div>
         </div>
+        <p className="px-5 pt-3 text-xs text-slate-500">
+          The table below is your allocation breakdown (asset class %), not your balance — use the pencil above to update the actual dollar total.
+        </p>
         {showSuper && (
           <div>
             <table className="w-full">
@@ -468,6 +542,88 @@ export default function Holdings() {
               </button>
             </div>
           </div>
+        )}
+      </div>
+
+      {/* Holding Groups — Sharesight-style custom groupings with Value/Capital Gain/Income/Currency/Return + grand total */}
+      <div className={CARD} style={CARD_BG}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2">
+            <Layers size={16} className="text-slate-400" />
+            <p className="text-sm font-medium text-slate-200">Holding Groups</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={openAddGroup} className="flex items-center gap-1.5 text-sm text-indigo-400 hover:text-indigo-300 px-2">
+              <Plus size={14} /> New Group
+            </button>
+            <button onClick={() => setShowGroups(s => !s)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10">
+              {showGroups ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+          </div>
+        </div>
+        {showGroups && (
+          groupsData && groupsData.groups.length > 0 ? (
+            <table className="w-full">
+              <thead style={{ background: 'var(--bg-elevated)' }}>
+                <tr>
+                  <th className={TH2}>Group</th>
+                  <th className={TH2}>Value</th>
+                  <th className={TH2}>Capital Gain</th>
+                  <th className={TH2}>Income</th>
+                  <th className={TH2}>Currency</th>
+                  <th className={TH2}>Return</th>
+                  <th className={TH2}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupsData.groups.map(g => (
+                  <tr key={g.id} className="border-t border-[var(--border)] hover:bg-white/5">
+                    <td className={TD2}>
+                      <button onClick={() => openEditGroup(g)} className="text-white font-medium hover:text-indigo-400 text-left">
+                        {g.name}
+                      </button>
+                      <span className="block text-xs text-slate-500">{g.symbols.length} holding{g.symbols.length !== 1 ? 's' : ''}</span>
+                    </td>
+                    <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.value)}</td>
+                    <td className={TD2}>
+                      <span className={g.capital_gain >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtCurrencySigned(g.capital_gain)}</span>
+                    </td>
+                    <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.income)}</td>
+                    <td className={TD2 + ' text-slate-400'}>{g.currency}</td>
+                    <td className={TD2}>
+                      <span className={g.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtPct(g.return_pct)}</span>
+                    </td>
+                    <td className={TD2}>
+                      <button onClick={() => deleteGroup.mutate(g.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={14} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-[var(--border)]" style={{ background: 'var(--bg-elevated)' }}>
+                  <td className={TD2 + ' font-semibold text-white'}>Grand Total</td>
+                  <td className={TD2 + ' font-semibold text-white'}>{fmtCurrency(groupsData.grand_total.value)}</td>
+                  <td className={TD2 + ' font-semibold'}>
+                    <span className={groupsData.grand_total.capital_gain >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {fmtCurrencySigned(groupsData.grand_total.capital_gain)}
+                    </span>
+                  </td>
+                  <td className={TD2 + ' font-semibold text-white'}>{fmtCurrency(groupsData.grand_total.income)}</td>
+                  <td className={TD2 + ' text-slate-400'}>{groupsData.grand_total.currency}</td>
+                  <td className={TD2 + ' font-semibold'}>
+                    <span className={groupsData.grand_total.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {fmtPct(groupsData.grand_total.return_pct)}
+                    </span>
+                  </td>
+                  <td className={TD2}></td>
+                </tr>
+              </tfoot>
+            </table>
+          ) : (
+            <div className="text-center py-8 text-slate-500 text-sm">
+              No groups yet — group holdings together (e.g. "US Tech", "ASX ETFs") to see combined value, gain, income and return.
+            </div>
+          )
         )}
       </div>
 
@@ -535,6 +691,55 @@ export default function Holdings() {
           title="Add Transaction"
           onClose={() => setShowAddTxn(false)}
         />
+      )}
+
+      {groupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setGroupModal(null)}>
+          <div className="w-full max-w-md rounded-xl p-6 space-y-4" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-slate-200">{groupModal.id ? 'Edit Group' : 'New Group'}</p>
+              <button onClick={() => setGroupModal(null)} className="text-slate-500 hover:text-slate-300"><X size={16} /></button>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Group Name</label>
+              <input
+                value={groupModal.name}
+                onChange={e => setGroupModal({ ...groupModal, name: e.target.value })}
+                placeholder="e.g. US Tech, ASX ETFs"
+                className="w-full px-3 py-2 rounded-lg text-sm text-slate-300 placeholder-slate-600 focus:outline-none"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 mb-1.5">Holdings</label>
+              <div className="max-h-56 overflow-y-auto rounded-lg border border-[var(--border)]" style={{ background: 'var(--bg-elevated)' }}>
+                {activeHoldings.map(h => (
+                  <label key={h.symbol} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-white/5 border-b border-[var(--border)] last:border-b-0">
+                    <input
+                      type="checkbox"
+                      checked={groupModal.symbols.includes(h.symbol)}
+                      onChange={() => toggleGroupSymbol(h.symbol)}
+                      className="accent-[var(--accent)]"
+                    />
+                    <span className="text-sm text-slate-300">{h.ticker}</span>
+                    <span className="text-xs text-slate-500">{h.exchange}</span>
+                  </label>
+                ))}
+                {activeHoldings.length === 0 && (
+                  <p className="px-3 py-4 text-xs text-slate-500 text-center">No active holdings to group yet.</p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={saveGroup}
+              disabled={!groupModal.name.trim() || groupModal.symbols.length === 0}
+              className="w-full py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
+            >
+              {groupModal.id ? 'Save Changes' : 'Create Group'}
+            </button>
+          </div>
+        </div>
       )}
     </div>
   )

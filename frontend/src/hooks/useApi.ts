@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
-  CGTResult, SyncStatus, SyncResponse, Milestone, Dividend,
+  CGTResult, SyncStatus, SyncResponse, Milestone, Dividend, HoldingGroup,
 } from '../types'
 
 const get = async <T>(url: string): Promise<T> => {
@@ -121,7 +121,17 @@ export const useAddSnapshot = () => {
   return useMutation({
     mutationFn: (data: { date: string; super: number; cash: number }) =>
       post('/api/snapshots', data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['snapshots'] }),
+    onSuccess: () => {
+      // snapshots feeds breakdown/stats/networth/monthly-change/milestones (super or
+      // cash can be a tracked milestone metric) — invalidating only 'snapshots' left
+      // the Superannuation card showing a stale value after a real, successful update.
+      qc.invalidateQueries({ queryKey: ['snapshots'] })
+      qc.invalidateQueries({ queryKey: ['breakdown'] })
+      qc.invalidateQueries({ queryKey: ['stats'] })
+      qc.invalidateQueries({ queryKey: ['networth'] })
+      qc.invalidateQueries({ queryKey: ['monthly-change'] })
+      qc.invalidateQueries({ queryKey: ['milestones'] })
+    },
   })
 }
 
@@ -196,5 +206,36 @@ export const useSyncDividends = () => {
   return useMutation({
     mutationFn: () => post<SyncResponse>('/api/dividends/sync'),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dividends'] }),
+  })
+}
+
+export const useHoldingGroups = () =>
+  useQuery({
+    queryKey: ['holding-groups'],
+    queryFn: () => get<{ groups: HoldingGroup[]; grand_total: Omit<HoldingGroup, 'id' | 'name' | 'symbols'> }>('/api/holding-groups'),
+  })
+
+export const useAddHoldingGroup = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; symbols: string[] }) => post('/api/holding-groups', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['holding-groups'] }),
+  })
+}
+
+export const useUpdateHoldingGroup = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, name, symbols }: { id: number; name: string; symbols: string[] }) =>
+      put(`/api/holding-groups/${id}`, { name, symbols }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['holding-groups'] }),
+  })
+}
+
+export const useDeleteHoldingGroup = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => del(`/api/holding-groups/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['holding-groups'] }),
   })
 }

@@ -18,6 +18,8 @@ export interface Stats {
   worst_performer_pct: number
   all_time_high: number
   all_time_high_date: string | null
+  daily_ath: number
+  daily_ath_date: string | null
 }
 
 export interface NetworthData {
@@ -45,6 +47,7 @@ export interface Allocation {
 }
 
 export interface Holding {
+  symbol: string
   ticker: string
   exchange: string
   name: string
@@ -149,6 +152,18 @@ export interface SyncResult {
 export interface SyncResponse {
   results: SyncResult[]
   message?: string
+}
+
+export interface HoldingGroup {
+  id: number
+  name: string
+  symbols: string[]
+  value: number
+  capital_gain: number
+  income: number
+  currency: string
+  return_pct: number
+  cost_basis: number
 }
 
 export interface Dividend {
