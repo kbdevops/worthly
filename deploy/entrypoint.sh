@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python app.py
+exec python -u app.py
