@@ -6,13 +6,15 @@ import Holdings from './components/tabs/Holdings'
 import Tax from './components/tabs/Tax'
 import Milestones from './components/tabs/Milestones'
 import Sync from './components/tabs/Sync'
+import Dividends from './components/tabs/Dividends'
 
-export type TabId = 'dashboard' | 'holdings' | 'tax' | 'milestones' | 'sync'
+export type TabId = 'dashboard' | 'holdings' | 'tax' | 'milestones' | 'sync' | 'dividends'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'holdings', label: 'Holdings' },
   { id: 'tax', label: 'Tax' },
+  { id: 'dividends', label: 'Dividends' },
   { id: 'milestones', label: 'Milestones' },
   { id: 'sync', label: 'Data Sync' },
 ]
@@ -20,7 +22,7 @@ const TABS: { id: TabId; label: string }[] = [
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     const saved = localStorage.getItem('activeTab') as TabId
-    const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync']
+    const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync', 'dividends']
     return valid.includes(saved) ? saved : 'dashboard'
   })
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -68,6 +70,7 @@ export default function App() {
           {activeTab === 'tax' && <Tax />}
           {activeTab === 'milestones' && <Milestones />}
           {activeTab === 'sync' && <Sync />}
+          {activeTab === 'dividends' && <Dividends />}
         </main>
       </div>
     </div>

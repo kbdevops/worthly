@@ -151,6 +151,24 @@ export interface SyncResponse {
   message?: string
 }
 
+export interface Dividend {
+  id: number
+  date: string
+  symbol: string
+  ticker: string
+  exchange: string
+  per_share: number
+  units: number
+  currency: 'AUD' | 'USD'
+  gross_amount: number
+  gross_amount_aud: number
+  franking_pct: number
+  franking_credit_aud: number
+  withholding_tax_pct: number
+  net_amount_aud: number
+  source: 'yfinance' | 'manual'
+}
+
 export interface Milestone {
   id: number
   date: string

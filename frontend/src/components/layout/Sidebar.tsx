@@ -1,4 +1,4 @@
-import { LayoutDashboard, Briefcase, Calculator, Award, RefreshCw } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Calculator, Award, RefreshCw, Coins } from 'lucide-react'
 import type { TabId } from '../../App'
 import { useSync } from '../../hooks/useApi'
 import { cn } from '../../lib/utils'
@@ -7,6 +7,7 @@ const ICONS: Record<TabId, React.ReactNode> = {
   dashboard: <LayoutDashboard size={18} />,
   holdings: <Briefcase size={18} />,
   tax: <Calculator size={18} />,
+  dividends: <Coins size={18} />,
   milestones: <Award size={18} />,
   sync: <RefreshCw size={18} />,
 }

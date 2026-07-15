@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
-  CGTResult, SyncStatus, SyncResponse, Milestone,
+  CGTResult, SyncStatus, SyncResponse, Milestone, Dividend,
 } from '../types'
 
 const get = async <T>(url: string): Promise<T> => {
@@ -160,5 +160,41 @@ export const useDeleteMilestone = () => {
   return useMutation({
     mutationFn: (id: number) => del(`/api/milestones/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['milestones'] }),
+  })
+}
+
+export const useDividends = () =>
+  useQuery({ queryKey: ['dividends'], queryFn: () => get<Dividend[]>('/api/dividends') })
+
+export const useAddDividend = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Partial<Dividend>) => post('/api/dividends', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dividends'] }),
+  })
+}
+
+export const useUpdateDividendFranking = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, franking_pct }: { id: number; franking_pct: number }) =>
+      put(`/api/dividends/${id}`, { franking_pct }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dividends'] }),
+  })
+}
+
+export const useDeleteDividend = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => del(`/api/dividends/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dividends'] }),
+  })
+}
+
+export const useSyncDividends = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<SyncResponse>('/api/dividends/sync'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dividends'] }),
   })
 }
