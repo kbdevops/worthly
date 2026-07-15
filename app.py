@@ -596,6 +596,13 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
             if now - last_synced < timedelta(minutes=15) and needed_end < cached_to:
                 return True, "Cached recently"
 
+        # Yahoo doesn't publish a daily candle for a day that hasn't closed yet —
+        # asking for "today" via the daily endpoint reliably throws a
+        # "possibly delisted; no price data found" error, every symbol, every day,
+        # until market close. Today's live price comes from the intraday fetch
+        # below instead, so daily requests never go past the last fully elapsed day.
+        daily_cap = pd.Timestamp(date.today()) - timedelta(days=1)
+
         ranges_to_fetch = []
         if row is None:
             ranges_to_fetch.append((needed_start, needed_end))
@@ -606,18 +613,18 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
                 ranges_to_fetch.append((needed_start, cached_from - timedelta(days=1)))
             if needed_end > cached_to:
                 ranges_to_fetch.append((cached_to + timedelta(days=1), needed_end))
-            else:
-                # Always refetch the most recent day so the daily close overwrites
-                # any stale intraday snapshot that was inserted during trading hours.
-                ranges_to_fetch.append((needed_end - timedelta(days=1), needed_end))
+
+        # Unconditionally (re)fetch the most recently closed trading day, even if
+        # cached_to already reaches it — a sync that ran while the market was still
+        # open only captures an in-progress intraday snapshot for that date, and
+        # that snapshot's own date makes cached_to look "caught up" even though the
+        # value isn't final. This guarantees it eventually gets overwritten by the
+        # real close, instead of getting permanently stuck (which is what was
+        # happening: the gap-fill range above collapses to an empty/inverted range
+        # once cached_to already equals daily_cap, so that date was never revisited).
+        ranges_to_fetch.append((daily_cap, daily_cap))
 
         errors = []
-        # Yahoo doesn't publish a daily candle for a day that hasn't closed yet —
-        # asking for "today" via the daily endpoint reliably throws a
-        # "possibly delisted; no price data found" error, every symbol, every day,
-        # until market close. Today's live price comes from the intraday fetch
-        # below instead, so daily requests are capped at the last fully elapsed day.
-        daily_cap = pd.Timestamp(date.today()) - timedelta(days=1)
         for f_start, f_end in ranges_to_fetch:
             f_end = min(f_end, daily_cap)
             if f_start > f_end:
