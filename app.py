@@ -24,6 +24,7 @@ FRONTEND_DIST = os.path.join(BASE_DIR, "frontend", "dist")
 DB_FILE = os.path.join(DATA_DIR, "prices.db")
 CSV_FILE = os.path.join(DATA_DIR, "all_trades.csv")
 EXCEL_FILE = os.path.join(DATA_DIR, "AllTradesReport.xlsx")
+SNAPSHOT_FILE = os.path.join(DATA_DIR, "snapshots.json")
 
 # yfinance suffixes for exchanges
 EXCHANGE_SUFFIX = {
@@ -2202,7 +2203,10 @@ def get_monthly_change():
     return jsonify({"months": months, "change": changes, "change_pct": changes_pct})
 
 # On startup: seed snapshots if DB is empty, then start background price sync
-seed_historical_snapshots()
+try:
+    seed_historical_snapshots()
+except Exception as e:
+    print(f"[backend] seed_historical_snapshots failed (non-fatal, continuing startup): {e}")
 
 # Background price sync — runs automatically after market close (UTC times)
 # ASX closes ~06:00 UTC, NYSE/NASDAQ closes ~21:00 UTC
