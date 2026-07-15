@@ -28,7 +28,9 @@
 ### Dashboard
 Customisable, drag-to-reorder widgets - net worth timeline, allocation breakdown, holding performance, monthly change - with 5 color themes and configurable stat cards.
 
-<video src="docs/media/Dashboard.mp4" autoplay loop muted playsinline width="100%"></video>
+
+https://github.com/user-attachments/assets/20a55c36-7ff1-4dfc-9372-7152c5b91541
+
 
 ### Holdings
 Every position with full transaction history. Click into any holding for per-lot gain/loss, add or delete trades, sector/industry metadata pulled automatically.
