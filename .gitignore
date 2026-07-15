@@ -1,5 +1,8 @@
-# SQLite database (all data stored here)
-prices.db
+# SQLite database (all data stored here) — *.db catches prices.db and demo/fake.db;
+# WAL mode also creates -wal/-shm sidecar files that need excluding too
+*.db
+*.db-wal
+*.db-shm
 *.db-journal
 
 # Raw import files
