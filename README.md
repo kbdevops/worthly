@@ -26,22 +26,32 @@
 ## Features
 
 ### Dashboard
-Customisable, drag-to-reorder widgets — net worth timeline, allocation breakdown, holding performance, monthly change — with 5 color themes and configurable stat cards.
+Customisable, drag-to-reorder widgets - net worth timeline, allocation breakdown, holding performance, monthly change - with 5 color themes and configurable stat cards.
+
+<video src="docs/media/Dashboard.mp4" autoplay loop muted playsinline width="100%"></video>
 
 ### Holdings
 Every position with full transaction history. Click into any holding for per-lot gain/loss, add or delete trades, sector/industry metadata pulled automatically.
 
+<video src="docs/media/Holdings.mp4" autoplay loop muted playsinline width="100%"></video>
+
 ### Tax (Australian CGT)
 CGT calculations with the 50% long-term discount applied automatically, per-parcel breakdown, optimal sell-date suggestions.
 
+<video src="docs/media/Tax.mp4" autoplay loop muted playsinline width="100%"></video>
+
 ### Dividends
-Full dividend history auto-fetched from Yahoo Finance, sized by the units you actually held on each ex-dividend date. Tracks Australian franking credits (manually entered — no feed publishes these) and US treaty withholding tax automatically, with net and grossed-up totals.
+Full dividend history auto-fetched from Yahoo Finance, sized by the units you actually held on each ex-dividend date. Tracks Australian franking credits (manually entered - no feed publishes these) and US treaty withholding tax automatically, with net and grossed-up totals.
 
 ### Milestones
-Goals that track live app data — pick one metric or combine several (e.g. Cash + Portfolio), set a target in AUD or USD (USD targets convert to their live AUD equivalent every time you open the app, so progress moves with the exchange rate). Plus an achievements log for past milestones.
+Goals that track live app data - pick one metric or combine several (e.g. Cash + Portfolio), set a target in AUD or USD (USD targets convert to their live AUD equivalent every time you open the app, so progress moves with the exchange rate). Plus an achievements log for past milestones.
+
+<video src="docs/media/Milestones.mp4" autoplay loop muted playsinline width="100%"></video>
 
 ### Data Sync
-Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health — per-symbol errors, staleness warnings, last-run results — instead of a black box.
+Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health - per-symbol errors, staleness warnings, last-run results - instead of a black box.
+
+<video src="docs/media/DataSync.mp4" autoplay loop muted playsinline width="100%"></video>
 
 ---
 
