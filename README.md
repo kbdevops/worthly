@@ -35,12 +35,16 @@ https://github.com/user-attachments/assets/20a55c36-7ff1-4dfc-9372-7152c5b91541
 ### Holdings
 Every position with full transaction history. Click into any holding for per-lot gain/loss, add or delete trades, sector/industry metadata pulled automatically.
 
-<video src="docs/media/Holdings.mp4" autoplay loop muted playsinline width="100%"></video>
+
+https://github.com/user-attachments/assets/4f616609-4616-4ae5-aed5-ec00434e08ca
+
 
 ### Tax (Australian CGT)
 CGT calculations with the 50% long-term discount applied automatically, per-parcel breakdown, optimal sell-date suggestions.
 
-<video src="docs/media/Tax.mp4" autoplay loop muted playsinline width="100%"></video>
+
+https://github.com/user-attachments/assets/853394db-8440-473b-99b4-e870e13940a2
+
 
 ### Dividends
 Full dividend history auto-fetched from Yahoo Finance, sized by the units you actually held on each ex-dividend date. Tracks Australian franking credits (manually entered - no feed publishes these) and US treaty withholding tax automatically, with net and grossed-up totals.
@@ -48,12 +52,17 @@ Full dividend history auto-fetched from Yahoo Finance, sized by the units you ac
 ### Milestones
 Goals that track live app data - pick one metric or combine several (e.g. Cash + Portfolio), set a target in AUD or USD (USD targets convert to their live AUD equivalent every time you open the app, so progress moves with the exchange rate). Plus an achievements log for past milestones.
 
-<video src="docs/media/Milestones.mp4" autoplay loop muted playsinline width="100%"></video>
+
+https://github.com/user-attachments/assets/60ecbf40-c88f-4a89-9565-d526a927afcb
+
+
 
 ### Data Sync
 Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health - per-symbol errors, staleness warnings, last-run results - instead of a black box.
 
-<video src="docs/media/DataSync.mp4" autoplay loop muted playsinline width="100%"></video>
+
+https://github.com/user-attachments/assets/13b2fe3e-f030-4dd5-9aa8-e191eaeb1847
+
 
 ---
 
