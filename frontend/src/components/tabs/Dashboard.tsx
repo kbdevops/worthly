@@ -37,7 +37,7 @@ function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
 }
 
 // ── Stat card config ──────────────────────────────────────────────────────────
-type StatKey = 'net_worth' | 'portfolio' | 'super' | 'cash' | 'total_return' | 'return_pct' | 'best' | 'worst' | 'daily_ath'
+type StatKey = 'net_worth' | 'portfolio' | 'super' | 'cash' | 'total_return' | 'return_pct' | 'best' | 'worst' | 'daily_ath' | 'day_pl'
 
 const STAT_OPTIONS: { key: StatKey; label: string }[] = [
   { key: 'net_worth',     label: 'Total Net Worth' },
@@ -49,6 +49,7 @@ const STAT_OPTIONS: { key: StatKey; label: string }[] = [
   { key: 'best',          label: 'Best Performer' },
   { key: 'worst',         label: 'Worst Performer' },
   { key: 'daily_ath',     label: 'Best Day Ever' },
+  { key: 'day_pl',        label: "Today's P&L" },
 ]
 
 // ── Widget definitions ────────────────────────────────────────────────────────
@@ -222,6 +223,16 @@ export default function Dashboard() {
           ? new Date(stats.daily_ath_date).toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' })
           : undefined
         return { label: 'Best Day Ever', value: fmtCurrencySigned(stats?.daily_ath ?? 0), sub: athDate ? `on ${athDate}` : undefined, color: '#f59e0b' }
+      }
+      case 'day_pl': {
+        const pl = stats?.day_pl ?? 0
+        const plPct = stats?.day_pl_pct ?? 0
+        return {
+          label: "Today's P&L",
+          value: fmtCurrencySigned(pl),
+          sub: `${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}%`,
+          color: pl >= 0 ? '#10b981' : '#ef4444',
+        }
       }
     }
   }

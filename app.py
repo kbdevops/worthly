@@ -415,11 +415,11 @@ def load_transactions():
 
     conn = db()
     rows = conn.execute(
-        "SELECT date, exchange, ticker, name, action, units, price, currency, "
+        "SELECT id, date, exchange, ticker, name, action, units, price, currency, "
         "brokerage, brokerage_currency, exch_rate, value FROM transactions ORDER BY date, id"
     ).fetchall()
     conn.close()
-    cols = ["date", "exchange", "ticker", "name", "action", "units", "price",
+    cols = ["id", "date", "exchange", "ticker", "name", "action", "units", "price",
             "currency", "brokerage", "brokerage_currency", "exch_rate", "value"]
     return [dict(zip(cols, row)) for row in rows]
 
@@ -830,9 +830,12 @@ def add_transaction():
         brokerage = float(data.get("brokerage") or 0.0)
         
         currency = get_currency_from_exchange(exchange)
-        
+
         conn = db()
-        if currency == "USD":
+        manual_fx = data.get("exch_rate")
+        if manual_fx not in (None, "", 0):
+            exch_rate = float(manual_fx)
+        elif currency == "USD":
             exch_rate = get_historical_exchange_rate(conn, date_str)
         else:
             exch_rate = 1.0
@@ -853,34 +856,33 @@ def add_transaction():
         
         # Determine name if possible, or use ticker
         name = data.get("name", "").strip() or f"{ticker} Stock"
-        
-        txns = load_transactions()
-        txns.append({
-            "date": date_str,
-            "exchange": exchange,
-            "ticker": ticker,
-            "name": name,
-            "action": action,
-            "units": units,
-            "price": price,
-            "currency": currency,
-            "brokerage": brokerage,
-            "brokerage_currency": currency,
-            "exch_rate": exch_rate,
-            "value": round(aud_value, 2)
-        })
-        
-        # Re-sort chronologically
-        txns.sort(key=lambda x: x["date"])
-        save_transactions(txns)
+
+        conn = db()
+        conn.execute(
+            "INSERT INTO transactions (date, exchange, ticker, name, action, units, price, currency, "
+            "brokerage, brokerage_currency, exch_rate, value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (date_str, exchange, ticker, name, action, units, price, currency,
+             brokerage, currency, exch_rate, round(aud_value, 2)),
+        )
+        conn.commit()
+        conn.close()
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/transactions/<int:idx>", methods=["DELETE"])
 def delete_transaction(idx):
-    """Delete a transaction by its position in the date-ordered list."""
+    """Delete a transaction. idx is treated as a real transaction id when it exists as
+    one (the frontend now has stable ids to work with); falls back to the old
+    date-ordered positional lookup for any caller still using the legacy convention."""
     conn = db()
+    exists = conn.execute("SELECT id FROM transactions WHERE id = ?", (idx,)).fetchone()
+    if exists:
+        conn.execute("DELETE FROM transactions WHERE id = ?", (idx,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
     row = conn.execute(
         "SELECT id FROM transactions ORDER BY date, id LIMIT 1 OFFSET ?", (idx,)
     ).fetchone()
@@ -890,7 +892,59 @@ def delete_transaction(idx):
         conn.close()
         return jsonify({"ok": True})
     conn.close()
-    return jsonify({"ok": False, "error": "Index out of range"}), 404
+    return jsonify({"ok": False, "error": "Transaction not found"}), 404
+
+@app.route("/api/transactions/<int:txn_id>", methods=["PUT"])
+def update_transaction(txn_id):
+    """Edit an existing transaction by its stable id, recalculating value/exch_rate
+    the same way add_transaction does (same manual-FX-override support)."""
+    data = request.json
+    try:
+        conn = db()
+        exists = conn.execute("SELECT id FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+        if not exists:
+            conn.close()
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
+
+        date_str = data["date"]
+        exchange = data["exchange"].upper().strip()
+        ticker = data["ticker"].upper().strip()
+        action = data["action"].lower().strip()
+        units = float(data["units"])
+        price = float(data["price"])
+        brokerage = float(data.get("brokerage") or 0.0)
+        currency = get_currency_from_exchange(exchange)
+
+        manual_fx = data.get("exch_rate")
+        if manual_fx not in (None, "", 0):
+            exch_rate = float(manual_fx)
+        elif currency == "USD":
+            exch_rate = get_historical_exchange_rate(conn, date_str)
+        else:
+            exch_rate = 1.0
+
+        if action == "split":
+            price = 0.0
+            brokerage = 0.0
+            aud_value = 0.0
+        elif action == "sell":
+            aud_value = (-units * price + brokerage) / exch_rate
+        else:
+            aud_value = (units * price + brokerage) / exch_rate
+
+        name = data.get("name", "").strip() or f"{ticker} Stock"
+
+        conn.execute(
+            "UPDATE transactions SET date=?, exchange=?, ticker=?, name=?, action=?, units=?, price=?, "
+            "currency=?, brokerage=?, brokerage_currency=?, exch_rate=?, value=? WHERE id=?",
+            (date_str, exchange, ticker, name, action, units, price, currency,
+             brokerage, currency, exch_rate, round(aud_value, 2), txn_id),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 def _run_sync(force=False):
     """Core sync logic — fetch missing prices and metadata for all holdings.
@@ -1504,10 +1558,15 @@ def delete_holding_group(group_id):
     conn.close()
     return jsonify({"ok": True})
 
-def _build_daily_portfolio_value_series(conn):
-    """Full daily portfolio-value series (same construction as /api/networth), as a
-    pandas Series indexed by date. Shared by anything needing day-level portfolio
-    value history — currently just the Daily ATH stat."""
+def _build_daily_market_return_series(conn):
+    """Daily 'market-only' return series — portfolio_value(t) minus cumulative net
+    invested capital(t), same construction as the Return line in /api/networth.
+    Diffing THIS (not raw portfolio value) is what Daily ATH needs: a buy moves both
+    portfolio_value and invested capital up by the same amount on the same day, so it
+    nets to zero here — only genuine price movement on existing holdings shows up.
+    Diffing raw portfolio_value instead would misread "I bought $80k of APP today" as
+    an $80k gain, which is exactly the bug this replaced.
+    Returned as a pandas Series indexed by date."""
     txns = load_transactions()
     if not txns:
         return None
@@ -1532,10 +1591,13 @@ def _build_daily_portfolio_value_series(conn):
     fx_rates = price_data["AUDUSD=X"]
     units_changes = pd.DataFrame(0.0, index=all_dates, columns=df["sym"].unique())
     sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    cash_flow_changes = pd.Series(0.0, index=all_dates)
     for _, row in df.iterrows():
         sign = -1 if row["action"].lower() == "sell" else 1
         units_changes.loc[row["date"], row["sym"]] += sign * row["units"]
+        cash_flow_changes.loc[row["date"]] += row["value"]
     units_df = units_changes.cumsum()
+    cash_flow = cash_flow_changes.cumsum()
 
     portfolio_value = pd.Series(0.0, index=all_dates)
     for sym in df["sym"].unique():
@@ -1543,7 +1605,7 @@ def _build_daily_portfolio_value_series(conn):
         if sym_currency[sym] == "USD":
             prices = prices / fx_rates
         portfolio_value += units_df[sym] * prices
-    return portfolio_value
+    return portfolio_value - cash_flow
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
@@ -1563,6 +1625,10 @@ def get_stats():
             "audusd_rate": 0.65,
             "all_time_high": 0.0,
             "all_time_high_date": None,
+            "daily_ath": 0.0,
+            "daily_ath_date": None,
+            "day_pl": 0.0,
+            "day_pl_pct": 0.0,
         })
 
     # Fetch latest exchange rate and holdings
@@ -1590,12 +1656,22 @@ def get_stats():
             "audusd_rate": audusd,
             "all_time_high": 0.0,
             "all_time_high_date": None,
+            "daily_ath": 0.0,
+            "daily_ath_date": None,
+            "day_pl": 0.0,
+            "day_pl_pct": 0.0,
         })
 
     total_value = sum(h["value_aud"] for h in holdings)
     total_cost = sum(h["cost_aud"] for h in holdings)
     total_return = total_value - total_cost
     total_return_pct = (total_return / total_cost * 100) if total_cost > 0 else 0.0
+
+    # Today's P&L — sum of each holding's own daily_change (already price-only, not
+    # affected by units bought/sold today, same fix as Daily ATH needed)
+    day_pl = sum(h["daily_change"] for h in holdings)
+    prev_total_value = total_value - day_pl
+    day_pl_pct = (day_pl / prev_total_value * 100) if prev_total_value > 0 else 0.0
     
     usd_value = sum(h["value_aud"] for h in holdings if h["currency"] == "USD")
     usd_allocation_pct = (usd_value / total_value * 100) if total_value > 0 else 0.0
@@ -1623,7 +1699,7 @@ def get_stats():
     # manually-entered cash/super update never gets misread as a market "gain").
     daily_ath_value, daily_ath_date = 0.0, None
     try:
-        pv_series = _build_daily_portfolio_value_series(conn2)
+        pv_series = _build_daily_market_return_series(conn2)
         if pv_series is not None and len(pv_series) > 1:
             daily_diffs = pv_series.diff().dropna()
             if not daily_diffs.empty:
@@ -1649,6 +1725,8 @@ def get_stats():
         "all_time_high_date": ath_date,
         "daily_ath": daily_ath_value,
         "daily_ath_date": daily_ath_date,
+        "day_pl": round(day_pl, 2),
+        "day_pl_pct": round(day_pl_pct, 2),
     })
 
 def _get_latest_portfolio_value():

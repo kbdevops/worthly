@@ -20,6 +20,8 @@ export interface Stats {
   all_time_high_date: string | null
   daily_ath: number
   daily_ath_date: string | null
+  day_pl: number
+  day_pl_pct: number
 }
 
 export interface NetworthData {
@@ -72,6 +74,7 @@ export interface Holding {
 }
 
 export interface Transaction {
+  id?: number
   date: string
   exchange: string
   ticker: string
