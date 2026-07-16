@@ -1708,84 +1708,103 @@ def _get_latest_portfolio_value():
             active_value += val
     return total_value, active_value, passive_value
 
+def _order_parcels_for_disposal(parcels, method):
+    """Return parcels ordered by which should be treated as sold first, per method.
+    fifo = oldest first (default, what Sharesight uses unless configured otherwise)
+    lifo = newest first
+    hifo = highest cost-per-unit first (minimizes reported gain — a legitimate,
+           commonly-offered specific-identification strategy, not a shortcut)
+    """
+    live = [p for p in parcels if p["units"] > 1e-9]
+    if method == "lifo":
+        return sorted(live, key=lambda p: p["date"], reverse=True)
+    if method == "hifo":
+        return sorted(live, key=lambda p: (p["cost_aud"] / p["units"]) if p["units"] > 0 else 0, reverse=True)
+    return sorted(live, key=lambda p: p["date"])  # fifo default
+
 @app.route("/api/cgt", methods=["GET"])
 def get_cgt():
-    """Calculate Australian CGT for sells within a date range."""
+    """Calculate Australian CGT for sells within a date range, using real per-parcel
+    lot tracking (not blended average cost) so the 12-month discount test applies to
+    the specific units actually disposed of — a single sale can legitimately be part
+    discount-eligible and part not, if it draws from parcels of different ages."""
     from_date = request.args.get("from", "")
     to_date = request.args.get("to", "")
+    method = request.args.get("method", "fifo").lower()
+    if method not in ("fifo", "lifo", "hifo"):
+        method = "fifo"
 
     txns = load_transactions()
     if not txns:
-        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date})
+        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date, "method": method})
 
-    # Filter sells in the selected period
     sells = [t for t in txns if t["action"].lower() == "sell"]
     if from_date:
         sells = [t for t in sells if t["date"] >= from_date]
     if to_date:
         sells = [t for t in sells if t["date"] <= to_date]
-
     if not sells:
-        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date})
+        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date, "method": method})
 
-    # Walk chronologically to compute average cost basis at time of each sell
     txns_sorted = sorted(txns, key=lambda x: x["date"])
-    holdings = {}  # sym -> {units, cost_aud, first_buy_date}
+    parcels_by_sym = {}  # sym -> list of {date, units, cost_aud} — one entry per buy lot, consumed over time
 
     gains = []
     for t in txns_sorted:
         sym = yf_symbol(t["ticker"], t["exchange"])
-        if sym not in holdings:
-            holdings[sym] = {"units": 0.0, "cost_aud": 0.0, "first_buy_date": None}
+        parcels = parcels_by_sym.setdefault(sym, [])
+        action = t["action"].lower()
 
-        h = holdings[sym]
+        if action == "buy":
+            parcels.append({"date": t["date"], "units": t["units"], "cost_aud": t["value"]})
 
-        if t["action"].lower() == "buy":
-            h["units"] += t["units"]
-            h["cost_aud"] += t["value"]
-            if h["first_buy_date"] is None:
-                h["first_buy_date"] = t["date"]
-        elif t["action"].lower() == "split":
-            h["units"] += t["units"]
-        elif t["action"].lower() == "sell":
-            if h["units"] <= 0:
-                continue
+        elif action == "split":
+            # Scale every existing parcel's units up proportionally, cost basis unchanged
+            total_units = sum(p["units"] for p in parcels)
+            if total_units > 1e-9:
+                ratio = (total_units + t["units"]) / total_units
+                for p in parcels:
+                    p["units"] *= ratio
 
-            avg_cost = h["cost_aud"] / h["units"] if h["units"] > 0 else 0
-            cost_of_sold = avg_cost * t["units"]
-            proceeds = abs(t["value"])
-            gain = proceeds - cost_of_sold
+        elif action == "sell":
+            units_to_sell = t["units"]
+            proceeds_total = abs(t["value"])
+            proceeds_per_unit = proceeds_total / units_to_sell if units_to_sell > 0 else 0
 
-            # Check if holding was >12 months at sale time
-            held_12m = False
-            if h["first_buy_date"]:
-                buy_dt = pd.Timestamp(h["first_buy_date"])
+            in_range = (not from_date or t["date"] >= from_date) and (not to_date or t["date"] <= to_date)
+
+            ordered = _order_parcels_for_disposal(parcels, method)
+            remaining = units_to_sell
+            for p in ordered:
+                if remaining <= 1e-9:
+                    break
+                take = min(p["units"], remaining)
+                per_unit_cost = p["cost_aud"] / p["units"] if p["units"] > 0 else 0
+                slice_cost = take * per_unit_cost
+                slice_proceeds = take * proceeds_per_unit
+                slice_gain = slice_proceeds - slice_cost
+
+                buy_dt = pd.Timestamp(p["date"])
                 sell_dt = pd.Timestamp(t["date"])
                 held_12m = (sell_dt - buy_dt).days >= 365
 
-            # Only include this sell if it's in the selected date range
-            in_range = True
-            if from_date and t["date"] < from_date:
-                in_range = False
-            if to_date and t["date"] > to_date:
-                in_range = False
+                if in_range:
+                    gains.append({
+                        "date": t["date"],
+                        "acquired_date": p["date"],
+                        "ticker": t["ticker"],
+                        "name": t.get("name", ""),
+                        "units": round(take, 4),
+                        "proceeds": round(slice_proceeds, 2),
+                        "cost": round(slice_cost, 2),
+                        "gain": round(slice_gain, 2),
+                        "held_12m": held_12m,
+                        "discount_eligible": held_12m and slice_gain > 0,
+                    })
 
-            if in_range:
-                gains.append({
-                    "date": t["date"],
-                    "ticker": t["ticker"],
-                    "name": t.get("name", ""),
-                    "units": t["units"],
-                    "proceeds": round(proceeds, 2),
-                    "cost_base": round(cost_of_sold, 2),
-                    "gain": round(gain, 2),
-                    "held_12m": held_12m,
-                    "discount_eligible": held_12m and gain > 0,
-                })
-
-            # Update holding after sale
-            h["units"] -= t["units"]
-            h["cost_aud"] -= cost_of_sold
+                p["units"] -= take
+                p["cost_aud"] -= slice_cost
+                remaining -= take
 
     # Calculate CGT summary
     total_gain = sum(g["gain"] for g in gains)
@@ -1794,10 +1813,8 @@ def get_cgt():
 
     # Apply losses first to non-discounted gains, then to discounted
     losses_remaining = abs(total_losses)
-    # Losses applied to gains eligible for discount
     discounted_after_losses = max(0, total_discountable - losses_remaining)
     losses_remaining = max(0, losses_remaining - total_discountable)
-    # Remaining non-discounted gains absorb any leftover losses
     non_discounted = sum(g["gain"] for g in gains if g["gain"] > 0 and not g["discount_eligible"])
     non_discounted_after_losses = max(0, non_discounted - losses_remaining)
 
@@ -1813,6 +1830,7 @@ def get_cgt():
         "net_gain": net_gain,
         "from": from_date,
         "to": to_date,
+        "method": method,
     })
 @app.route("/api/snapshots", methods=["GET"])
 def get_snapshots():

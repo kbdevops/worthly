@@ -15,10 +15,17 @@ const FY_OPTIONS = [
 const TH = 'px-3 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap'
 const TD = 'px-3 py-3 text-sm whitespace-nowrap'
 
+const METHODS: { key: 'fifo' | 'lifo' | 'hifo'; label: string; hint: string }[] = [
+  { key: 'fifo', label: 'FIFO', hint: 'Oldest parcels sold first — the ATO default unless you specifically identify otherwise' },
+  { key: 'lifo', label: 'LIFO', hint: 'Newest parcels sold first' },
+  { key: 'hifo', label: 'HIFO', hint: 'Highest-cost parcels sold first — minimizes reported gain' },
+]
+
 export default function Tax() {
   const [fyIdx, setFyIdx] = useState(1)
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
+  const [method, setMethod] = useState<'fifo' | 'lifo' | 'hifo'>('fifo')
 
   const selected = FY_OPTIONS[fyIdx]
   const isCustom = selected.label === 'Custom'
@@ -26,7 +33,7 @@ export default function Tax() {
   const to = isCustom ? customTo : selected.to
   const enabled = !!(from && to)
 
-  const { data: cgt, isLoading } = useCGT(from, to, enabled)
+  const { data: cgt, isLoading } = useCGT(from, to, method, enabled)
 
   return (
     <div className="space-y-6">
@@ -53,7 +60,24 @@ export default function Tax() {
             </div>
           </>
         )}
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Parcel Method</label>
+          <div className="flex rounded-lg overflow-hidden border border-[var(--border)]">
+            {METHODS.map(m => (
+              <button
+                key={m.key}
+                title={m.hint}
+                onClick={() => setMethod(m.key)}
+                className="px-3 py-2 text-xs font-medium transition-all"
+                style={method === m.key
+                  ? { background: 'var(--accent)', color: '#fff' }
+                  : { background: 'var(--bg-card)', color: '#94a3b8' }}
+              >{m.label}</button>
+            ))}
+          </div>
+        </div>
       </div>
+      <p className="text-xs text-slate-500 -mt-3">{METHODS.find(m => m.key === method)?.hint}</p>
 
       {/* Summary cards */}
       {cgt && (
@@ -80,7 +104,7 @@ export default function Tax() {
             <table className="w-full">
               <thead style={{ background: 'var(--bg-elevated)' }}>
                 <tr>
-                  <th className={TH}>Date</th><th className={TH}>Ticker</th><th className={TH}>Name</th>
+                  <th className={TH}>Sold</th><th className={TH}>Acquired</th><th className={TH}>Ticker</th><th className={TH}>Name</th>
                   <th className={TH}>Units</th><th className={TH}>Proceeds</th><th className={TH}>Cost</th>
                   <th className={TH}>Gain/Loss</th><th className={TH}>Discounted</th>
                 </tr>
@@ -89,6 +113,7 @@ export default function Tax() {
                 {cgt.gains.map((d, i) => (
                   <tr key={i} className="border-t border-[var(--border)] hover:bg-white/5">
                     <td className={TD + ' text-slate-400'}>{fmtDate(d.date)}</td>
+                    <td className={TD + ' text-slate-500'}>{fmtDate(d.acquired_date)}</td>
                     <td className={TD + ' font-medium text-white'}>{d.ticker}</td>
                     <td className={TD + ' text-slate-300'}>{d.name}</td>
                     <td className={TD + ' text-slate-300'}>{d.units}</td>
