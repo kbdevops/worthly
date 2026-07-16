@@ -3,11 +3,11 @@ import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3, Penci
 import {
   useCashAccounts, useSuperHoldings, usePortfolio, useSnapshots, useBreakdown,
   useSaveCashAccounts, useSaveSuperHoldings, useAddSnapshot,
-  useTransactions, useAddTransaction, useDeleteTransaction,
+  useTransactions, useAddTransaction, useUpdateTransaction, useDeleteTransaction,
   useHoldingGroups, useAddHoldingGroup, useUpdateHoldingGroup, useDeleteHoldingGroup,
 } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
-import type { CashAccount, SuperHolding, Snapshot, Holding } from '../../types'
+import type { CashAccount, SuperHolding, Snapshot, Holding, Transaction } from '../../types'
 import HistorySlideout from '../layout/HistorySlideout'
 
 const CARD = 'rounded-xl border border-[var(--border)] overflow-hidden'
@@ -35,28 +35,37 @@ const DEFAULT_COLS: ColKey[] = ['units', 'price', 'cost', 'gain_aud', 'gain_pct'
 const blank_form = {
   date: new Date().toISOString().slice(0, 10),
   exchange: 'ASX', ticker: '', name: '', action: 'buy',
-  units: '', price: '', brokerage: '',
+  units: '', price: '', brokerage: '', exch_rate: '',
 }
 
 function AddTxnModal({
-  initial, title, onClose,
+  initial, title, editId, onClose,
 }: {
   initial: typeof blank_form
   title: string
+  editId?: number
   onClose: () => void
 }) {
   const addTxn = useAddTransaction()
+  const updateTxn = useUpdateTransaction()
   const [form, setForm] = useState(initial)
   const currency = ['NASDAQ', 'NYSE', 'US'].includes(form.exchange) ? 'USD' : 'AUD'
+  const isPending = addTxn.isPending || updateTxn.isPending
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    addTxn.mutate({
+    const payload = {
       ...form,
       units: parseFloat(form.units),
       price: parseFloat(form.price) || 0,
       brokerage: parseFloat(form.brokerage) || 0,
-    }, { onSuccess: onClose })
+      exch_rate: form.exch_rate ? parseFloat(form.exch_rate) : undefined,
+    }
+    if (editId != null) {
+      updateTxn.mutate({ id: editId, ...payload }, { onSuccess: onClose })
+    } else {
+      addTxn.mutate(payload, { onSuccess: onClose })
+    }
   }
 
   return (
@@ -78,6 +87,9 @@ function AddTxnModal({
               { label: 'Units', key: 'units', type: 'number', placeholder: '0' },
               { label: `Price (${currency})`, key: 'price', type: 'number', placeholder: '0.00' },
               { label: `Brokerage (${currency})`, key: 'brokerage', type: 'number', placeholder: '0.00' },
+              ...(currency === 'USD'
+                ? [{ label: 'FX Rate (AUD→USD, optional)', key: 'exch_rate', type: 'number', placeholder: 'auto if blank' }]
+                : []),
             ].map(f => (
               <div key={f.key}>
                 <label className="block text-xs text-slate-400 mb-1">{f.label}</label>
@@ -96,13 +108,18 @@ function AddTxnModal({
               </div>
             ))}
           </div>
+          {currency === 'USD' && (
+            <p className="text-xs text-slate-500 -mt-1">
+              Leave FX Rate blank to auto-use the historical AUDUSD rate for this date — enter your broker's actual settlement rate here for exact cost-basis accuracy.
+            </p>
+          )}
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose}
               className="flex-1 py-2 rounded-lg text-sm text-slate-400 border border-[var(--border)] hover:border-[var(--border-hover)]">Cancel</button>
-            <button type="submit" disabled={addTxn.isPending || !form.ticker.trim()}
+            <button type="submit" disabled={isPending || !form.ticker.trim()}
               className="flex-1 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-60"
               style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}>
-              {addTxn.isPending ? 'Adding…' : 'Add Transaction'}
+              {isPending ? 'Saving…' : editId != null ? 'Save Changes' : 'Add Transaction'}
             </button>
           </div>
         </form>
@@ -117,6 +134,7 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
 
   const [search, setSearch] = useState('')
   const [showAdd, setShowAdd] = useState(false)
+  const [editingTxn, setEditingTxn] = useState<Transaction | null>(null)
   const [cols, setCols] = useState<ColKey[]>(DEFAULT_COLS)
   const [showColPicker, setShowColPicker] = useState(false)
 
@@ -136,9 +154,9 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
     setCols(c => c.includes(key) ? c.filter(k => k !== key) : [...c, key])
   }
 
-  function handleDelete(idx: number) {
+  function handleDelete(id: number) {
     if (!confirm('Delete this transaction?')) return
-    deleteTxn.mutate(idx)
+    deleteTxn.mutate(id)
   }
 
   const visibleCols = ALL_COLS.filter(c => cols.includes(c.key))
@@ -240,12 +258,11 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
             </thead>
             <tbody>
               {filtered.map((t, i) => {
-                const realIdx = txns.findIndex(x => x === t)
                 const gain = t.gain_aud ?? 0
                 const gainPct = t.gain_pct ?? 0
                 const isBuy = t.action === 'buy'
                 return (
-                  <tr key={i} className="border-t border-[var(--border)] hover:bg-white/5">
+                  <tr key={t.id ?? i} className="border-t border-[var(--border)] hover:bg-white/5">
                     <td className={TD2 + ' text-slate-400'}>{fmtDate(t.date)}</td>
                     <td className={TD2}>
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${t.action === 'buy' ? 'bg-emerald-500/20 text-emerald-400' : t.action === 'sell' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
@@ -269,7 +286,10 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
                       </td>
                     )}
                     <td className={TD2}>
-                      <button onClick={() => handleDelete(realIdx)} className="text-slate-500 hover:text-red-400"><Trash2 size={13} /></button>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => setEditingTxn(t)} className="text-slate-500 hover:text-white"><Pencil size={13} /></button>
+                        <button onClick={() => t.id != null && handleDelete(t.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={13} /></button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -287,6 +307,25 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
           initial={{ ...blank_form, exchange: holding.exchange, ticker: holding.ticker, name: holding.name }}
           title={`Add Transaction — ${holding.ticker}`}
           onClose={() => setShowAdd(false)}
+        />
+      )}
+
+      {editingTxn && (
+        <AddTxnModal
+          initial={{
+            date: editingTxn.date,
+            exchange: editingTxn.exchange,
+            ticker: editingTxn.ticker,
+            name: editingTxn.name,
+            action: editingTxn.action,
+            units: String(editingTxn.units),
+            price: String(editingTxn.price),
+            brokerage: String(editingTxn.brokerage),
+            exch_rate: editingTxn.exch_rate ? String(editingTxn.exch_rate) : '',
+          }}
+          title={`Edit Transaction — ${editingTxn.ticker}`}
+          editId={editingTxn.id}
+          onClose={() => setEditingTxn(null)}
         />
       )}
     </div>

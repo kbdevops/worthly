@@ -77,11 +77,31 @@ export const useCGT = (from: string, to: string, method: string, enabled: boolea
     enabled,
   })
 
+const invalidateTransactionDependents = (qc: ReturnType<typeof useQueryClient>) => {
+  qc.invalidateQueries({ queryKey: ['transactions'] })
+  qc.invalidateQueries({ queryKey: ['portfolio'] })
+  qc.invalidateQueries({ queryKey: ['breakdown'] })
+  qc.invalidateQueries({ queryKey: ['stats'] })
+  qc.invalidateQueries({ queryKey: ['networth'] })
+  qc.invalidateQueries({ queryKey: ['monthly-change'] })
+  qc.invalidateQueries({ queryKey: ['cgt'] })
+  qc.invalidateQueries({ queryKey: ['holding-groups'] })
+  qc.invalidateQueries({ queryKey: ['milestones'] })
+}
+
 export const useAddTransaction = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (data: Partial<Transaction>) => post('/api/transactions', data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['transactions'] }),
+    onSuccess: () => invalidateTransactionDependents(qc),
+  })
+}
+
+export const useUpdateTransaction = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...data }: Partial<Transaction> & { id: number }) => put(`/api/transactions/${id}`, data),
+    onSuccess: () => invalidateTransactionDependents(qc),
   })
 }
 
@@ -89,7 +109,7 @@ export const useDeleteTransaction = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (idx: number) => del(`/api/transactions/${idx}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['transactions'] }),
+    onSuccess: () => invalidateTransactionDependents(qc),
   })
 }
 
