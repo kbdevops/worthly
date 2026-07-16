@@ -70,10 +70,10 @@ export const useSnapshots = () =>
 export const useSyncStatus = () =>
   useQuery({ queryKey: ['sync-status'], queryFn: () => get<SyncStatus[]>('/api/sync-status') })
 
-export const useCGT = (from: string, to: string, enabled: boolean) =>
+export const useCGT = (from: string, to: string, method: string, enabled: boolean) =>
   useQuery({
-    queryKey: ['cgt', from, to],
-    queryFn: () => get<CGTResult>(`/api/cgt?from=${from}&to=${to}`),
+    queryKey: ['cgt', from, to, method],
+    queryFn: () => get<CGTResult>(`/api/cgt?from=${from}&to=${to}&method=${method}`),
     enabled,
   })
 

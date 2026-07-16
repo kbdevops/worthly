@@ -114,6 +114,7 @@ export interface CGTGain {
   ticker: string
   name: string
   date: string
+  acquired_date: string
   units: number
   proceeds: number
   cost: number
@@ -128,6 +129,7 @@ export interface CGTResult {
   losses_applied: number
   cgt_discount: number
   net_gain: number
+  method: 'fifo' | 'lifo' | 'hifo'
 }
 
 export interface SyncStatus {
