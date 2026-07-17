@@ -5,53 +5,49 @@
 /* ── Theme variables ────────────────────────────────────────────────────── */
 :root, [data-theme="indigo"] {
   --bg-base:     #060813;
-  --bg-elevated: #0d0f1f;
-  --bg-card:     #13172e;
-  --border:      #20264b;
+  --bg-elevated: #12152c;
+  --bg-card:     #181c38;
+  --border:      #262d5c;
   --border-hover:#3b4585;
   --accent:      #6366f1;
   --accent-2:    #a855f7;
   --scrollbar:   #3b4585;
 }
-
 [data-theme="midnight"] {
   --bg-base:     #000000;
-  --bg-elevated: #080810;
-  --bg-card:     #0e0e1c;
-  --border:      #1c1c30;
+  --bg-elevated: #0f0f1e;
+  --bg-card:     #16162a;
+  --border:      #26263f;
   --border-hover:#2d2d50;
   --accent:      #a855f7;
   --accent-2:    #ec4899;
   --scrollbar:   #4c1d95;
 }
-
 [data-theme="emerald"] {
   --bg-base:     #020d08;
-  --bg-elevated: #061a10;
-  --bg-card:     #082018;
-  --border:      #0f3825;
+  --bg-elevated: #0a2a1a;
+  --bg-card:     #103022;
+  --border:      #17472f;
   --border-hover:#1a5c3e;
   --accent:      #10b981;
   --accent-2:    #06b6d4;
   --scrollbar:   #065f46;
 }
-
 [data-theme="rose"] {
   --bg-base:     #0a0305;
-  --bg-elevated: #14060a;
-  --bg-card:     #1c080e;
-  --border:      #350d18;
+  --bg-elevated: #1e0a12;
+  --bg-card:     #260c16;
+  --border:      #431222;
   --border-hover:#5c1526;
   --accent:      #f43f5e;
   --accent-2:    #fb923c;
   --scrollbar:   #9f1239;
 }
-
 [data-theme="amber"] {
   --bg-base:     #080600;
-  --bg-elevated: #110e00;
-  --bg-card:     #181400;
-  --border:      #2d2500;
+  --bg-elevated: #1a1500;
+  --bg-card:     #221c00;
+  --border:      #382e00;
   --border-hover:#4a3c00;
   --accent:      #f59e0b;
   --accent-2:    #f97316;
@@ -60,7 +56,6 @@
 
 /* ── Base styles ────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
-
 body {
   background-color: var(--bg-base);
   color: #e2e8f0;
@@ -68,12 +63,9 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
 }
-
 #root { min-height: 100vh; }
-
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: var(--bg-base); }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
-
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }
