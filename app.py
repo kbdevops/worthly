@@ -1926,6 +1926,20 @@ def add_snapshot():
         date_str = data["date"]
         super_val = float(data["super"])
         cash_val = float(data["cash"])
+
+        # A future-dated snapshot silently breaks every "current value" lookup in the
+        # app (they correctly filter WHERE date <= today, so a future row just gets
+        # ignored until the calendar catches up) — this is exactly what caused cash to
+        # appear stuck on an old value with no visible error. Reject it outright rather
+        # than let it happen silently again.
+        if date_str > date.today().isoformat():
+            return jsonify({
+                "ok": False,
+                "error": f"Snapshot date {date_str} is in the future — it would be silently "
+                         f"ignored by every 'current value' lookup until that date arrives. "
+                         f"Use today's date ({date.today().isoformat()}) or an actual past date."
+            }), 400
+
         conn = db()
         conn.execute(
             "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
@@ -1936,6 +1950,14 @@ def add_snapshot():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/snapshots/<snap_date>", methods=["DELETE"])
+def delete_snapshot(snap_date):
+    conn = db()
+    conn.execute("DELETE FROM snapshots WHERE date = ?", (snap_date,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 @app.route("/api/milestones", methods=["GET"])
 def get_milestones():
@@ -2474,9 +2496,37 @@ def _scheduled_sync():
     except Exception as e:
         print(f"[scheduler] Sync failed: {e}")
 
+# Monthly snapshot — cash has no bank connector, so it's only ever as current as the
+# last time someone manually updated cash_accounts. This locks in a snapshot on the 1st
+# of every month automatically using whatever's on record right then (live cash_accounts
+# total + the last known super figure), so a monthly data point always exists without
+# depending on remembering to click anything — and always lands on a real, non-future
+# date since it only ever fires on the actual 1st.
+def _scheduled_monthly_snapshot():
+    print(f"[scheduler] Monthly snapshot triggered at {datetime.now().isoformat()}")
+    try:
+        today_str = date.today().isoformat()
+        cash_total = get_total_cash()
+        conn = db()
+        prior = conn.execute(
+            "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today_str,)
+        ).fetchone()
+        super_val = prior[0] if prior else 0.0
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
+            (today_str, super_val, cash_total),
+        )
+        conn.commit()
+        conn.close()
+        print(f"[scheduler] Monthly snapshot logged: cash=${cash_total:.2f}, super=${super_val:.2f}")
+    except Exception as e:
+        print(f"[scheduler] Monthly snapshot failed: {e}")
+
 _scheduler = BackgroundScheduler()
 _scheduler.add_job(_scheduled_sync, "cron", hour=6, minute=15, id="asx_close")   # after ASX close
 _scheduler.add_job(_scheduled_sync, "cron", hour=21, minute=15, id="us_close")   # after NYSE/NASDAQ close
+_scheduler.add_job(_scheduled_monthly_snapshot, "cron", day=1, hour=13, minute=0,
+                    timezone="Australia/Melbourne", id="monthly_snapshot")  # 1pm Melbourne time, 1st of month, DST-aware
 _scheduler.start()
 print("[scheduler] Auto-sync scheduled: 06:15 UTC (ASX), 21:15 UTC (NYSE/NASDAQ)")
 

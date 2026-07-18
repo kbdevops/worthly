@@ -136,22 +136,32 @@ export const useSaveSuperHoldings = () => {
   })
 }
 
+const invalidateSnapshotDependents = (qc: ReturnType<typeof useQueryClient>) => {
+  // snapshots feeds breakdown/stats/networth/monthly-change/milestones (super or
+  // cash can be a tracked milestone metric) — invalidating only 'snapshots' left
+  // the Superannuation card showing a stale value after a real, successful update.
+  qc.invalidateQueries({ queryKey: ['snapshots'] })
+  qc.invalidateQueries({ queryKey: ['breakdown'] })
+  qc.invalidateQueries({ queryKey: ['stats'] })
+  qc.invalidateQueries({ queryKey: ['networth'] })
+  qc.invalidateQueries({ queryKey: ['monthly-change'] })
+  qc.invalidateQueries({ queryKey: ['milestones'] })
+}
+
 export const useAddSnapshot = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (data: { date: string; super: number; cash: number }) =>
       post('/api/snapshots', data),
-    onSuccess: () => {
-      // snapshots feeds breakdown/stats/networth/monthly-change/milestones (super or
-      // cash can be a tracked milestone metric) — invalidating only 'snapshots' left
-      // the Superannuation card showing a stale value after a real, successful update.
-      qc.invalidateQueries({ queryKey: ['snapshots'] })
-      qc.invalidateQueries({ queryKey: ['breakdown'] })
-      qc.invalidateQueries({ queryKey: ['stats'] })
-      qc.invalidateQueries({ queryKey: ['networth'] })
-      qc.invalidateQueries({ queryKey: ['monthly-change'] })
-      qc.invalidateQueries({ queryKey: ['milestones'] })
-    },
+    onSuccess: () => invalidateSnapshotDependents(qc),
+  })
+}
+
+export const useDeleteSnapshot = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (snapDate: string) => del(`/api/snapshots/${snapDate}`),
+    onSuccess: () => invalidateSnapshotDependents(qc),
   })
 }
 
