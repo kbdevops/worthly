@@ -14,7 +14,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Settings, X, Eye, EyeOff } from 'lucide-react'
-import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio } from '../../hooks/useApi'
+import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useDashboardLayout, useSaveDashboardLayout } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct } from '../../lib/utils'
 
 const CARD = 'rounded-xl p-5 border border-[var(--border)]'
@@ -158,6 +158,29 @@ export default function Dashboard() {
   const cleanedStatKeys = statKeys.filter(k => VALID_STAT_KEYS.has(k))
   const setStatKeys = setStatKeysRaw
   const [showCustomise, setShowCustomise] = useState(false)
+
+  // ── Layout persistence: account (backend) + localStorage cache ────────────
+  // localStorage alone means your layout doesn't follow you to another device or
+  // browser; the account copy is the source of truth once it exists, localStorage
+  // is just a fast local cache so the layout doesn't flash back to defaults on load.
+  const { data: remoteLayout } = useDashboardLayout()
+  const saveLayout = useSaveDashboardLayout()
+  const [layoutLoadedFromAccount, setLayoutLoadedFromAccount] = useState(false)
+
+  useEffect(() => {
+    if (!remoteLayout || layoutLoadedFromAccount) return
+    if (remoteLayout.widget_order) setOrder(remoteLayout.widget_order as WidgetId[])
+    if (remoteLayout.widget_visible) setVisible(remoteLayout.widget_visible as Record<WidgetId, boolean>)
+    if (remoteLayout.stat_keys) setStatKeys(remoteLayout.stat_keys as StatKey[])
+    setLayoutLoadedFromAccount(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteLayout])
+
+  useEffect(() => {
+    if (!layoutLoadedFromAccount) return // don't overwrite the account copy with local defaults before the initial load completes
+    saveLayout.mutate({ widget_order: order, widget_visible: visible, stat_keys: statKeys })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order, visible, statKeys, layoutLoadedFromAccount])
 
   // ── Data transforms ──────────────────────────────────────────────────────
   const nwRaw = (() => {

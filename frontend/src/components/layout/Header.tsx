@@ -1,14 +1,17 @@
-import { Menu } from 'lucide-react'
+import { Menu, LogOut } from 'lucide-react'
 import type { TabId } from '../../App'
+import { getStoredUser } from '../../lib/auth'
 
 interface Props {
   activeTab: TabId
   tabs: { id: TabId; label: string }[]
   onMenuClick: () => void
+  onLogout: () => void
 }
 
-export default function Header({ activeTab, tabs, onMenuClick }: Props) {
+export default function Header({ activeTab, tabs, onMenuClick, onLogout }: Props) {
   const label = tabs.find(t => t.id === activeTab)?.label ?? ''
+  const user = getStoredUser()
   const today = new Date().toLocaleDateString('en-AU', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
@@ -27,7 +30,18 @@ export default function Header({ activeTab, tabs, onMenuClick }: Props) {
         </button>
         <h1 className="text-lg font-semibold text-white">{label}</h1>
       </div>
-      <span className="text-sm text-slate-400 hidden sm:block">{today}</span>
+      <div className="flex items-center gap-4">
+        <span className="text-sm text-slate-400 hidden sm:block">{today}</span>
+        {user && (
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs text-slate-500 hidden md:block">{user.email}</span>
+            <button onClick={onLogout} title="Log out"
+              className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-white/10">
+              <LogOut size={16} />
+            </button>
+          </div>
+        )}
+      </div>
     </header>
   )
 }
