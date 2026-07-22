@@ -15,8 +15,20 @@ import time
 from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity,
+)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
+
+# SECURITY: JWT_SECRET_KEY must be set via env var in any real deployment — the
+# fallback here is only so the app doesn't hard-crash on a fresh dev checkout.
+# A default secret means anyone can forge valid tokens; this is not safe to ship
+# as-is to a real multi-user deployment without setting this explicitly.
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "dev-only-insecure-change-me")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=30)  # long-lived — this is a personal finance app people check occasionally, not a banking session
+jwt = JWTManager(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
@@ -43,6 +55,24 @@ def db():
     # single file lock — needed now that sync fetches multiple symbols in parallel.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dashboard_layout (
+            user_id INTEGER PRIMARY KEY,
+            widget_order TEXT NOT NULL DEFAULT '',
+            widget_visible TEXT NOT NULL DEFAULT '',
+            stat_keys TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             symbol TEXT NOT NULL,
             date TEXT NOT NULL,
@@ -60,9 +90,11 @@ def db():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
-            date TEXT PRIMARY KEY,
+            date TEXT NOT NULL,
             super REAL NOT NULL,
-            cash REAL NOT NULL
+            cash REAL NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (user_id, date)
         )
     """)
     conn.execute("""
@@ -103,8 +135,10 @@ def db():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS country_overrides (
-            symbol TEXT PRIMARY KEY,
-            country TEXT NOT NULL
+            symbol TEXT NOT NULL,
+            country TEXT NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (user_id, symbol)
         )
     """)
     conn.execute("""
@@ -135,9 +169,11 @@ def db():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS records (
-            key TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
             value REAL NOT NULL,
-            date TEXT NOT NULL
+            date TEXT NOT NULL,
+            user_id INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (user_id, key)
         )
     """)
     conn.execute("""
@@ -164,7 +200,8 @@ def db():
             withholding_tax_pct REAL NOT NULL DEFAULT 0,
             net_amount_aud REAL NOT NULL,
             source TEXT NOT NULL DEFAULT 'manual',
-            UNIQUE(symbol, date)
+            user_id INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(user_id, symbol, date)
         )
     """)
     # Migrate existing sync_log table — tracks sync health, not just successful ranges
@@ -191,8 +228,204 @@ def db():
             conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} {defn}")
         except:
             pass
+
+    # Multi-user migration: every table holding a person's own financial data gets a
+    # user_id column. Deliberately NOT applied to prices/sync_log/holding_meta — those
+    # are the shared market-data cache (GOOG's price is the same for every user), and
+    # keeping them global avoids N users redundantly hitting yfinance for the same symbol.
+    # Existing single-user rows get user_id=1 so pre-migration data isn't orphaned —
+    # whichever account is created first inherits the pre-existing data.
+    for table in ["transactions", "cash_accounts", "super_holdings",
+                  "milestones", "holding_groups"]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+        except:
+            pass
+
+    # snapshots originally had `date` alone as PRIMARY KEY — two users both getting a
+    # snapshot on the same date (e.g. the monthly auto-snapshot) would collide and
+    # overwrite each other. Same fix as dividends/records/country_overrides above.
+    existing_snap_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='snapshots'"
+    ).fetchone()
+    if existing_snap_sql and "PRIMARY KEY (user_id, date)" not in existing_snap_sql[0]:
+        conn.execute("ALTER TABLE snapshots RENAME TO snapshots_old")
+        conn.execute("""
+            CREATE TABLE snapshots (
+                date TEXT NOT NULL, super REAL NOT NULL, cash REAL NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (user_id, date)
+            )
+        """)
+        has_user_id = conn.execute("PRAGMA table_info(snapshots_old)").fetchall()
+        if any(col[1] == "user_id" for col in has_user_id):
+            conn.execute("INSERT INTO snapshots (date, super, cash, user_id) SELECT date, super, cash, COALESCE(user_id, 1) FROM snapshots_old")
+        else:
+            conn.execute("INSERT INTO snapshots (date, super, cash, user_id) SELECT date, super, cash, 1 FROM snapshots_old")
+        conn.execute("DROP TABLE snapshots_old")
+
+    # country_overrides originally had `symbol` alone as PRIMARY KEY — two users
+    # overriding the same symbol's country would collide. Same fix as dividends/records.
+    existing_co_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='country_overrides'"
+    ).fetchone()
+    if existing_co_sql and "PRIMARY KEY (user_id, symbol)" not in existing_co_sql[0]:
+        conn.execute("ALTER TABLE country_overrides RENAME TO country_overrides_old")
+        conn.execute("""
+            CREATE TABLE country_overrides (
+                symbol TEXT NOT NULL, country TEXT NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (user_id, symbol)
+            )
+        """)
+        has_user_id = conn.execute("PRAGMA table_info(country_overrides_old)").fetchall()
+        if any(col[1] == "user_id" for col in has_user_id):
+            conn.execute("INSERT INTO country_overrides (symbol, country, user_id) SELECT symbol, country, COALESCE(user_id, 1) FROM country_overrides_old")
+        else:
+            conn.execute("INSERT INTO country_overrides (symbol, country, user_id) SELECT symbol, country, 1 FROM country_overrides_old")
+        conn.execute("DROP TABLE country_overrides_old")
+
+    # records originally had `key` alone as PRIMARY KEY (e.g. 'portfolio_high') — two
+    # different users would collide and overwrite each other's all-time-high record.
+    # Same rebuild-required situation as dividends above.
+    existing_records_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
+    ).fetchone()
+    if existing_records_sql and "PRIMARY KEY (user_id, key)" not in existing_records_sql[0]:
+        conn.execute("ALTER TABLE records RENAME TO records_old")
+        conn.execute("""
+            CREATE TABLE records (
+                key TEXT NOT NULL, value REAL NOT NULL, date TEXT NOT NULL,
+                user_id INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (user_id, key)
+            )
+        """)
+        has_user_id = conn.execute("PRAGMA table_info(records_old)").fetchall()
+        if any(col[1] == "user_id" for col in has_user_id):
+            conn.execute("INSERT INTO records (key, value, date, user_id) SELECT key, value, date, COALESCE(user_id, 1) FROM records_old")
+        else:
+            conn.execute("INSERT INTO records (key, value, date, user_id) SELECT key, value, date, 1 FROM records_old")
+        conn.execute("DROP TABLE records_old")
+
+    # dividends needs UNIQUE(user_id, symbol, date), not just UNIQUE(symbol, date) — two
+    # different users holding the same stock would otherwise collide and overwrite each
+    # other's dividend rows. SQLite can't ALTER a UNIQUE constraint in place, so any
+    # database created before this fix needs the table rebuilt, not just a column added.
+    existing_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='dividends'"
+    ).fetchone()
+    if existing_sql and "UNIQUE(user_id, symbol, date)" not in existing_sql[0]:
+        conn.execute("ALTER TABLE dividends RENAME TO dividends_old")
+        conn.execute("""
+            CREATE TABLE dividends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL, symbol TEXT NOT NULL, ticker TEXT NOT NULL, exchange TEXT NOT NULL,
+                per_share REAL NOT NULL, units REAL NOT NULL, currency TEXT NOT NULL,
+                gross_amount REAL NOT NULL, gross_amount_aud REAL NOT NULL,
+                franking_pct REAL NOT NULL DEFAULT 0, franking_credit_aud REAL NOT NULL DEFAULT 0,
+                withholding_tax_pct REAL NOT NULL DEFAULT 0, net_amount_aud REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'manual', user_id INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(user_id, symbol, date)
+            )
+        """)
+        old_cols = "id,date,symbol,ticker,exchange,per_share,units,currency,gross_amount," \
+                   "gross_amount_aud,franking_pct,franking_credit_aud,withholding_tax_pct,net_amount_aud,source"
+        has_user_id = conn.execute("PRAGMA table_info(dividends_old)").fetchall()
+        if any(col[1] == "user_id" for col in has_user_id):
+            conn.execute(f"INSERT INTO dividends ({old_cols}, user_id) SELECT {old_cols}, COALESCE(user_id, 1) FROM dividends_old")
+        else:
+            conn.execute(f"INSERT INTO dividends ({old_cols}, user_id) SELECT {old_cols}, 1 FROM dividends_old")
+        conn.execute("DROP TABLE dividends_old")
     conn.commit()
     return conn
+
+def current_user_id():
+    """Int user id from the JWT — flask-jwt-extended requires string identities,
+    so this is the one place that casts back to int for SQL params."""
+    return int(get_jwt_identity())
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    # Deliberately permissive by request: no email format required (plain usernames
+    # are fine), no minimum password length. This is intended for trusted personal/
+    # local use, not a public-facing signup — if this instance is ever exposed
+    # beyond your own network, this is the first thing to tighten back up.
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email:
+        return jsonify({"ok": False, "error": "Username required"}), 400
+    if not password:
+        return jsonify({"ok": False, "error": "Password required"}), 400
+    conn = db()
+    if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
+        conn.close()
+        return jsonify({"ok": False, "error": "An account with this email already exists"}), 409
+    cur = conn.execute(
+        "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+        (email, generate_password_hash(password), datetime.now().isoformat()),
+    )
+    user_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    token = create_access_token(identity=str(user_id))
+    return jsonify({"ok": True, "token": token, "user": {"id": user_id, "email": email}})
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.json or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    conn = db()
+    row = conn.execute("SELECT id, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+    conn.close()
+    # Deliberately identical error for "no such user" and "wrong password" — distinguishing
+    # them lets an attacker enumerate registered emails.
+    if not row or not check_password_hash(row[1], password):
+        return jsonify({"ok": False, "error": "Invalid email or password"}), 401
+    token = create_access_token(identity=str(row[0]))
+    return jsonify({"ok": True, "token": token, "user": {"id": row[0], "email": email}})
+
+@app.route("/api/me", methods=["GET"])
+@jwt_required()
+def get_me():
+    conn = db()
+    row = conn.execute("SELECT id, email, created_at FROM users WHERE id = ?", (current_user_id(),)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"ok": False}), 404
+    return jsonify({"id": row[0], "email": row[1], "created_at": row[2]})
+
+@app.route("/api/dashboard-layout", methods=["GET"])
+@jwt_required()
+def get_dashboard_layout():
+    conn = db()
+    row = conn.execute(
+        "SELECT widget_order, widget_visible, stat_keys FROM dashboard_layout WHERE user_id = ?",
+        (current_user_id(),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"widget_order": None, "widget_visible": None, "stat_keys": None})
+    return jsonify({
+        "widget_order": json.loads(row[0]) if row[0] else None,
+        "widget_visible": json.loads(row[1]) if row[1] else None,
+        "stat_keys": json.loads(row[2]) if row[2] else None,
+    })
+
+@app.route("/api/dashboard-layout", methods=["POST"])
+@jwt_required()
+def save_dashboard_layout():
+    data = request.json or {}
+    conn = db()
+    conn.execute(
+        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "widget_order=excluded.widget_order, widget_visible=excluded.widget_visible, "
+        "stat_keys=excluded.stat_keys, updated_at=excluded.updated_at",
+        (current_user_id(), json.dumps(data.get("widget_order")), json.dumps(data.get("widget_visible")),
+         json.dumps(data.get("stat_keys")), datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 def yf_symbol(ticker, exchange):
     """Normalize the ticker symbol for yfinance based on exchange."""
@@ -399,94 +632,84 @@ def ingest_csv_to_json():
         
     return transactions
 
-def load_transactions():
-    """Load transactions from DB. Re-ingests from Excel/CSV if source file is newer than JSON marker."""
-    if os.path.exists(EXCEL_FILE):
-        if not os.path.exists(DATA_FILE) or os.path.getmtime(EXCEL_FILE) > os.path.getmtime(DATA_FILE):
-            txns = ingest_excel_to_json()
-            save_transactions(txns)
-            return txns
-
-    if os.path.exists(CSV_FILE):
-        if not os.path.exists(DATA_FILE) or os.path.getmtime(CSV_FILE) > os.path.getmtime(DATA_FILE):
-            txns = ingest_csv_to_json()
-            save_transactions(txns)
-            return txns
-
+def load_transactions(user_id):
+    """Load one user's transactions from DB."""
     conn = db()
     rows = conn.execute(
         "SELECT id, date, exchange, ticker, name, action, units, price, currency, "
-        "brokerage, brokerage_currency, exch_rate, value FROM transactions ORDER BY date, id"
+        "brokerage, brokerage_currency, exch_rate, value FROM transactions "
+        "WHERE user_id = ? ORDER BY date, id", (user_id,)
     ).fetchall()
     conn.close()
     cols = ["id", "date", "exchange", "ticker", "name", "action", "units", "price",
             "currency", "brokerage", "brokerage_currency", "exch_rate", "value"]
     return [dict(zip(cols, row)) for row in rows]
 
-def save_transactions(txns):
-    """Save transactions to DB (full replace, sorted by date)."""
+def save_transactions(txns, user_id):
+    """Save transactions to DB (full replace for this user only, sorted by date)."""
     txns_sorted = sorted(txns, key=lambda x: x.get("date", ""))
     cols = ("date", "exchange", "ticker", "name", "action", "units", "price",
             "currency", "brokerage", "brokerage_currency", "exch_rate", "value")
     conn = db()
-    conn.execute("DELETE FROM transactions")
+    conn.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
     conn.executemany(
-        f"INSERT INTO transactions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-        [[t.get(c, 0 if c in ("units","price","brokerage","exch_rate","value") else "") for c in cols] for t in txns_sorted]
+        f"INSERT INTO transactions ({','.join(cols)}, user_id) VALUES ({','.join('?' * len(cols))}, ?)",
+        [[t.get(c, 0 if c in ("units","price","brokerage","exch_rate","value") else "") for c in cols] + [user_id]
+         for t in txns_sorted]
     )
     conn.commit()
     conn.close()
 
 # ─── Cash Accounts, Super Holdings, Country Overrides ───────
 
-def load_cash_accounts():
+def load_cash_accounts(user_id):
     conn = db()
     rows = conn.execute(
-        "SELECT institution, type, name, balance, country FROM cash_accounts ORDER BY id"
+        "SELECT institution, type, name, balance, country FROM cash_accounts WHERE user_id = ? ORDER BY id", (user_id,)
     ).fetchall()
     conn.close()
     return [{"institution": r[0], "type": r[1], "name": r[2], "balance": r[3], "country": r[4]} for r in rows]
 
-def save_cash_accounts(accounts):
+def save_cash_accounts(accounts, user_id):
     conn = db()
-    conn.execute("DELETE FROM cash_accounts")
+    conn.execute("DELETE FROM cash_accounts WHERE user_id = ?", (user_id,))
     conn.executemany(
-        "INSERT INTO cash_accounts (institution, type, name, balance, country) VALUES (?,?,?,?,?)",
-        [(a.get("institution",""), a.get("type",""), a.get("name",""), a.get("balance",0), a.get("country","AU")) for a in accounts]
+        "INSERT INTO cash_accounts (institution, type, name, balance, country, user_id) VALUES (?,?,?,?,?,?)",
+        [(a.get("institution",""), a.get("type",""), a.get("name",""), a.get("balance",0), a.get("country","AU"), user_id) for a in accounts]
     )
     conn.commit()
     conn.close()
 
-def load_super_holdings():
+def load_super_holdings(user_id):
     conn = db()
     rows = conn.execute(
-        "SELECT name, class, allocation_pct, country FROM super_holdings ORDER BY id"
+        "SELECT name, class, allocation_pct, country FROM super_holdings WHERE user_id = ? ORDER BY id", (user_id,)
     ).fetchall()
     conn.close()
     return [{"name": r[0], "class": r[1], "allocation_pct": r[2], "country": r[3]} for r in rows]
 
-def save_super_holdings(holdings):
+def save_super_holdings(holdings, user_id):
     conn = db()
-    conn.execute("DELETE FROM super_holdings")
+    conn.execute("DELETE FROM super_holdings WHERE user_id = ?", (user_id,))
     conn.executemany(
-        "INSERT INTO super_holdings (name, class, allocation_pct, country) VALUES (?,?,?,?)",
-        [(h.get("name",""), h.get("class",""), h.get("allocation_pct",0), h.get("country","")) for h in holdings]
+        "INSERT INTO super_holdings (name, class, allocation_pct, country, user_id) VALUES (?,?,?,?,?)",
+        [(h.get("name",""), h.get("class",""), h.get("allocation_pct",0), h.get("country",""), user_id) for h in holdings]
     )
     conn.commit()
     conn.close()
 
-def load_country_overrides():
+def load_country_overrides(user_id):
     conn = db()
-    rows = conn.execute("SELECT symbol, country FROM country_overrides").fetchall()
+    rows = conn.execute("SELECT symbol, country FROM country_overrides WHERE user_id = ?", (user_id,)).fetchall()
     conn.close()
     return {r[0]: r[1] for r in rows}
 
-def save_country_overrides(overrides):
+def save_country_overrides(overrides, user_id):
     conn = db()
-    conn.execute("DELETE FROM country_overrides")
+    conn.execute("DELETE FROM country_overrides WHERE user_id = ?", (user_id,))
     conn.executemany(
-        "INSERT INTO country_overrides (symbol, country) VALUES (?,?)",
-        list(overrides.items())
+        "INSERT INTO country_overrides (symbol, country, user_id) VALUES (?,?,?)",
+        [(k, v, user_id) for k, v in overrides.items()]
     )
     conn.commit()
     conn.close()
@@ -547,10 +770,10 @@ def fetch_holding_meta(ticker, exchange):
         print(f"[meta] Failed to fetch metadata for {ysym}: {e}")
         return None
 
-def get_holding_country(ticker, exchange, name):
+def get_holding_country(ticker, exchange, name, user_id):
     """Determine country for a holding: override > exchange heuristic > 'Unknown'."""
     sym = yf_symbol(ticker, exchange)
-    overrides = load_country_overrides()
+    overrides = load_country_overrides(user_id)
     if sym in overrides:
         return overrides[sym]
     # Heuristic: US exchanges → US, ASX → AU, else based on name
@@ -561,9 +784,9 @@ def get_holding_country(ticker, exchange, name):
         return "AU"
     return "Unknown"
 
-def get_total_cash():
+def get_total_cash(user_id):
     """Sum all cash account balances."""
-    accounts = load_cash_accounts()
+    accounts = load_cash_accounts(user_id)
     return round(sum(a.get("balance", 0) for a in accounts), 2)
 
 # ─── End Config Helpers ────────────────────────────────────
@@ -757,9 +980,10 @@ def serve_spa(path):
     return send_from_directory(FRONTEND_DIST, "index.html")
 
 @app.route("/api/transactions", methods=["GET"])
+@jwt_required()
 def get_transactions():
     """Retrieve list of transactions enriched with current price and gain/loss."""
-    txns = load_transactions()
+    txns = load_transactions(current_user_id())
     if not txns:
         return jsonify([])
 
@@ -817,6 +1041,7 @@ def get_transactions():
     return jsonify(enriched)
 
 @app.route("/api/transactions", methods=["POST"])
+@jwt_required()
 def add_transaction():
     """Add a new transaction, auto-calculating values and exchange rates."""
     data = request.json
@@ -860,9 +1085,9 @@ def add_transaction():
         conn = db()
         conn.execute(
             "INSERT INTO transactions (date, exchange, ticker, name, action, units, price, currency, "
-            "brokerage, brokerage_currency, exch_rate, value) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "brokerage, brokerage_currency, exch_rate, value, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (date_str, exchange, ticker, name, action, units, price, currency,
-             brokerage, currency, exch_rate, round(aud_value, 2)),
+             brokerage, currency, exch_rate, round(aud_value, 2), current_user_id()),
         )
         conn.commit()
         conn.close()
@@ -871,23 +1096,27 @@ def add_transaction():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/transactions/<int:idx>", methods=["DELETE"])
+@jwt_required()
 def delete_transaction(idx):
     """Delete a transaction. idx is treated as a real transaction id when it exists as
     one (the frontend now has stable ids to work with); falls back to the old
-    date-ordered positional lookup for any caller still using the legacy convention."""
+    date-ordered positional lookup for any caller still using the legacy convention.
+    Scoped to the current user either way — you cannot delete another account's row
+    even by guessing its id."""
+    uid = current_user_id()
     conn = db()
-    exists = conn.execute("SELECT id FROM transactions WHERE id = ?", (idx,)).fetchone()
+    exists = conn.execute("SELECT id FROM transactions WHERE id = ? AND user_id = ?", (idx, uid)).fetchone()
     if exists:
-        conn.execute("DELETE FROM transactions WHERE id = ?", (idx,))
+        conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (idx, uid))
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
 
     row = conn.execute(
-        "SELECT id FROM transactions ORDER BY date, id LIMIT 1 OFFSET ?", (idx,)
+        "SELECT id FROM transactions WHERE user_id = ? ORDER BY date, id LIMIT 1 OFFSET ?", (uid, idx)
     ).fetchone()
     if row:
-        conn.execute("DELETE FROM transactions WHERE id = ?", (row[0],))
+        conn.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?", (row[0], uid))
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -895,13 +1124,15 @@ def delete_transaction(idx):
     return jsonify({"ok": False, "error": "Transaction not found"}), 404
 
 @app.route("/api/transactions/<int:txn_id>", methods=["PUT"])
+@jwt_required()
 def update_transaction(txn_id):
     """Edit an existing transaction by its stable id, recalculating value/exch_rate
     the same way add_transaction does (same manual-FX-override support)."""
     data = request.json
+    uid = current_user_id()
     try:
         conn = db()
-        exists = conn.execute("SELECT id FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+        exists = conn.execute("SELECT id FROM transactions WHERE id = ? AND user_id = ?", (txn_id, uid)).fetchone()
         if not exists:
             conn.close()
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
@@ -936,9 +1167,9 @@ def update_transaction(txn_id):
 
         conn.execute(
             "UPDATE transactions SET date=?, exchange=?, ticker=?, name=?, action=?, units=?, price=?, "
-            "currency=?, brokerage=?, brokerage_currency=?, exch_rate=?, value=? WHERE id=?",
+            "currency=?, brokerage=?, brokerage_currency=?, exch_rate=?, value=? WHERE id=? AND user_id=?",
             (date_str, exchange, ticker, name, action, units, price, currency,
-             brokerage, currency, exch_rate, round(aud_value, 2), txn_id),
+             brokerage, currency, exch_rate, round(aud_value, 2), txn_id, uid),
         )
         conn.commit()
         conn.close()
@@ -955,13 +1186,24 @@ def _run_sync(force=False):
     sync_symbol and fetch_holding_meta each open/close their own DB connection
     (WAL mode + busy_timeout handle the concurrent writes), so this is safe.
     """
-    txns = load_transactions()
-    if not txns:
+    # Sync price history for the DISTINCT set of tickers held across every user account
+    # combined — NOT per-user. yfinance gets hit once per symbol regardless of how many
+    # accounts hold it, since the prices table is a shared global cache, not per-user data.
+    conn = db()
+    rows = conn.execute(
+        "SELECT ticker, exchange, MIN(date) as min_date FROM transactions GROUP BY ticker, exchange"
+    ).fetchall()
+    conn.close()
+    if not rows:
         return []
 
-    df = pd.DataFrame(txns)
+    df = pd.DataFrame(rows, columns=["ticker", "exchange", "date"])
     df["date"] = pd.to_datetime(df["date"])
     df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+    # Two different holders' transactions can map to the same yfinance symbol (e.g. both
+    # bought VAS) — collapse to one job per symbol using the earliest date needed across
+    # every account that holds it.
+    df = df.groupby("sym", as_index=False).agg(date=("date", "min"), ticker=("ticker", "first"), exchange=("exchange", "first"))
 
     end = pd.Timestamp(date.today())
     # Roll back to Friday if min transaction date falls on a weekend
@@ -1004,8 +1246,11 @@ def _run_sync(force=False):
 
 
 @app.route("/api/sync", methods=["POST"])
+@jwt_required()
 def sync_data():
-    """Trigger update of cached price data and exchange rates."""
+    """Trigger update of cached price data and exchange rates. Deliberately syncs
+    tickers across every user account, not just the caller's — the price cache is
+    global/shared, so this stays consistent with the twice-daily background job."""
     force = request.args.get("force", "").lower() == "true"
     results = _run_sync(force=force)
     if not results:
@@ -1013,8 +1258,11 @@ def sync_data():
     return jsonify({"results": results, "at": datetime.now().isoformat()})
 
 @app.route("/api/sync-status", methods=["GET"])
+@jwt_required()
 def get_sync_status():
-    """Return full sync status: prices + metadata + health for all cached symbols."""
+    """Return full sync status: prices + metadata + health for all cached symbols.
+    Deliberately global (not scoped to the caller) — the sync log tracks the shared
+    price cache, same reasoning as /api/sync above."""
     conn = db()
     rows = conn.execute("""
         SELECT
@@ -1095,14 +1343,15 @@ def _compute_dividend_row(conn, symbol, ticker, exchange, currency, ex_date, per
     }
 
 @app.route("/api/dividends", methods=["GET"])
+@jwt_required()
 def get_dividends():
     conn = db()
     rows = conn.execute("""
         SELECT id, date, symbol, ticker, exchange, per_share, units, currency,
                gross_amount, gross_amount_aud, franking_pct, franking_credit_aud,
                withholding_tax_pct, net_amount_aud, source
-        FROM dividends ORDER BY date DESC
-    """).fetchall()
+        FROM dividends WHERE user_id = ? ORDER BY date DESC
+    """, (current_user_id(),)).fetchall()
     conn.close()
     cols = ["id", "date", "symbol", "ticker", "exchange", "per_share", "units", "currency",
             "gross_amount", "gross_amount_aud", "franking_pct", "franking_credit_aud",
@@ -1110,6 +1359,7 @@ def get_dividends():
     return jsonify([dict(zip(cols, r)) for r in rows])
 
 @app.route("/api/dividends", methods=["POST"])
+@jwt_required()
 def add_dividend():
     """Manually add a dividend payment yfinance didn't catch."""
     data = request.json
@@ -1123,11 +1373,12 @@ def add_dividend():
         )
         conn.execute(
             "INSERT OR REPLACE INTO dividends (date, symbol, ticker, exchange, per_share, units, currency, "
-            "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source, user_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (row["date"], row["symbol"], row["ticker"], row["exchange"], row["per_share"], row["units"],
              row["currency"], row["gross_amount"], row["gross_amount_aud"], row["franking_pct"],
-             row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"]),
+             row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"],
+             current_user_id()),
         )
         conn.commit()
         conn.close()
@@ -1136,14 +1387,17 @@ def add_dividend():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/dividends/<int:div_id>", methods=["PUT"])
+@jwt_required()
 def update_dividend(div_id):
     """Mainly used to fill in franking_pct on an auto-fetched row — nobody publishes
     franking data programmatically, so this always has to be a manual edit."""
     data = request.json
+    uid = current_user_id()
     try:
         conn = db()
         existing = conn.execute(
-            "SELECT symbol, ticker, exchange, per_share, units, currency, date FROM dividends WHERE id = ?", (div_id,)
+            "SELECT symbol, ticker, exchange, per_share, units, currency, date FROM dividends WHERE id = ? AND user_id = ?",
+            (div_id, uid),
         ).fetchone()
         if not existing:
             conn.close()
@@ -1153,8 +1407,8 @@ def update_dividend(div_id):
         row = _compute_dividend_row(conn, symbol, ticker, exchange, currency, ex_date, per_share, units,
                                      source=data.get("source", "manual"), franking_pct=franking_pct)
         conn.execute(
-            "UPDATE dividends SET franking_pct=?, franking_credit_aud=?, net_amount_aud=? WHERE id=?",
-            (row["franking_pct"], row["franking_credit_aud"], row["net_amount_aud"], div_id),
+            "UPDATE dividends SET franking_pct=?, franking_credit_aud=?, net_amount_aud=? WHERE id=? AND user_id=?",
+            (row["franking_pct"], row["franking_credit_aud"], row["net_amount_aud"], div_id, uid),
         )
         conn.commit()
         conn.close()
@@ -1163,21 +1417,24 @@ def update_dividend(div_id):
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/dividends/<int:div_id>", methods=["DELETE"])
+@jwt_required()
 def delete_dividend(div_id):
     conn = db()
-    conn.execute("DELETE FROM dividends WHERE id = ?", (div_id,))
+    conn.execute("DELETE FROM dividends WHERE id = ? AND user_id = ?", (div_id, current_user_id()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/dividends/sync", methods=["POST"])
+@jwt_required()
 def sync_dividends():
     """Pull dividend history from yfinance for every symbol ever held, sized by the
     units actually held on each ex-dividend date. Franking % is never set by this —
     there's no feed for it — existing rows keep whatever franking_pct was already
     entered; only genuinely new payments are inserted (at franking_pct=0, since a
     reasonable default can't be assumed)."""
-    txns = load_transactions()
+    uid = current_user_id()
+    txns = load_transactions(uid)
     if not txns:
         return jsonify({"results": [], "message": "No transactions to sync dividends for"})
 
@@ -1204,7 +1461,7 @@ def sync_dividends():
                 if units <= 1e-5:
                     continue  # wasn't held on this ex-date
                 existing = conn.execute(
-                    "SELECT franking_pct FROM dividends WHERE symbol = ? AND date = ?", (sym, ex_date)
+                    "SELECT franking_pct FROM dividends WHERE symbol = ? AND date = ? AND user_id = ?", (sym, ex_date, uid)
                 ).fetchone()
                 franking_pct = existing[0] if existing else 0.0
                 row = _compute_dividend_row(conn, sym, info["ticker"], info["exchange"], info["currency"],
@@ -1212,14 +1469,14 @@ def sync_dividends():
                                              source="yfinance", franking_pct=franking_pct)
                 conn.execute(
                     "INSERT INTO dividends (date, symbol, ticker, exchange, per_share, units, currency, "
-                    "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(symbol, date) DO UPDATE SET per_share=excluded.per_share, units=excluded.units, "
+                    "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source, user_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(user_id, symbol, date) DO UPDATE SET per_share=excluded.per_share, units=excluded.units, "
                     "gross_amount=excluded.gross_amount, gross_amount_aud=excluded.gross_amount_aud, "
                     "net_amount_aud=excluded.net_amount_aud",
                     (row["date"], row["symbol"], row["ticker"], row["exchange"], row["per_share"], row["units"],
                      row["currency"], row["gross_amount"], row["gross_amount_aud"], row["franking_pct"],
-                     row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"]),
+                     row["franking_credit_aud"], row["withholding_tax_pct"], row["net_amount_aud"], row["source"], uid),
                 )
                 inserted += 1
             conn.commit()
@@ -1230,90 +1487,11 @@ def sync_dividends():
     return jsonify({"results": results})
 
 
-def get_performance():
-    """Return historical timeline of portfolio value, principal, and return."""
-    txns = load_transactions()
-    if not txns:
-        return jsonify({"dates": [], "value": [], "principal": [], "return_val": [], "return_pct": []})
-
-    df = pd.DataFrame(txns)
-    df["date"] = pd.to_datetime(df["date"])
-    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
-
-    start = df["date"].min()
-    end = pd.Timestamp(date.today())
-    all_dates = pd.date_range(start, end, freq="D")
-
-    conn = db()
-    price_data = {}
-    symbols_to_read = list(df["sym"].unique()) + ["AUDUSD=X"]
-    
-    for sym in symbols_to_read:
-        rows = conn.execute(
-            "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (sym,)
-        ).fetchall()
-        if rows:
-            # Reindex to all calendar days, forward-filling weekends/holidays
-            s = pd.Series(
-                {pd.Timestamp(d): c for d, c in rows}
-            ).reindex(all_dates).ffill().bfill()
-            # If still has NaNs, fill with 0 or 1.0 for exchange rate
-            s = s.fillna(0.0 if sym != "AUDUSD=X" else 1.0)
-        else:
-            s = pd.Series(0.0 if sym != "AUDUSD=X" else 1.0, index=all_dates)
-        price_data[sym] = s
-    conn.close()
-
-    fx_rates = price_data["AUDUSD=X"]
-    
-    # Track holdings and cash flow daily
-    units_changes = pd.DataFrame(0.0, index=all_dates, columns=df["sym"].unique())
-    cash_flow_changes = pd.Series(0.0, index=all_dates)
-    sym_currency = df.groupby("sym")["currency"].first().to_dict()
-
-    for _, row in df.iterrows():
-        sym = row["sym"]
-        action = row["action"].lower()
-        if action == "buy":
-            sign = 1
-        elif action == "sell":
-            sign = -1
-        else:
-            sign = 1  # split or other non-cash actions add units without cash flow
-        units_changes.loc[row["date"], sym] += sign * row["units"]
-        cash_flow_changes.loc[row["date"]] += row["value"]
-
-    units_df = units_changes.cumsum()
-    cash_flow = cash_flow_changes.cumsum()
-
-    # Calculate portfolio value over time
-    portfolio_value = pd.Series(0.0, index=all_dates)
-    for sym in df["sym"].unique():
-        prices = price_data[sym]
-        if sym_currency[sym] == "USD":
-            prices = prices / fx_rates  # Convert USD price to AUD
-        portfolio_value += units_df[sym] * prices
-
-    return_val = portfolio_value - cash_flow
-    return_pct = pd.Series(0.0, index=all_dates)
-    
-    # Net return % calculation
-    mask = cash_flow > 0.01
-    return_pct[mask] = (return_val[mask] / cash_flow[mask]) * 100
-
-    return jsonify({
-        "dates": [d.strftime("%Y-%m-%d") for d in all_dates],
-        "value": portfolio_value.round(2).tolist(),
-        "principal": cash_flow.round(2).tolist(),
-        "return_val": return_val.round(2).tolist(),
-        "return_pct": return_pct.round(2).tolist(),
-    })
-
-def _compute_active_holdings():
+def _compute_active_holdings(user_id):
     """Core holdings computation shared by /api/portfolio and anything else that
     needs per-holding value/cost/return (e.g. holding groups) — returns a plain
     list of dicts, not a Flask Response, so it's safe to call from other routes."""
-    txns = load_transactions()
+    txns = load_transactions(user_id)
     if not txns:
         return []
 
@@ -1465,24 +1643,27 @@ def _compute_active_holdings():
     return active_holdings
 
 @app.route("/api/portfolio", methods=["GET"])
+@jwt_required()
 def get_portfolio():
     """Return detailed analytics of current active holdings."""
-    return jsonify(_compute_active_holdings())
+    return jsonify(_compute_active_holdings(current_user_id()))
 
 @app.route("/api/holding-groups", methods=["GET"])
+@jwt_required()
 def get_holding_groups():
     """Return every group with computed aggregates — value, capital gain (unrealized),
     income (net dividends received), currency, and blended return % — plus a grand
     total row summing across every grouped holding. Mirrors the aggregates in a
     Sharesight custom-group report."""
+    uid = current_user_id()
     conn = db()
-    rows = conn.execute("SELECT id, name, symbols FROM holding_groups ORDER BY id").fetchall()
+    rows = conn.execute("SELECT id, name, symbols FROM holding_groups WHERE user_id = ? ORDER BY id", (uid,)).fetchall()
     conn.close()
 
-    holdings_by_symbol = {h["symbol"]: h for h in _compute_active_holdings()}
+    holdings_by_symbol = {h["symbol"]: h for h in _compute_active_holdings(uid)}
 
     div_conn = db()
-    div_rows = div_conn.execute("SELECT symbol, net_amount_aud FROM dividends").fetchall()
+    div_rows = div_conn.execute("SELECT symbol, net_amount_aud FROM dividends WHERE user_id = ?", (uid,)).fetchall()
     div_conn.close()
     income_by_symbol = {}
     for sym, net in div_rows:
@@ -1519,14 +1700,15 @@ def get_holding_groups():
     return jsonify({"groups": groups, "grand_total": grand_total})
 
 @app.route("/api/holding-groups", methods=["POST"])
+@jwt_required()
 def add_holding_group():
     data = request.json
     try:
         symbols = data.get("symbols", [])
         conn = db()
         conn.execute(
-            "INSERT INTO holding_groups (name, symbols) VALUES (?, ?)",
-            (data["name"], ",".join(symbols)),
+            "INSERT INTO holding_groups (name, symbols, user_id) VALUES (?, ?, ?)",
+            (data["name"], ",".join(symbols), current_user_id()),
         )
         conn.commit()
         conn.close()
@@ -1535,14 +1717,15 @@ def add_holding_group():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/holding-groups/<int:group_id>", methods=["PUT"])
+@jwt_required()
 def update_holding_group(group_id):
     data = request.json
     try:
         symbols = data.get("symbols", [])
         conn = db()
         conn.execute(
-            "UPDATE holding_groups SET name = ?, symbols = ? WHERE id = ?",
-            (data["name"], ",".join(symbols), group_id),
+            "UPDATE holding_groups SET name = ?, symbols = ? WHERE id = ? AND user_id = ?",
+            (data["name"], ",".join(symbols), group_id, current_user_id()),
         )
         conn.commit()
         conn.close()
@@ -1551,14 +1734,15 @@ def update_holding_group(group_id):
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/holding-groups/<int:group_id>", methods=["DELETE"])
+@jwt_required()
 def delete_holding_group(group_id):
     conn = db()
-    conn.execute("DELETE FROM holding_groups WHERE id = ?", (group_id,))
+    conn.execute("DELETE FROM holding_groups WHERE id = ? AND user_id = ?", (group_id, current_user_id()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
-def _build_daily_market_return_series(conn):
+def _build_daily_market_return_series(conn, user_id):
     """Daily 'market-only' return series — portfolio_value(t) minus cumulative net
     invested capital(t), same construction as the Return line in /api/networth.
     Diffing THIS (not raw portfolio value) is what Daily ATH needs: a buy moves both
@@ -1567,7 +1751,7 @@ def _build_daily_market_return_series(conn):
     Diffing raw portfolio_value instead would misread "I bought $80k of APP today" as
     an $80k gain, which is exactly the bug this replaced.
     Returned as a pandas Series indexed by date."""
-    txns = load_transactions()
+    txns = load_transactions(user_id)
     if not txns:
         return None
     df = pd.DataFrame(txns)
@@ -1608,9 +1792,11 @@ def _build_daily_market_return_series(conn):
     return portfolio_value - cash_flow
 
 @app.route("/api/stats", methods=["GET"])
+@jwt_required()
 def get_stats():
     """Return top level aggregated portfolio statistics."""
-    txns = load_transactions()
+    uid = current_user_id()
+    txns = load_transactions(uid)
     if not txns:
         return jsonify({
             "total_value": 0.0,
@@ -1640,7 +1826,7 @@ def get_stats():
     audusd = float(audusd_row[0]) if audusd_row else 0.65
 
     # Retrieve holdings breakdown
-    holdings = _compute_active_holdings()
+    holdings = _compute_active_holdings(uid)
     
     if not holdings:
         return jsonify({
@@ -1683,11 +1869,11 @@ def get_stats():
     # Track all-time portfolio high
     today = date.today().isoformat()
     conn2 = db()
-    row = conn2.execute("SELECT value, date FROM records WHERE key = 'portfolio_high'").fetchone()
+    row = conn2.execute("SELECT value, date FROM records WHERE key = 'portfolio_high' AND user_id = ?", (uid,)).fetchone()
     if row is None or total_value > row[0]:
         conn2.execute(
-            "INSERT OR REPLACE INTO records (key, value, date) VALUES ('portfolio_high', ?, ?)",
-            (round(total_value, 2), today)
+            "INSERT OR REPLACE INTO records (key, value, date, user_id) VALUES ('portfolio_high', ?, ?, ?)",
+            (round(total_value, 2), today, uid)
         )
         conn2.commit()
         ath_value, ath_date = round(total_value, 2), today
@@ -1699,7 +1885,7 @@ def get_stats():
     # manually-entered cash/super update never gets misread as a market "gain").
     daily_ath_value, daily_ath_date = 0.0, None
     try:
-        pv_series = _build_daily_market_return_series(conn2)
+        pv_series = _build_daily_market_return_series(conn2, uid)
         if pv_series is not None and len(pv_series) > 1:
             daily_diffs = pv_series.diff().dropna()
             if not daily_diffs.empty:
@@ -1729,9 +1915,9 @@ def get_stats():
         "day_pl_pct": round(day_pl_pct, 2),
     })
 
-def _get_latest_portfolio_value():
+def _get_latest_portfolio_value(user_id):
     """Helper: return total portfolio value from current holdings."""
-    txns = load_transactions()
+    txns = load_transactions(user_id)
     if not txns:
         return 0.0, 0.0, 0.0  # value, active_stocks, passive_stocks
     conn = db()
@@ -1801,6 +1987,7 @@ def _order_parcels_for_disposal(parcels, method):
     return sorted(live, key=lambda p: p["date"])  # fifo default
 
 @app.route("/api/cgt", methods=["GET"])
+@jwt_required()
 def get_cgt():
     """Calculate Australian CGT for sells within a date range, using real per-parcel
     lot tracking (not blended average cost) so the 12-month discount test applies to
@@ -1812,7 +1999,7 @@ def get_cgt():
     if method not in ("fifo", "lifo", "hifo"):
         method = "fifo"
 
-    txns = load_transactions()
+    txns = load_transactions(current_user_id())
     if not txns:
         return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date, "method": method})
 
@@ -1911,14 +2098,16 @@ def get_cgt():
         "method": method,
     })
 @app.route("/api/snapshots", methods=["GET"])
+@jwt_required()
 def get_snapshots():
     """Return all cash + super snapshots sorted by date."""
     conn = db()
-    rows = conn.execute("SELECT date, super, cash FROM snapshots ORDER BY date").fetchall()
+    rows = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (current_user_id(),)).fetchall()
     conn.close()
     return jsonify([{"date": r[0], "super": r[1], "cash": r[2]} for r in rows])
 
 @app.route("/api/snapshots", methods=["POST"])
+@jwt_required()
 def add_snapshot():
     """Add or update a cash + super snapshot. Persists to DB and snapshots.json."""
     data = request.json
@@ -1942,8 +2131,8 @@ def add_snapshot():
 
         conn = db()
         conn.execute(
-            "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
-            (date_str, super_val, cash_val),
+            "INSERT OR REPLACE INTO snapshots (date, super, cash, user_id) VALUES (?, ?, ?, ?)",
+            (date_str, super_val, cash_val, current_user_id()),
         )
         conn.commit()
         conn.close()
@@ -1952,14 +2141,16 @@ def add_snapshot():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/snapshots/<snap_date>", methods=["DELETE"])
+@jwt_required()
 def delete_snapshot(snap_date):
     conn = db()
-    conn.execute("DELETE FROM snapshots WHERE date = ?", (snap_date,))
+    conn.execute("DELETE FROM snapshots WHERE date = ? AND user_id = ?", (snap_date, current_user_id()))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
 @app.route("/api/milestones", methods=["GET"])
+@jwt_required()
 def get_milestones():
     """Return all milestones with live current values for linked metrics.
 
@@ -1969,6 +2160,7 @@ def get_milestones():
     the goal's progress moves with the exchange rate rather than freezing at the
     rate that was in effect when the milestone was created.
     """
+    uid = current_user_id()
     # Get live metrics once
     live = {}
     audusd = 0.65
@@ -1980,13 +2172,13 @@ def get_milestones():
         if fx_row and fx_row[0]:
             audusd = fx_row[0]
 
-        portfolio_val, active_val, passive_val = _get_latest_portfolio_value()
-        cash = get_total_cash()
+        portfolio_val, active_val, passive_val = _get_latest_portfolio_value(uid)
+        cash = get_total_cash(uid)
         today = date.today().isoformat()
-        row = conn2.execute("SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)).fetchone()
+        row = conn2.execute("SELECT super FROM snapshots WHERE date <= ? AND user_id = ? ORDER BY date DESC LIMIT 1", (today, uid)).fetchone()
         conn2.close()
         super_val = row[0] if row else 0.0
-        holdings = _compute_active_holdings()
+        holdings = _compute_active_holdings(uid)
         stats_data = {}
         if holdings:
             total_cost = sum(h.get("cost_aud", 0) for h in holdings)
@@ -2007,7 +2199,8 @@ def get_milestones():
     conn = db()
     rows = conn.execute(
         "SELECT id, date, title, description, category, value, type, target_value, current_value, "
-        "is_achieved, linked_metric, achieved_date, linked_metrics, currency FROM milestones ORDER BY date DESC"
+        "is_achieved, linked_metric, achieved_date, linked_metrics, currency FROM milestones WHERE user_id = ? ORDER BY date DESC",
+        (uid,)
     ).fetchall()
 
     results = []
@@ -2039,10 +2232,10 @@ def get_milestones():
             if target_value_aud is not None and current_val >= target_value_aud and not is_achieved:
                 is_achieved = True
                 achieved_date = date.today().isoformat()
-                conn.execute("UPDATE milestones SET is_achieved=1, achieved_date=?, current_value=? WHERE id=?",
-                             (achieved_date, current_val, r[0]))
+                conn.execute("UPDATE milestones SET is_achieved=1, achieved_date=?, current_value=? WHERE id=? AND user_id=?",
+                             (achieved_date, current_val, r[0], uid))
             elif not is_achieved:
-                conn.execute("UPDATE milestones SET current_value=? WHERE id=?", (current_val, r[0]))
+                conn.execute("UPDATE milestones SET current_value=? WHERE id=? AND user_id=?", (current_val, r[0], uid))
 
         results.append({
             "id": r[0],
@@ -2066,6 +2259,7 @@ def get_milestones():
     return jsonify(results)
 
 @app.route("/api/milestones", methods=["POST"])
+@jwt_required()
 def add_milestone():
     data = request.json
     try:
@@ -2096,10 +2290,10 @@ def add_milestone():
                 achieved_date = date.today().isoformat()
         conn.execute(
             "INSERT INTO milestones (date, title, description, category, value, type, target_value, current_value, "
-            "is_achieved, linked_metric, achieved_date, linked_metrics, currency) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "is_achieved, linked_metric, achieved_date, linked_metrics, currency, user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (data["date"], data["title"], data.get("description", ""), data["category"],
              data.get("value"), mtype, target_value, current_val,
-             int(is_achieved), linked, achieved_date, linked_metrics_str, currency)
+             int(is_achieved), linked, achieved_date, linked_metrics_str, currency, current_user_id())
         )
         conn.commit()
         conn.close()
@@ -2108,6 +2302,7 @@ def add_milestone():
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/milestones/<int:milestone_id>", methods=["PUT"])
+@jwt_required()
 def update_milestone(milestone_id):
     data = request.json
     try:
@@ -2137,10 +2332,10 @@ def update_milestone(milestone_id):
                 achieved_date = date.today().isoformat()
         conn.execute(
             "UPDATE milestones SET date=?,title=?,description=?,category=?,value=?,type=?,target_value=?,current_value=?,"
-            "is_achieved=?,linked_metric=?,achieved_date=?,linked_metrics=?,currency=? WHERE id=?",
+            "is_achieved=?,linked_metric=?,achieved_date=?,linked_metrics=?,currency=? WHERE id=? AND user_id=?",
             (data["date"], data["title"], data.get("description", ""), data["category"],
              data.get("value"), mtype, target_value, current_val,
-             int(is_achieved), linked, achieved_date, linked_metrics_str, currency, milestone_id)
+             int(is_achieved), linked, achieved_date, linked_metrics_str, currency, milestone_id, current_user_id())
         )
         conn.commit()
         conn.close()
@@ -2150,11 +2345,12 @@ def update_milestone(milestone_id):
 
 
 @app.route("/api/milestones/<int:milestone_id>", methods=["DELETE"])
+@jwt_required()
 def delete_milestone(milestone_id):
     """Delete a milestone by ID."""
     try:
         conn = db()
-        conn.execute("DELETE FROM milestones WHERE id = ?", (milestone_id,))
+        conn.execute("DELETE FROM milestones WHERE id = ? AND user_id = ?", (milestone_id, current_user_id()))
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -2162,17 +2358,19 @@ def delete_milestone(milestone_id):
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/breakdown", methods=["GET"])
+@jwt_required()
 def get_breakdown():
     """Return current asset breakdown: cash (from accounts), super (from snapshot), stocks."""
+    uid = current_user_id()
     conn = db()
     today = date.today().isoformat()
     row = conn.execute(
-        "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
+        "SELECT super FROM snapshots WHERE date <= ? AND user_id = ? ORDER BY date DESC LIMIT 1", (today, uid)
     ).fetchone()
     conn.close()
     super_val = row[0] if row else 0.0
-    cash = get_total_cash()
-    portfolio_val, active_val, passive_val = _get_latest_portfolio_value()
+    cash = get_total_cash(uid)
+    portfolio_val, active_val, passive_val = _get_latest_portfolio_value(uid)
     return jsonify({
         "cash": cash,
         "super": round(super_val, 2),
@@ -2183,17 +2381,19 @@ def get_breakdown():
     })
 
 @app.route("/api/allocation", methods=["GET"])
+@jwt_required()
 def get_allocation():
     """Return dynamic country allocation using overrides, super holdings, and cash accounts."""
+    uid = current_user_id()
     conn = db()
     today = date.today().isoformat()
     row = conn.execute(
-        "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today,)
+        "SELECT super FROM snapshots WHERE date <= ? AND user_id = ? ORDER BY date DESC LIMIT 1", (today, uid)
     ).fetchone()
     conn.close()
     super_total = row[0] if row else 0.0
 
-    txns = load_transactions()
+    txns = load_transactions(uid)
     conn = db()
     latest_prices = {}
     rows = conn.execute("""
@@ -2234,11 +2434,11 @@ def get_allocation():
         if h["currency"] == "USD":
             price = price / audusd
         val = h["units"] * price
-        country = get_holding_country(h["ticker"], h["exchange"], h["name"])
+        country = get_holding_country(h["ticker"], h["exchange"], h["name"], uid)
         countries[country] = countries.get(country, 0) + val
 
     # Super: distribute across countries from super_holdings.json
-    super_holdings = load_super_holdings()
+    super_holdings = load_super_holdings(uid)
     if super_holdings:
         for sh in super_holdings:
             c = sh.get("country", "Unknown")
@@ -2248,7 +2448,7 @@ def get_allocation():
         countries["AU"] = countries.get("AU", 0) + super_total
 
     # Cash accounts: distribute by country
-    cash_accounts = load_cash_accounts()
+    cash_accounts = load_cash_accounts(uid)
     for ca in cash_accounts:
         c = ca.get("country", "AU")
         countries[c] = countries.get(c, 0) + ca.get("balance", 0)
@@ -2265,40 +2465,46 @@ def get_allocation():
 # ─── Config CRUD Endpoints ─────────────────────────────────
 
 @app.route("/api/cash-accounts", methods=["GET"])
+@jwt_required()
 def get_cash_accounts():
-    return jsonify(load_cash_accounts())
+    return jsonify(load_cash_accounts(current_user_id()))
 
 @app.route("/api/cash-accounts", methods=["POST"])
+@jwt_required()
 def save_cash_accounts_route():
     data = request.json
     try:
-        save_cash_accounts(data)
+        save_cash_accounts(data, current_user_id())
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/super-holdings", methods=["GET"])
+@jwt_required()
 def get_super_holdings_route():
-    return jsonify(load_super_holdings())
+    return jsonify(load_super_holdings(current_user_id()))
 
 @app.route("/api/super-holdings", methods=["POST"])
+@jwt_required()
 def save_super_holdings_route():
     data = request.json
     try:
-        save_super_holdings(data)
+        save_super_holdings(data, current_user_id())
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/country-overrides", methods=["GET"])
+@jwt_required()
 def get_country_overrides_route():
-    return jsonify(load_country_overrides())
+    return jsonify(load_country_overrides(current_user_id()))
 
 @app.route("/api/country-overrides", methods=["POST"])
+@jwt_required()
 def save_country_overrides_route():
     data = request.json
     try:
-        save_country_overrides(data)
+        save_country_overrides(data, current_user_id())
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -2306,9 +2512,11 @@ def save_country_overrides_route():
 # ─── End Config CRUD ───────────────────────────────────────
 
 @app.route("/api/networth", methods=["GET"])
+@jwt_required()
 def get_networth():
     """Return combined net worth timeline: portfolio + cash + super."""
-    txns = load_transactions()
+    uid = current_user_id()
+    txns = load_transactions(uid)
     if not txns:
         return jsonify({"dates": [], "portfolio": [], "cash": [], "super": [], "net_worth": []})
 
@@ -2366,7 +2574,7 @@ def get_networth():
     return_val = portfolio_value - cash_flow
 
     # Build cash + super timeline (forward-filled from snapshots)
-    snapshots = conn.execute("SELECT date, super, cash FROM snapshots ORDER BY date").fetchall()
+    snapshots = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
 
     cash_series = pd.Series(0.0, index=all_dates)
@@ -2394,11 +2602,13 @@ def get_networth():
     })
 
 @app.route("/api/monthly-change", methods=["GET"])
+@jwt_required()
 def get_monthly_change():
     """Return month-over-month net worth change."""
-    txns = load_transactions()
+    uid = current_user_id()
+    txns = load_transactions(uid)
     conn = db()
-    snapshots = conn.execute("SELECT date, super, cash FROM snapshots ORDER BY date").fetchall()
+    snapshots = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
 
     if not snapshots:
@@ -2504,23 +2714,27 @@ def _scheduled_sync():
 # date since it only ever fires on the actual 1st.
 def _scheduled_monthly_snapshot():
     print(f"[scheduler] Monthly snapshot triggered at {datetime.now().isoformat()}")
-    try:
-        today_str = date.today().isoformat()
-        cash_total = get_total_cash()
-        conn = db()
-        prior = conn.execute(
-            "SELECT super FROM snapshots WHERE date <= ? ORDER BY date DESC LIMIT 1", (today_str,)
-        ).fetchone()
-        super_val = prior[0] if prior else 0.0
-        conn.execute(
-            "INSERT OR REPLACE INTO snapshots (date, super, cash) VALUES (?, ?, ?)",
-            (today_str, super_val, cash_total),
-        )
-        conn.commit()
-        conn.close()
-        print(f"[scheduler] Monthly snapshot logged: cash=${cash_total:.2f}, super=${super_val:.2f}")
-    except Exception as e:
-        print(f"[scheduler] Monthly snapshot failed: {e}")
+    conn = db()
+    user_ids = [r[0] for r in conn.execute("SELECT id FROM users").fetchall()]
+    conn.close()
+    today_str = date.today().isoformat()
+    for uid in user_ids:
+        try:
+            cash_total = get_total_cash(uid)
+            conn = db()
+            prior = conn.execute(
+                "SELECT super FROM snapshots WHERE date <= ? AND user_id = ? ORDER BY date DESC LIMIT 1", (today_str, uid)
+            ).fetchone()
+            super_val = prior[0] if prior else 0.0
+            conn.execute(
+                "INSERT OR REPLACE INTO snapshots (date, super, cash, user_id) VALUES (?, ?, ?, ?)",
+                (today_str, super_val, cash_total, uid),
+            )
+            conn.commit()
+            conn.close()
+            print(f"[scheduler] Monthly snapshot logged for user {uid}: cash=${cash_total:.2f}, super=${super_val:.2f}")
+        except Exception as e:
+            print(f"[scheduler] Monthly snapshot failed for user {uid}: {e}")
 
 _scheduler = BackgroundScheduler()
 _scheduler.add_job(_scheduled_sync, "cron", hour=6, minute=15, id="asx_close")   # after ASX close

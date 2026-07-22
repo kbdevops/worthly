@@ -7,6 +7,8 @@ import Tax from './components/tabs/Tax'
 import Milestones from './components/tabs/Milestones'
 import Sync from './components/tabs/Sync'
 import Dividends from './components/tabs/Dividends'
+import AuthScreen from './components/auth/AuthScreen'
+import { useAuth, logout } from './lib/auth'
 
 export type TabId = 'dashboard' | 'holdings' | 'tax' | 'milestones' | 'sync' | 'dividends'
 
@@ -20,6 +22,7 @@ const TABS: { id: TabId; label: string }[] = [
 ]
 
 export default function App() {
+  const { isAuthed } = useAuth()
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     const saved = localStorage.getItem('activeTab') as TabId
     const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync', 'dividends']
@@ -39,6 +42,10 @@ export default function App() {
   const switchTab = (tab: TabId) => {
     setActiveTab(tab)
     setSidebarOpen(false)
+  }
+
+  if (!isAuthed) {
+    return <AuthScreen onAuthed={() => { /* useAuth() reacts to the auth-change event automatically */ }} />
   }
 
   return (
@@ -62,6 +69,7 @@ export default function App() {
           activeTab={activeTab}
           tabs={TABS}
           onMenuClick={() => setSidebarOpen(true)}
+          onLogout={logout}
         />
 
         <main className="flex-1 p-4 md:p-6 overflow-auto">

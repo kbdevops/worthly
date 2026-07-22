@@ -4,37 +4,66 @@ import type {
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
   CGTResult, SyncStatus, SyncResponse, Milestone, Dividend, HoldingGroup,
 } from '../types'
+import { getToken, clearSession } from '../lib/auth'
+
+function authHeaders(): Record<string, string> {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+async function handleAuthError(res: Response) {
+  if (res.status === 401) {
+    // Token missing/expired/invalid — clear it so the app falls back to the
+    // login screen instead of silently failing every subsequent request.
+    clearSession()
+  }
+}
 
 const get = async <T>(url: string): Promise<T> => {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`${url} ${res.status}`)
+  const res = await fetch(url, { headers: { ...authHeaders() } })
+  if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
 }
 
 const post = async <T>(url: string, body?: unknown): Promise<T> => {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
-  if (!res.ok) throw new Error(`${url} ${res.status}`)
+  if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
 }
 
 const del = async (url: string) => {
-  const res = await fetch(url, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`${url} ${res.status}`)
+  const res = await fetch(url, { method: 'DELETE', headers: { ...authHeaders() } })
+  if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
 }
 
 const put = async <T>(url: string, body: unknown): Promise<T> => {
   const res = await fetch(url, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`${url} ${res.status}`)
+  if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
+}
+
+export const useDashboardLayout = () =>
+  useQuery({
+    queryKey: ['dashboard-layout'],
+    queryFn: () => get<{ widget_order: string[] | null; widget_visible: Record<string, boolean> | null; stat_keys: string[] | null }>('/api/dashboard-layout'),
+  })
+
+export const useSaveDashboardLayout = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { widget_order?: string[]; widget_visible?: Record<string, boolean>; stat_keys?: string[] }) =>
+      post('/api/dashboard-layout', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard-layout'] }),
+  })
 }
 
 export const useBreakdown = () =>
