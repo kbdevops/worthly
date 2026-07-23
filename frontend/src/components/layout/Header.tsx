@@ -1,6 +1,8 @@
-import { Menu, LogOut } from 'lucide-react'
+import { useState } from 'react'
+import { Menu, LogOut, KeyRound } from 'lucide-react'
 import type { TabId } from '../../App'
 import { getStoredUser } from '../../lib/auth'
+import ChangePasswordModal from '../auth/ChangePasswordModal'
 
 interface Props {
   activeTab: TabId
@@ -12,6 +14,7 @@ interface Props {
 export default function Header({ activeTab, tabs, onMenuClick, onLogout }: Props) {
   const label = tabs.find(t => t.id === activeTab)?.label ?? ''
   const user = getStoredUser()
+  const [showChangePw, setShowChangePw] = useState(false)
   const today = new Date().toLocaleDateString('en-AU', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   })
@@ -35,6 +38,10 @@ export default function Header({ activeTab, tabs, onMenuClick, onLogout }: Props
         {user && (
           <div className="flex items-center gap-2.5">
             <span className="text-xs text-slate-500 hidden md:block">{user.email}</span>
+            <button onClick={() => setShowChangePw(true)} title="Change password"
+              className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-white/10">
+              <KeyRound size={16} />
+            </button>
             <button onClick={onLogout} title="Log out"
               className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-white/10">
               <LogOut size={16} />
@@ -42,6 +49,8 @@ export default function Header({ activeTab, tabs, onMenuClick, onLogout }: Props
           </div>
         )}
       </div>
+
+      {showChangePw && <ChangePasswordModal onClose={() => setShowChangePw(false)} />}
     </header>
   )
 }
