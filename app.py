@@ -393,6 +393,27 @@ def get_me():
         return jsonify({"ok": False}), 404
     return jsonify({"id": row[0], "email": row[1], "created_at": row[2]})
 
+@app.route("/api/change-password", methods=["POST"])
+@jwt_required()
+def change_password():
+    data = request.json or {}
+    current_password = data.get("current_password") or ""
+    new_password = data.get("new_password") or ""
+    if not new_password:
+        return jsonify({"ok": False, "error": "New password required"}), 400
+
+    uid = current_user_id()
+    conn = db()
+    row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (uid,)).fetchone()
+    if not row or not check_password_hash(row[0], current_password):
+        conn.close()
+        return jsonify({"ok": False, "error": "Current password is incorrect"}), 401
+
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (generate_password_hash(new_password), uid))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
 @app.route("/api/dashboard-layout", methods=["GET"])
 @jwt_required()
 def get_dashboard_layout():
