@@ -2629,8 +2629,13 @@ def get_monthly_change():
     uid = current_user_id()
     txns = load_transactions(uid)
     conn = db()
-    snapshots = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
+    all_snapshots = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
+
+    # Monthly Change is meant to show one point per calendar month — filter out any
+    # mid-month manual/corrective snapshot (e.g. a one-off entry to fix a specific
+    # date's cash figure) so it doesn't show up as a spurious extra data point.
+    snapshots = [s for s in all_snapshots if pd.Timestamp(s[0]).day == 1]
 
     if not snapshots:
         return jsonify({"months": [], "change": [], "change_pct": []})
