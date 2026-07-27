@@ -929,7 +929,11 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
 
         # Fetch today's intraday price so we have live data even before market close.
         # yfinance daily history() excludes the incomplete current day; intraday 1m
-        # data includes it as soon as the first trade prints.
+        # data includes it as soon as the first trade prints. Always overwrite (not
+        # just insert-if-missing) — the daily-history path above never touches today's
+        # date (clamped to daily_cap = yesterday), so nothing else writes this row
+        # until tomorrow, meaning it's always safe to refresh it as many times as this
+        # runs today without risk of clobbering a finalized close.
         try:
             intraday = _fetch_with_retry(
                 lambda: yf.Ticker(symbol).history(period="1d", interval="1m")
@@ -939,16 +943,10 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
                 latest = intraday.iloc[-1]
                 latest_date = latest.name.strftime("%Y-%m-%d")
                 latest_close = float(latest["Close"])
-                # Only insert if this date is not already covered by daily history
-                existing = conn.execute(
-                    "SELECT 1 FROM prices WHERE symbol = ? AND date = ?",
-                    (symbol, latest_date),
-                ).fetchone()
-                if not existing:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
-                        (symbol, latest_date, latest_close),
-                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
+                    (symbol, latest_date, latest_close),
+                )
         except Exception as e:
             # Intraday is best-effort — a failure here alone shouldn't mark the whole
             # sync as failed as long as daily history above succeeded.
@@ -1197,6 +1195,51 @@ def update_transaction(txn_id):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+def _run_intraday_refresh():
+    """Lightweight, frequent refresh of just today's intraday price — this is what
+    makes the dashboard feel 'live' between the two full daily syncs, without the
+    overhead of re-checking each symbol's entire daily-history backfill or metadata.
+    Same DISTINCT-across-all-accounts symbol discovery as _run_sync."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT DISTINCT ticker, exchange FROM transactions"
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return []
+
+    symbols = {yf_symbol(t, e) for t, e in rows}
+    symbols.add("AUDUSD=X")
+
+    def _refresh_one(symbol):
+        try:
+            intraday = _fetch_with_retry(
+                lambda: yf.Ticker(symbol).history(period="1d", interval="1m")
+            )
+            if intraday.empty:
+                return {"symbol": symbol, "ok": True, "message": "No intraday data (market likely closed)"}
+            intraday.index = intraday.index.tz_localize(None)
+            latest = intraday.iloc[-1]
+            latest_date = latest.name.strftime("%Y-%m-%d")
+            latest_close = float(latest["Close"])
+            conn = db()
+            conn.execute(
+                "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
+                (symbol, latest_date, latest_close),
+            )
+            conn.commit()
+            conn.close()
+            return {"symbol": symbol, "ok": True, "message": f"Refreshed @ {latest_close}"}
+        except Exception as e:
+            return {"symbol": symbol, "ok": False, "message": str(e)}
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as pool:
+        futures = {pool.submit(_refresh_one, sym): sym for sym in symbols}
+        for fut in as_completed(futures):
+            results.append(fut.result())
+    return results
 
 def _run_sync(force=False):
     """Core sync logic — fetch missing prices and metadata for all holdings.
@@ -2732,6 +2775,14 @@ def _scheduled_sync():
     except Exception as e:
         print(f"[scheduler] Sync failed: {e}")
 
+def _scheduled_intraday_refresh():
+    try:
+        results = _run_intraday_refresh()
+        ok = sum(1 for r in results if r.get("ok"))
+        print(f"[scheduler] Intraday refresh: {ok}/{len(results)} symbols OK")
+    except Exception as e:
+        print(f"[scheduler] Intraday refresh failed: {e}")
+
 # Monthly snapshot — cash has no bank connector, so it's only ever as current as the
 # last time someone manually updated cash_accounts. This locks in a snapshot on the 1st
 # of every month automatically using whatever's on record right then (live cash_accounts
@@ -2765,10 +2816,11 @@ def _scheduled_monthly_snapshot():
 _scheduler = BackgroundScheduler()
 _scheduler.add_job(_scheduled_sync, "cron", hour=6, minute=15, id="asx_close")   # after ASX close
 _scheduler.add_job(_scheduled_sync, "cron", hour=21, minute=15, id="us_close")   # after NYSE/NASDAQ close
+_scheduler.add_job(_scheduled_intraday_refresh, "interval", minutes=15, id="intraday_refresh")  # keeps today's price/Today's P&L feeling live between the two full syncs
 _scheduler.add_job(_scheduled_monthly_snapshot, "cron", day=1, hour=13, minute=0,
                     timezone="Australia/Melbourne", id="monthly_snapshot")  # 1pm Melbourne time, 1st of month, DST-aware
 _scheduler.start()
-print("[scheduler] Auto-sync scheduled: 06:15 UTC (ASX), 21:15 UTC (NYSE/NASDAQ)")
+print("[scheduler] Auto-sync scheduled: 06:15 UTC (ASX), 21:15 UTC (NYSE/NASDAQ), intraday refresh every 15min")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5050)

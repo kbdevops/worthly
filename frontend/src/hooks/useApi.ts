@@ -67,10 +67,10 @@ export const useSaveDashboardLayout = () => {
 }
 
 export const useBreakdown = () =>
-  useQuery({ queryKey: ['breakdown'], queryFn: () => get<Breakdown>('/api/breakdown') })
+  useQuery({ queryKey: ['breakdown'], queryFn: () => get<Breakdown>('/api/breakdown'), refetchInterval: 60_000 })
 
 export const useStats = () =>
-  useQuery({ queryKey: ['stats'], queryFn: () => get<Stats>('/api/stats') })
+  useQuery({ queryKey: ['stats'], queryFn: () => get<Stats>('/api/stats'), refetchInterval: 60_000 })
 
 export const useNetworth = () =>
   useQuery({ queryKey: ['networth'], queryFn: () => get<NetworthData>('/api/networth') })
@@ -82,7 +82,7 @@ export const useAllocation = () =>
   useQuery({ queryKey: ['allocation'], queryFn: () => get<Allocation>('/api/allocation') })
 
 export const usePortfolio = () =>
-  useQuery({ queryKey: ['portfolio'], queryFn: () => get<Holding[]>('/api/portfolio') })
+  useQuery({ queryKey: ['portfolio'], queryFn: () => get<Holding[]>('/api/portfolio'), refetchInterval: 60_000 })
 
 export const useTransactions = () =>
   useQuery({ queryKey: ['transactions'], queryFn: () => get<Transaction[]>('/api/transactions') })
