@@ -2,7 +2,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
-  CGTResult, SyncStatus, SyncResponse, Milestone, Dividend, HoldingGroup,
+  CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
+  CompounterData, IbkrCredentialsStatus, IbkrSyncJob,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
 
@@ -54,14 +55,23 @@ const put = async <T>(url: string, body: unknown): Promise<T> => {
 export const useDashboardLayout = () =>
   useQuery({
     queryKey: ['dashboard-layout'],
-    queryFn: () => get<{ widget_order: string[] | null; widget_visible: Record<string, boolean> | null; stat_keys: string[] | null }>('/api/dashboard-layout'),
+    queryFn: () => get<{
+      widget_order: string[] | null
+      widget_visible: Record<string, boolean> | null
+      stat_keys: string[] | null
+      alloc_widgets: unknown[] | null
+    }>('/api/dashboard-layout'),
   })
 
 export const useSaveDashboardLayout = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: { widget_order?: string[]; widget_visible?: Record<string, boolean>; stat_keys?: string[] }) =>
-      post('/api/dashboard-layout', data),
+    mutationFn: (data: {
+      widget_order?: string[]
+      widget_visible?: Record<string, boolean>
+      stat_keys?: string[]
+      alloc_widgets?: unknown[]
+    }) => post('/api/dashboard-layout', data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard-layout'] }),
   })
 }
@@ -78,8 +88,25 @@ export const useNetworth = () =>
 export const useMonthlyChange = () =>
   useQuery({ queryKey: ['monthly-change'], queryFn: () => get<MonthlyChange>('/api/monthly-change') })
 
+export const useCompounder = () =>
+  useQuery({ queryKey: ['compounder'], queryFn: () => get<CompounterData>('/api/compounder') })
+
 export const useAllocation = () =>
   useQuery({ queryKey: ['allocation'], queryFn: () => get<Allocation>('/api/allocation') })
+
+export const useCountryOverrides = () =>
+  useQuery({ queryKey: ['country-overrides'], queryFn: () => get<Record<string, string>>('/api/country-overrides') })
+
+export const useSaveCountryOverrides = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (overrides: Record<string, string>) => post('/api/country-overrides', overrides),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['country-overrides'] })
+      qc.invalidateQueries({ queryKey: ['allocation'] })
+    },
+  })
+}
 
 export const usePortfolio = () =>
   useQuery({ queryKey: ['portfolio'], queryFn: () => get<Holding[]>('/api/portfolio'), refetchInterval: 60_000 })
@@ -197,10 +224,72 @@ export const useDeleteSnapshot = () => {
 export const useSync = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (force?: boolean) =>
-      post<SyncResponse>(`/api/sync${force ? '?force=true' : ''}`),
+    mutationFn: async (force?: boolean): Promise<SyncJob> => {
+      // Fire-and-forget start, then poll until done
+      const job = await post<SyncJob>(`/api/sync${force ? '?force=true' : ''}`)
+      const poll = async (): Promise<SyncJob> => {
+        const progress = await get<SyncJob>(`/api/sync/progress/${job.job_id}`)
+        if (progress.status === 'running') {
+          await new Promise(r => setTimeout(r, 1000))
+          return poll()
+        }
+        return progress
+      }
+      return poll()
+    },
+    onSuccess: () => { qc.invalidateQueries() },
+  })
+}
+
+/** Per-holding value + return scoped to a time window, for the treemap. */
+export const useRangePerformance = (range: string) =>
+  useQuery({
+    queryKey: ['range-performance', range],
+    queryFn: () => get<{ ticker: string; value_aud: number; return_pct: number }[]>(
+      `/api/portfolio/range-performance?range=${encodeURIComponent(range)}`),
+  })
+
+/** Recent closes per ticker, for the trend column in the holdings table. */
+export const useSparklines = () =>
+  useQuery({ queryKey: ['sparklines'], queryFn: () => get<Record<string, number[]>>('/api/portfolio/sparklines') })
+
+export const useIbkrCredentials = () =>
+  useQuery({ queryKey: ['ibkr-credentials'], queryFn: () => get<IbkrCredentialsStatus>('/api/ibkr/credentials') })
+
+export const useSaveIbkrCredentials = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { flex_token: string; query_id: string }) => post('/api/ibkr/credentials', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ibkr-credentials'] }),
+  })
+}
+
+export const useDeleteIbkrCredentials = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => del('/api/ibkr/credentials'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ibkr-credentials'] }),
+  })
+}
+
+export const useIbkrSync = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (): Promise<IbkrSyncJob> => {
+      const job = await post<IbkrSyncJob>('/api/ibkr/sync')
+      const poll = async (): Promise<IbkrSyncJob> => {
+        const progress = await get<IbkrSyncJob>(`/api/ibkr/sync/progress/${job.job_id}`)
+        if (progress.status === 'running') {
+          await new Promise(r => setTimeout(r, 1000))
+          return poll()
+        }
+        return progress
+      }
+      return poll()
+    },
     onSuccess: () => {
       qc.invalidateQueries()
+      qc.invalidateQueries({ queryKey: ['ibkr-credentials'] })
     },
   })
 }

@@ -20,19 +20,52 @@ also start the real background price-sync scheduler as a side effect, which you
 don't want running against a throwaway demo file. The schema below is a plain
 copy of what app.py's db() function creates (post multi-user migration).
 
+Writes to $DATA_DIR/prices.db, defaulting to this demo/ directory. It REFUSES to
+touch a database that already contains data — seeding is destructive and there is
+no undo, so an existing portfolio has to be moved aside (or --force passed)
+deliberately rather than by accident.
+
 Usage:
-    python3 demo/seed_demo_data.py
+    python3 demo/seed_demo_data.py                  # -> demo/prices.db
+    DATA_DIR=/tmp/demo python3 demo/seed_demo_data.py
+    python3 demo/seed_demo_data.py --force          # overwrite a populated db
+
     DATA_DIR=demo python3 app.py     # now the app reads demo/prices.db instead
     # log in at http://localhost:5050 with demo@worthly.local / demo12345
 """
 import sqlite3
 import os
+import sys
 from datetime import date, timedelta
 from werkzeug.security import generate_password_hash
 
-OUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prices.db")
+DEMO_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_PATH = os.path.join(os.environ.get("DATA_DIR") or DEMO_DIR, "prices.db")
 DEMO_EMAIL = "demo@worthly.local"
 DEMO_PASSWORD = "demo12345"
+
+
+def refuse_if_populated(path, force):
+    """Bail out rather than overwrite somebody's real portfolio."""
+    if force or not os.path.exists(path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='transactions'"
+        ).fetchone()[0]
+        n = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] if rows else 0
+        users = [r[0] for r in conn.execute("SELECT email FROM users")] if rows else []
+        conn.close()
+    except sqlite3.Error:
+        return  # unreadable/not a Worthly db — let the normal path deal with it
+    if n:
+        sys.exit(
+            f"refusing to seed: {path} already holds {n} transaction(s)"
+            f"{' for ' + ', '.join(users) if users else ''}.\n"
+            "Move it aside first, point DATA_DIR somewhere else, or pass --force "
+            "if you really mean to replace it."
+        )
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -46,6 +79,7 @@ CREATE TABLE IF NOT EXISTS dashboard_layout (
     widget_order TEXT NOT NULL DEFAULT '',
     widget_visible TEXT NOT NULL DEFAULT '',
     stat_keys TEXT NOT NULL DEFAULT '',
+    alloc_widgets TEXT,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
@@ -66,7 +100,18 @@ CREATE TABLE IF NOT EXISTS transactions (
     ticker TEXT NOT NULL, name TEXT NOT NULL, action TEXT NOT NULL, units REAL NOT NULL,
     price REAL NOT NULL, currency TEXT NOT NULL, brokerage REAL NOT NULL DEFAULT 0,
     brokerage_currency TEXT NOT NULL DEFAULT 'AUD', exch_rate REAL NOT NULL DEFAULT 1.0,
-    value REAL NOT NULL, user_id INTEGER NOT NULL DEFAULT 1
+    value REAL NOT NULL, user_id INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'manual', external_id TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_user_external_id
+    ON transactions(user_id, external_id);
+CREATE TABLE IF NOT EXISTS ibkr_credentials (
+    user_id INTEGER PRIMARY KEY,
+    flex_token TEXT NOT NULL,
+    query_id TEXT NOT NULL,
+    last_synced TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS cash_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, institution TEXT, type TEXT, name TEXT,
@@ -161,6 +206,9 @@ FAKE_SNAPSHOTS = [
 
 
 def main():
+    force = "--force" in sys.argv
+    refuse_if_populated(OUT_PATH, force)
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     if os.path.exists(OUT_PATH):
         os.remove(OUT_PATH)
     conn = sqlite3.connect(OUT_PATH)
@@ -213,7 +261,7 @@ def main():
     conn.close()
     print(f"Seeded fake demo data -> {OUT_PATH}")
     print(f"Log in with: {DEMO_EMAIL} / {DEMO_PASSWORD}")
-    print("Run the app against it with:  DATA_DIR=demo python3 app.py")
+    print(f"Run the app against it with:  DATA_DIR={os.path.dirname(OUT_PATH)} python3 app.py")
     print("Then click Sync All / Sync Dividends in the app to pull real live prices for these fake positions.")
 
 

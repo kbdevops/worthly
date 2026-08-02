@@ -26,6 +26,12 @@ frontend/node_modules/
 # IDE
 .vscode/
 .idea/
+# Local dev-server config — contains absolute paths for one machine
+.claude/
 
 # Backup files
 *_backup.*
+# Timestamped DB snapshots (prices.db.backup-YYYYmmdd-HHMMSS) — the leading *.db
+# rule doesn't catch these because the extension isn't last.
+*.db.backup-*
+*.db.bak

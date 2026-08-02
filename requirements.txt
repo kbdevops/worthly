@@ -3,3 +3,4 @@ flask-jwt-extended
 yfinance
 pandas
 APScheduler
+requests

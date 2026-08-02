@@ -95,9 +95,16 @@ export default function Transactions() {
                   <td className={TD + ' font-medium text-white'}>{t.ticker}</td>
                   <td className={TD + ' text-slate-400'}>{t.exchange}</td>
                   <td className={TD}>
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${t.action === 'buy' ? 'bg-emerald-500/20 text-emerald-400' : t.action === 'sell' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                      {t.action}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${t.action === 'buy' ? 'bg-emerald-500/20 text-emerald-400' : t.action === 'sell' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                        {t.action}
+                      </span>
+                      {t.source === 'ibkr' && (
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/20 text-indigo-300" title="Imported from Interactive Brokers">
+                          IBKR
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className={TD + ' text-slate-300'}>{t.units}</td>
                   <td className={TD + ' text-slate-300'}>{t.price}</td>

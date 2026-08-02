@@ -13,6 +13,15 @@ export function fmtCurrency(n: number, digits = 2): string {
   })
 }
 
+/** Short form for tight spaces — $1.2m / $451.1k / $840. */
+export function fmtCurrencyCompact(n: number): string {
+  const a = Math.abs(n)
+  const sign = n < 0 ? '-' : ''
+  if (a >= 1_000_000) return `${sign}$${(a / 1_000_000).toFixed(a >= 10_000_000 ? 0 : 1)}m`
+  if (a >= 1_000)     return `${sign}$${(a / 1_000).toFixed(a >= 100_000 ? 1 : 1)}k`
+  return `${sign}$${a.toFixed(0)}`
+}
+
 export function fmtCurrencySigned(n: number, digits = 2): string {
   if (n == null || isNaN(n)) return '$0.00'
   const prefix = n < 0 ? '-$' : '$'

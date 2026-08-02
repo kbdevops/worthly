@@ -7,14 +7,16 @@ import Tax from './components/tabs/Tax'
 import Milestones from './components/tabs/Milestones'
 import Sync from './components/tabs/Sync'
 import Dividends from './components/tabs/Dividends'
+import Compounder from './components/tabs/Compounder'
 import AuthScreen from './components/auth/AuthScreen'
 import { useAuth, logout } from './lib/auth'
 
-export type TabId = 'dashboard' | 'holdings' | 'tax' | 'milestones' | 'sync' | 'dividends'
+export type TabId = 'dashboard' | 'holdings' | 'tax' | 'milestones' | 'sync' | 'dividends' | 'compounder'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'holdings', label: 'Holdings' },
+  { id: 'compounder', label: 'Compounder' },
   { id: 'tax', label: 'Tax' },
   { id: 'dividends', label: 'Dividends' },
   { id: 'milestones', label: 'Milestones' },
@@ -25,7 +27,7 @@ export default function App() {
   const { isAuthed } = useAuth()
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     const saved = localStorage.getItem('activeTab') as TabId
-    const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync', 'dividends']
+    const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync', 'dividends', 'compounder']
     return valid.includes(saved) ? saved : 'dashboard'
   })
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -49,7 +51,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex min-h-screen" style={{ background: 'var(--bg-base)' }}>
+    <div className="flex h-screen overflow-hidden" style={{ background: 'var(--bg-base)' }}>
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-20 bg-black/60 lg:hidden"
@@ -79,6 +81,7 @@ export default function App() {
           {activeTab === 'milestones' && <Milestones />}
           {activeTab === 'sync' && <Sync />}
           {activeTab === 'dividends' && <Dividends />}
+          {activeTab === 'compounder' && <Compounder />}
         </main>
       </div>
     </div>

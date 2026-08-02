@@ -12,6 +12,7 @@ export interface Stats {
   total_cost: number
   total_return: number
   total_return_pct: number
+  total_principal: number
   best_performer: string
   best_performer_pct: number
   worst_performer: string
@@ -22,6 +23,13 @@ export interface Stats {
   daily_ath_date: string | null
   day_pl: number
   day_pl_pct: number
+  cost_basis: number
+  cagr: number
+  /** Years since first buy. Under 1, `cagr` is a plain cumulative return. */
+  cagr_years: number
+  /** False when the period is too short to annualise meaningfully. */
+  cagr_annualised: boolean
+  dividend_income: number
 }
 
 export interface NetworthData {
@@ -37,6 +45,7 @@ export interface MonthlyChange {
   months: string[]
   change: number[]
   change_pct: number[]
+  sources: string[]
 }
 
 export interface AllocationCountry {
@@ -62,6 +71,13 @@ export interface Holding {
   value_aud: number
   return_aud: number
   return_pct: number
+  /** Lifetime dividends received, in AUD. Dollars only — see app.py for why
+   *  this is never expressed as a % of cost_aud. */
+  income_aud: number
+  /** Australian franking credits attached to that income (a tax credit, not cash). */
+  franking_aud: number
+  /** return_aud + income_aud. */
+  total_return_aud: number
   daily_change: number
   daily_change_pct: number
   weight: number
@@ -71,6 +87,7 @@ export interface Holding {
   currency: string
   buys_count: number
   sells_count: number
+  last_synced: string | null
 }
 
 export interface Transaction {
@@ -90,6 +107,9 @@ export interface Transaction {
   current_price?: number
   gain_aud?: number
   gain_pct?: number
+  price_gain_aud?: number
+  fx_gain_aud?: number
+  source?: string
 }
 
 export interface CashAccount {
@@ -148,6 +168,15 @@ export interface SyncStatus {
   has_meta: boolean
 }
 
+export interface SyncJob {
+  job_id: string
+  status: 'running' | 'done' | 'error' | 'not_found'
+  results?: SyncResult[]
+  started_at?: string
+  finished_at?: string
+  error?: string
+}
+
 export interface SyncResult {
   symbol: string
   ok: boolean
@@ -157,6 +186,36 @@ export interface SyncResult {
 export interface SyncResponse {
   results: SyncResult[]
   message?: string
+}
+
+export interface IbkrCredentialsStatus {
+  configured: boolean
+  query_id: string | null
+  last_synced: string | null
+}
+
+export interface IbkrDuplicateWarning {
+  ibkr_txn_id: number
+  manual_txn_id: number
+  ticker: string
+  date: string
+  units: number
+  price: number
+}
+
+export interface IbkrSyncJob {
+  job_id?: string
+  status: 'running' | 'done' | 'error' | 'not_found'
+  results?: {
+    trades_processed: number
+    skipped_options: number
+    skipped_currency: Record<string, number>
+  }
+  duplicate_warnings?: IbkrDuplicateWarning[]
+  price_sync_results?: SyncResult[]
+  started_at?: string
+  finished_at?: string
+  error?: string
 }
 
 export interface HoldingGroup {
@@ -187,6 +246,42 @@ export interface Dividend {
   withholding_tax_pct: number
   net_amount_aud: number
   source: 'yfinance' | 'manual'
+}
+
+export interface CompounterMonthPoint {
+  date: string
+  nw: number
+  portfolio: number
+  cash: number
+  super: number
+  source: string
+  change_pct: number | null
+}
+
+export interface CompounterFYRow {
+  fy: string
+  nw_end: number
+  prior_nw: number | null
+  growth_dollar: number | null
+  growth_pct: number | null
+  best_month: number | null
+  worst_month: number | null
+  avg_mom: number | null
+  portfolio_end: number
+  cash_end: number
+  port_pct: number | null
+  months_count: number
+}
+
+export interface CompounterData {
+  monthly: CompounterMonthPoint[]
+  fy_rows: CompounterFYRow[]
+  summary: {
+    peak_nw: number
+    avg_mom: number
+    months_positive: number
+    months_negative: number
+  }
 }
 
 export interface Milestone {

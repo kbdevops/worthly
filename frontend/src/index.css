@@ -2,63 +2,109 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Theme variables ────────────────────────────────────────────────────── */
-:root, [data-theme="indigo"] {
-  --bg-base:     #060813;
-  --bg-elevated: #12152c;
-  --bg-card:     #181c38;
-  --border:      #262d5c;
-  --border-hover:#3b4585;
-  --accent:      #6366f1;
-  --accent-2:    #a855f7;
-  --scrollbar:   #3b4585;
+/* ── Theme system ───────────────────────────────────────────────────────────
+   A theme is four seed numbers, not a hand-written palette:
+
+     --h   neutral hue      --cn  neutral chroma
+     --ha  accent hue       --ca  accent chroma
+
+   Every ground, border and text colour below is derived from those seeds in
+   OKLCH at a FIXED lightness. That is the whole point: lightness never moves,
+   so contrast cannot break no matter which hue is chosen — including a fully
+   custom hue set at runtime from the theme picker. A bad theme is unreachable.
+
+   Deliberately NOT derived: --gain / --loss. Those carry meaning, and meaning
+   must not drift when the skin changes. They stay put in every theme.
+   ────────────────────────────────────────────────────────────────────────── */
+
+:root,
+[data-theme="indigo"]   { --h: 262; --cn: 0.020; --ha: 272; --ca: 0.170; }
+[data-theme="graphite"] { --h: 255; --cn: 0.006; --ha: 75;  --ca: 0.145; }
+[data-theme="harbour"]  { --h: 224; --cn: 0.024; --ha: 208; --ca: 0.130; }
+[data-theme="orchid"]   { --h: 312; --cn: 0.022; --ha: 322; --ca: 0.150; }
+[data-theme="tonal"]    { --h: 240; --cn: 0.016; --ha: 240; --ca: 0.100; }
+
+:root {
+  /* Grounds — ordered dark to light. bg-card sits above bg-elevated, matching
+     the relationship the app already relied on. */
+  --bg-base:      oklch(0.135 var(--cn) var(--h));
+  --bg-elevated:  oklch(0.195 var(--cn) var(--h));
+  --bg-card:      oklch(0.235 var(--cn) var(--h));
+  --bg-hover:     oklch(0.290 var(--cn) var(--h));
+
+  --border:       oklch(0.315 var(--cn) var(--h));
+  --border-hover: oklch(0.425 var(--cn) var(--h));
+  --scrollbar:    oklch(0.425 var(--cn) var(--h));
+
+  /* Text. These three were referenced across the app but never defined —
+     `var(--text-muted)` silently resolved to nothing, which is why some views
+     had to hardcode hex values to get readable labels. */
+  --text-primary: oklch(0.955 0.010 var(--h));
+  --text-muted:   oklch(0.700 0.022 var(--h));
+  --text-faint:   oklch(0.560 0.026 var(--h));
+
+  /* Accent = interactive affordance only. Never used to mean "good". */
+  --accent:       oklch(0.660 var(--ca) var(--ha));
+  --accent-2:     oklch(0.700 var(--ca) calc(var(--ha) + 40));
+  --accent-bg:    oklch(0.660 var(--ca) var(--ha) / 0.16);
+  --accent-border:oklch(0.660 var(--ca) var(--ha) / 0.45);
+
+  /* Stacked-chart bands: a monochromatic ramp of the accent hue, separated purely
+     by lightness. Offsetting the hue instead would drift into the semantic zones —
+     an accent near 75 puts a band on loss-red (22), one near 208 puts it on
+     gain-green (158) — and a cash band that reads as "loss" is a real misread.
+     Holding the hue fixed means a band can only ever collide with gain/loss if the
+     accent itself does, which the theme picker already warns about. */
+  --band-super:   oklch(0.400 0.070 var(--ha));
+  --band-cash:    oklch(0.560 0.105 var(--ha));
+  --band-port:    oklch(0.700 0.155 var(--ha));
+
+  /* Semantic — fixed across every theme so gain/loss never shifts meaning. */
+  --gain:         oklch(0.760 0.150 158);
+  --gain-bg:      oklch(0.760 0.150 158 / 0.15);
+  --loss:         oklch(0.680 0.190 22);
+  --loss-bg:      oklch(0.680 0.190 22 / 0.15);
+
+  --shadow:       0 8px 28px oklch(0.10 0.02 var(--h) / 0.55);
+  --social-bg:    oklch(0.235 var(--cn) var(--h));
+  --text-h:       oklch(0.955 0.010 var(--h));
 }
-[data-theme="midnight"] {
-  --bg-base:     #000000;
-  --bg-elevated: #0f0f1e;
-  --bg-card:     #16162a;
-  --border:      #26263f;
-  --border-hover:#2d2d50;
-  --accent:      #a855f7;
-  --accent-2:    #ec4899;
-  --scrollbar:   #4c1d95;
+
+/* ── Donut breakdown ────────────────────────────────────────────────────────
+   Laid out against its own container, not the viewport. These widgets appear at
+   wildly different widths (a full-width holdings card vs a third-width allocation
+   card) so a viewport breakpoint gets it wrong either way, and measuring with a
+   ResizeObserver proved unreliable — it produced no callbacks in some browsers and
+   the layout silently stayed stacked. Container queries are plain CSS and always
+   apply. Tailwind 3.4 has no `@container` variant, so this is hand-written.
+   ────────────────────────────────────────────────────────────────────────── */
+.db-root { container-type: inline-size; width: 100%; }
+.db-layout {
+  display: flex; flex-direction: column; align-items: center; gap: 1.25rem;
+  overflow: hidden;
 }
-[data-theme="emerald"] {
-  --bg-base:     #020d08;
-  --bg-elevated: #0a2a1a;
-  --bg-card:     #103022;
-  --border:      #17472f;
-  --border-hover:#1a5c3e;
-  --accent:      #10b981;
-  --accent-2:    #06b6d4;
-  --scrollbar:   #065f46;
+/* height:100% only resolves against a parent with a definite height, so the fill
+   has to be applied down the whole chain — setting it on the layout alone left it
+   sizing to content inside an auto-height root. */
+.db-root.db-fill, .db-layout.db-fill { height: 100%; }
+.db-donut { flex: none; max-width: 100%; position: relative; }
+.db-list { display: grid; grid-template-columns: 1fr; gap: 0 2.5rem; width: 100%; min-width: 0; }
+.db-bar { display: none; }          /* first thing to drop when space is tight */
+
+@container (min-width: 440px) {
+  .db-layout { flex-direction: row; }
+  .db-bar { display: block; }
 }
-[data-theme="rose"] {
-  --bg-base:     #0a0305;
-  --bg-elevated: #1e0a12;
-  --bg-card:     #260c16;
-  --border:      #431222;
-  --border-hover:#5c1526;
-  --accent:      #f43f5e;
-  --accent-2:    #fb923c;
-  --scrollbar:   #9f1239;
-}
-[data-theme="amber"] {
-  --bg-base:     #080600;
-  --bg-elevated: #1a1500;
-  --bg-card:     #221c00;
-  --border:      #382e00;
-  --border-hover:#4a3c00;
-  --accent:      #f59e0b;
-  --accent-2:    #f97316;
-  --scrollbar:   #78350f;
+/* Only split a long list into two columns once there is genuinely room for it. */
+@container (min-width: 940px) {
+  .db-list.db-cols-2 { grid-template-columns: 1fr 1fr; }
 }
 
 /* ── Base styles ────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   background-color: var(--bg-base);
-  color: #e2e8f0;
+  color: var(--text-primary);
   font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;

@@ -1,8 +1,162 @@
 import { useState } from 'react'
-import { RefreshCw, CheckCircle, XCircle, AlertTriangle } from 'lucide-react'
-import { useSyncStatus, useSync } from '../../hooks/useApi'
-import { fmtDate } from '../../lib/utils'
-import type { SyncResult } from '../../types'
+import { RefreshCw, CheckCircle, XCircle, AlertTriangle, Unlink } from 'lucide-react'
+import {
+  useSyncStatus, useSync,
+  useIbkrCredentials, useSaveIbkrCredentials, useDeleteIbkrCredentials, useIbkrSync,
+} from '../../hooks/useApi'
+import { fmtDate, fmtCurrency } from '../../lib/utils'
+import type { SyncResult, IbkrSyncJob } from '../../types'
+
+function IbkrSyncCard() {
+  const { data: creds } = useIbkrCredentials()
+  const saveCreds = useSaveIbkrCredentials()
+  const deleteCreds = useDeleteIbkrCredentials()
+  const ibkrSync = useIbkrSync()
+
+  const [editing, setEditing] = useState(false)
+  const [token, setToken] = useState('')
+  const [queryId, setQueryId] = useState('')
+  const [lastJob, setLastJob] = useState<IbkrSyncJob | null>(null)
+
+  const configured = creds?.configured ?? false
+
+  function startEdit() {
+    setToken('')
+    setQueryId(creds?.query_id ?? '')
+    setEditing(true)
+  }
+
+  function handleSaveCreds() {
+    if (!token.trim() || !queryId.trim()) return
+    saveCreds.mutate({ flex_token: token.trim(), query_id: queryId.trim() }, {
+      onSuccess: () => { setEditing(false); setToken('') },
+    })
+  }
+
+  function handleDisconnect() {
+    if (!confirm('Disconnect IBKR? Trades already imported will stay, but syncing will stop until you reconnect.')) return
+    deleteCreds.mutate()
+  }
+
+  async function handleSync() {
+    setLastJob(null)
+    const res = await ibkrSync.mutateAsync()
+    setLastJob(res)
+  }
+
+  return (
+    <div className="rounded-xl border border-[var(--border)] p-5" style={{ background: 'var(--bg-card)' }}>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-sm font-semibold text-white">Interactive Brokers</p>
+        {configured && !editing && (
+          <button onClick={handleDisconnect} className="flex items-center gap-1 text-xs text-slate-500 hover:text-red-400">
+            <Unlink size={12} /> Disconnect
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Pull trade executions from your IBKR Flex Web Service query and import them as transactions.
+      </p>
+
+      {!configured || editing ? (
+        <div className="space-y-3 max-w-sm">
+          <div>
+            <label className="text-xs text-slate-400 mb-1 block">Flex Token</label>
+            <input
+              type="password"
+              value={token}
+              onChange={e => setToken(e.target.value)}
+              placeholder={configured ? 'Re-enter to change' : 'Flex Web Service token'}
+              className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--bg-elevated)] border border-[var(--border)] text-slate-200 placeholder-slate-600 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 mb-1 block">Query ID</label>
+            <input
+              value={queryId}
+              onChange={e => setQueryId(e.target.value)}
+              placeholder="Flex Query ID"
+              className="w-full px-3 py-2 rounded-lg text-sm bg-[var(--bg-elevated)] border border-[var(--border)] text-slate-200 placeholder-slate-600 focus:outline-none"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSaveCreds}
+              disabled={saveCreds.isPending || !token.trim() || !queryId.trim()}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
+            >
+              {saveCreds.isPending ? 'Saving…' : 'Connect'}
+            </button>
+            {editing && (
+              <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded-lg text-xs text-slate-400 hover:text-white">
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={handleSync}
+            disabled={ibkrSync.isPending}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-60"
+            style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
+          >
+            <RefreshCw size={14} className={ibkrSync.isPending ? 'spin' : ''} />
+            {ibkrSync.isPending ? 'Syncing…' : 'Sync Trades'}
+          </button>
+          <button onClick={startEdit} className="text-xs text-slate-500 hover:text-slate-300">
+            Update credentials
+          </button>
+          <span className="text-xs text-slate-500">
+            {creds?.last_synced ? `Last synced ${new Date(creds.last_synced).toLocaleString('en-AU')}` : 'Never synced'}
+          </span>
+        </div>
+      )}
+
+      {lastJob?.status === 'error' && (
+        <div className="mt-4 rounded-lg p-3 text-sm text-red-300" style={{ background: 'rgba(239,68,68,0.1)' }}>
+          {lastJob.error}
+        </div>
+      )}
+
+      {lastJob?.status === 'done' && lastJob.results && (
+        <div className="mt-4 space-y-3">
+          <div className="rounded-lg p-3 text-sm text-emerald-300" style={{ background: 'rgba(16,185,129,0.1)' }}>
+            {lastJob.results.trades_processed} trade{lastJob.results.trades_processed === 1 ? '' : 's'} imported/updated.
+            {lastJob.results.skipped_options > 0 && <> {lastJob.results.skipped_options} options trade(s) skipped (not supported).</>}
+            {Object.entries(lastJob.results.skipped_currency).map(([cur, n]) => (
+              <span key={cur}> {n} trade(s) in {cur} skipped (unsupported currency).</span>
+            ))}
+            {lastJob.price_sync_results && lastJob.price_sync_results.length > 0 && (
+              <> Also synced prices for {lastJob.price_sync_results.filter(r => r.ok).map(r => r.symbol).join(', ')}
+              {lastJob.price_sync_results.some(r => !r.ok) && <>
+                {' '}(failed: {lastJob.price_sync_results.filter(r => !r.ok).map(r => r.symbol).join(', ')})
+              </>}.</>
+            )}
+          </div>
+
+          {lastJob.duplicate_warnings && lastJob.duplicate_warnings.length > 0 && (
+            <div className="rounded-lg p-3 border" style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.3)' }}>
+              <p className="text-xs font-semibold text-amber-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <AlertTriangle size={13} /> Possible duplicates — review before keeping both
+              </p>
+              <div className="space-y-1.5">
+                {lastJob.duplicate_warnings.map((w, i) => (
+                  <p key={i} className="text-xs text-amber-200">
+                    <span className="font-medium">{w.ticker}</span> on {fmtDate(w.date)} — {w.units} units @ {fmtCurrency(w.price)} exists
+                    as both a manual entry and this IBKR import. Check Holdings and delete the manual one if it's the same trade.
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 const TH = 'px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap'
 const TD = 'px-4 py-3 text-sm whitespace-nowrap'
@@ -43,6 +197,8 @@ export default function Sync() {
 
   return (
     <div className="space-y-6">
+      <IbkrSyncCard />
+
       <div className="flex items-center gap-3 flex-wrap">
         <button onClick={() => handleSync(true)} disabled={sync.isPending}
           className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-60"

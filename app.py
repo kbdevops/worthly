@@ -8,10 +8,16 @@ and detailed portfolio analytics. All data stored in prices.db.
 from flask import Flask, render_template, request, jsonify, send_from_directory
 import yfinance as yf
 import pandas as pd
+import requests
+import csv
+import io
+import xml.etree.ElementTree as ET
 import json
 import os
 import sqlite3
 import time
+import threading
+import uuid
 from datetime import datetime, date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -68,6 +74,16 @@ def db():
             widget_order TEXT NOT NULL DEFAULT '',
             widget_visible TEXT NOT NULL DEFAULT '',
             stat_keys TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ibkr_credentials (
+            user_id INTEGER PRIMARY KEY,
+            flex_token TEXT NOT NULL,
+            query_id TEXT NOT NULL,
+            last_synced TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
@@ -213,6 +229,11 @@ def db():
             conn.execute(f"ALTER TABLE sync_log ADD COLUMN {col} {defn}")
         except:
             pass
+    # Migrate snapshots to track source (manual vs auto)
+    try:
+        conn.execute("ALTER TABLE snapshots ADD COLUMN source TEXT DEFAULT 'manual'")
+    except:
+        pass
     # Migrate existing milestones table
     for col, defn in [
         ("type", "TEXT DEFAULT 'achievement'"),
@@ -241,6 +262,34 @@ def db():
             conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
         except:
             pass
+
+    # Allocation widget definitions (name, dimension, custom slices). These used to
+    # live only in the browser's localStorage while their order and visibility were
+    # saved server-side — so on a new browser the layout still referenced widgets
+    # whose definitions no longer existed, and they silently vanished.
+    try:
+        conn.execute("ALTER TABLE dashboard_layout ADD COLUMN alloc_widgets TEXT")
+    except:
+        pass
+
+    # Migrate transactions to track where a row came from (manual entry vs IBKR import)
+    # and a stable per-broker-execution key so re-syncing IBKR updates existing rows
+    # instead of duplicating them. external_id is NULL for every manual row — SQLite
+    # treats each NULL as distinct in a unique index, so they never collide with each
+    # other or with IBKR rows. Must run after the user_id migration above, since the
+    # index is keyed on (user_id, external_id).
+    for col, defn in [
+        ("source", "TEXT NOT NULL DEFAULT 'manual'"),
+        ("external_id", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} {defn}")
+        except:
+            pass
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_user_external_id "
+        "ON transactions(user_id, external_id)"
+    )
 
     # snapshots originally had `date` alone as PRIMARY KEY — two users both getting a
     # snapshot on the same date (e.g. the monthly auto-snapshot) would collide and
@@ -419,16 +468,18 @@ def change_password():
 def get_dashboard_layout():
     conn = db()
     row = conn.execute(
-        "SELECT widget_order, widget_visible, stat_keys FROM dashboard_layout WHERE user_id = ?",
+        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets FROM dashboard_layout WHERE user_id = ?",
         (current_user_id(),),
     ).fetchone()
     conn.close()
     if not row:
-        return jsonify({"widget_order": None, "widget_visible": None, "stat_keys": None})
+        return jsonify({"widget_order": None, "widget_visible": None,
+                        "stat_keys": None, "alloc_widgets": None})
     return jsonify({
         "widget_order": json.loads(row[0]) if row[0] else None,
         "widget_visible": json.loads(row[1]) if row[1] else None,
         "stat_keys": json.loads(row[2]) if row[2] else None,
+        "alloc_widgets": json.loads(row[3]) if row[3] else None,
     })
 
 @app.route("/api/dashboard-layout", methods=["POST"])
@@ -437,12 +488,14 @@ def save_dashboard_layout():
     data = request.json or {}
     conn = db()
     conn.execute(
-        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, updated_at) "
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
         "widget_order=excluded.widget_order, widget_visible=excluded.widget_visible, "
-        "stat_keys=excluded.stat_keys, updated_at=excluded.updated_at",
+        "stat_keys=excluded.stat_keys, alloc_widgets=excluded.alloc_widgets, "
+        "updated_at=excluded.updated_at",
         (current_user_id(), json.dumps(data.get("widget_order")), json.dumps(data.get("widget_visible")),
-         json.dumps(data.get("stat_keys")), datetime.now().isoformat()),
+         json.dumps(data.get("stat_keys")), json.dumps(data.get("alloc_widgets")),
+         datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -502,6 +555,217 @@ def get_historical_exchange_rate(conn, date_str):
     if fallback_row:
         return float(fallback_row[0])
     return 0.65
+
+# ── IBKR Flex Web Service integration ────────────────────────────────────────
+IBKR_SEND_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
+IBKR_ERROR_HINTS = {
+    "1003": "Invalid or expired Flex token.",
+    "1004": "Query ID not found or not permissioned for this token.",
+    "1005": "Flex query returned no data for the configured date range.",
+    "1018": "Statement generation still in progress.",
+    "1021": "Too many requests to IBKR — try again shortly.",
+}
+
+# Venue/route strings IBKR reports are NOT the same bucket set this app uses
+# (ASX/NASDAQ/NYSE/US) — currency is the primary signal (this app is an AU retail
+# tracker: AUD-denominated trades are assumed ASX). Venue only refines a USD trade
+# into NASDAQ vs NYSE vs the generic "US" bucket when it literally matches.
+IBKR_VENUE_MAP = {"NASDAQ": "NASDAQ", "NYSE": "NYSE"}
+
+
+class IBKRFlexError(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(f"IBKR error {code}: {message}")
+
+
+def fetch_ibkr_flex_report(token, query_id, send_timeout=15, get_timeout=30,
+                            max_poll_attempts=8, poll_delay=5):
+    """Fetch a Flex Query report via IBKR's 2-step send/poll Web Service. Retries on
+    error 1018 (statement still generating) — the naive single 3s sleep isn't enough
+    for larger accounts. Any other error code is terminal."""
+    resp1 = requests.get(IBKR_SEND_URL, params={"t": token, "q": query_id, "v": 3}, timeout=send_timeout)
+    resp1.raise_for_status()
+    root1 = ET.fromstring(resp1.content)
+    if root1.findtext("Status") != "Success":
+        code = root1.findtext("ErrorCode") or "unknown"
+        raise IBKRFlexError(code, root1.findtext("ErrorMessage") or IBKR_ERROR_HINTS.get(code, "Unknown error"))
+
+    ref_code = root1.findtext("ReferenceCode")
+    get_url = root1.findtext("Url")
+
+    last_err = None
+    for _ in range(max_poll_attempts):
+        time.sleep(poll_delay)
+        resp2 = requests.get(get_url, params={"t": token, "q": ref_code, "v": 3}, timeout=get_timeout)
+        resp2.raise_for_status()
+        text = resp2.text.strip()
+        if text.startswith("<"):
+            try:
+                root2 = ET.fromstring(resp2.content)
+            except ET.ParseError:
+                last_err = IBKRFlexError("unknown", "Malformed response from IBKR")
+                continue
+            code = root2.findtext("ErrorCode") or "unknown"
+            msg = root2.findtext("ErrorMessage") or IBKR_ERROR_HINTS.get(code, "Unknown error")
+            if code == "1018":
+                last_err = IBKRFlexError(code, msg)
+                continue
+            raise IBKRFlexError(code, msg)
+        return text  # looks like real CSV data
+
+    raise last_err or IBKRFlexError("timeout", "IBKR statement did not finish generating in time")
+
+
+def _ibkr_date_to_iso(raw_date):
+    """IBKR TradeDate is usually YYYYMMDD — normalize to this app's YYYY-MM-DD."""
+    digits = (raw_date or "").replace("-", "").strip()
+    if len(digits) == 8 and digits.isdigit():
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    return raw_date
+
+
+def map_ibkr_exchange(currency, venue):
+    """Map an IBKR currency + raw venue string onto this app's exchange bucket set."""
+    venue_u = (venue or "").strip().upper()
+    if venue_u in IBKR_VENUE_MAP:
+        return IBKR_VENUE_MAP[venue_u]
+    if currency == "AUD":
+        return "ASX"
+    return "US"  # generic bucket — already resolves to USD via get_currency_from_exchange
+
+
+def parse_and_aggregate_ibkr_trades(raw_payload):
+    """Parse a Flex trade-confirmation CSV and merge split/partial fills within the
+    same minute into one consolidated trade per (date, minute, symbol, action) — the
+    same aggregation the user's own reference script already does. Returns
+    (trades, stats) where trades is a list of dicts ready to insert into
+    `transactions`, and stats reports what was skipped and why."""
+    rows = list(csv.DictReader(io.StringIO(raw_payload.strip())))
+    stats = {"skipped_options": 0, "skipped_currency": {}}
+    groups = {}
+
+    for row in rows:
+        asset_class = row.get("AssetClass") or row.get("AssetCategory") or ""
+        if asset_class == "OPT":
+            stats["skipped_options"] += 1
+            continue
+        if asset_class not in ("STK", "ETF"):
+            continue
+
+        currency = (row.get("CurrencyPrimary") or row.get("Currency") or "").strip().upper()
+        try:
+            fx_to_base = float(row.get("FXRateToBase") or 1.0)
+        except ValueError:
+            fx_to_base = 1.0
+        if not currency:
+            # Weak fallback if the Flex Query wasn't configured to include a currency
+            # field at all — a base-currency (AUD) fill reports FXRateToBase ~= 1.0.
+            currency = "AUD" if abs(fx_to_base - 1.0) < 1e-6 else "USD"
+        if currency not in ("AUD", "USD"):
+            stats["skipped_currency"][currency] = stats["skipped_currency"].get(currency, 0) + 1
+            continue
+
+        action_raw = (row.get("Buy/Sell") or row.get("BuySell") or "").strip().upper()
+        if action_raw not in ("BUY", "SELL"):
+            continue
+        action = action_raw.lower()
+
+        trade_date = _ibkr_date_to_iso(row.get("TradeDate", "").strip())
+        full_time = row.get("TradeTime") or (row.get("DateTime", "").split(";")[-1]) or "000000"
+        minute_bucket = full_time.replace(":", "").strip()[:4]
+        symbol = row.get("Symbol", "").strip().upper()
+        # ListingExchange (where the stock is actually listed) is a far more stable
+        # signal than Exchange (the per-fill execution venue — IBKR's smart order
+        # router can fill the same NASDAQ-listed stock through ARCA, EDGX, IEX, etc.
+        # on different days), so prefer it when the Flex Query includes it.
+        venue = row.get("ListingExchange") or row.get("Exchange") or ""
+
+        try:
+            quantity = abs(float(row.get("Quantity") or 0))
+            price = float(row.get("TradePrice") or 0)
+            commission = abs(float(row.get("IBCommission") or row.get("Commission") or 0))
+        except ValueError:
+            continue
+        if quantity <= 0:
+            continue
+
+        key = (trade_date, minute_bucket, symbol, action)
+        if key not in groups:
+            groups[key] = {
+                "currency": currency, "venue": venue, "fx_to_base": fx_to_base,
+                "total_quantity": 0.0, "total_native": 0.0, "total_commission": 0.0,
+            }
+        g = groups[key]
+        g["total_quantity"] += quantity
+        g["total_native"] += quantity * price
+        g["total_commission"] += commission
+
+    trades = []
+    for (trade_date, minute_bucket, symbol, action), g in groups.items():
+        currency = g["currency"]
+        avg_price = g["total_native"] / g["total_quantity"] if g["total_quantity"] else 0.0
+        # exch_rate convention matches add_transaction(): price_native / exch_rate = price_aud.
+        # Force exactly 1.0 for AUD fills regardless of FXRateToBase — IBKR sometimes
+        # reports e.g. 0.9999 even for AUD trades, which would invent phantom FX gain/loss.
+        if currency == "AUD":
+            exch_rate = 1.0
+        else:
+            exch_rate = 1.0 / g["fx_to_base"] if g["fx_to_base"] else 1.0
+        trades.append({
+            "date": trade_date,
+            "exchange": map_ibkr_exchange(currency, g["venue"]),
+            "ticker": symbol,
+            "name": f"{symbol} Stock",
+            "action": action,
+            "units": round(g["total_quantity"], 6),
+            "price": round(avg_price, 6),
+            "currency": currency,
+            "brokerage": round(g["total_commission"], 2),
+            "exch_rate": exch_rate,
+            "external_id": f"ibkr:{trade_date}:{minute_bucket}:{symbol}:{action}",
+        })
+
+    return trades, stats
+
+
+def find_ibkr_manual_duplicates(conn, user_id):
+    """After an IBKR sync, flag existing MANUAL rows that look like the same trade as
+    a newly-imported IBKR row, so the user can review/delete the manual one themselves.
+    Never deletes or modifies anything."""
+    ibkr_rows = conn.execute(
+        "SELECT id, date, ticker, units, price, action FROM transactions "
+        "WHERE user_id=? AND source='ibkr'", (user_id,)
+    ).fetchall()
+    manual_rows = conn.execute(
+        "SELECT id, date, ticker, units, price, action FROM transactions "
+        "WHERE user_id=? AND source='manual'", (user_id,)
+    ).fetchall()
+
+    warnings = []
+    for ib_id, ib_date, ib_ticker, ib_units, ib_price, ib_action in ibkr_rows:
+        for m_id, m_date, m_ticker, m_units, m_price, m_action in manual_rows:
+            if ib_date != m_date:
+                continue
+            if ib_ticker.upper() != m_ticker.upper():
+                continue
+            if ib_action.lower() != m_action.lower():
+                continue
+            if abs(ib_units - m_units) > 0.01:
+                continue
+            tol = max(0.01, abs(m_price) * 0.01)
+            if abs(ib_price - m_price) > tol:
+                continue
+            warnings.append({
+                "ibkr_txn_id": ib_id,
+                "manual_txn_id": m_id,
+                "ticker": ib_ticker,
+                "date": ib_date,
+                "units": ib_units,
+                "price": ib_price,
+            })
+    return warnings
+
 
 def ingest_excel_to_json():
     """Ingest transactions from AllTradesReport.xlsx Combined sheet to JSON file."""
@@ -658,12 +922,12 @@ def load_transactions(user_id):
     conn = db()
     rows = conn.execute(
         "SELECT id, date, exchange, ticker, name, action, units, price, currency, "
-        "brokerage, brokerage_currency, exch_rate, value FROM transactions "
+        "brokerage, brokerage_currency, exch_rate, value, source FROM transactions "
         "WHERE user_id = ? ORDER BY date, id", (user_id,)
     ).fetchall()
     conn.close()
     cols = ["id", "date", "exchange", "ticker", "name", "action", "units", "price",
-            "currency", "brokerage", "brokerage_currency", "exch_rate", "value"]
+            "currency", "brokerage", "brokerage_currency", "exch_rate", "value", "source"]
     return [dict(zip(cols, row)) for row in rows]
 
 def save_transactions(txns, user_id):
@@ -758,6 +1022,30 @@ def save_holding_meta_one(symbol, entry):
     conn.commit()
     conn.close()
 
+_KNOWN_WEBSITES = {
+    "VAS.AX": "vanguard.com.au",
+    "VGS.AX": "vanguard.com.au",
+    "VTS.AX": "vanguard.com.au",
+    "VEU.AX": "vanguard.com.au",
+    "VDHG.AX": "vanguard.com.au",
+    "VGAD.AX": "vanguard.com.au",
+    "VAF.AX": "vanguard.com.au",
+    "IVV.AX": "blackrock.com",
+    "IAA.AX": "blackrock.com",
+    "IEM.AX": "blackrock.com",
+    "IJR.AX": "blackrock.com",
+    "NDQ.AX": "betashares.com.au",
+    "A200.AX": "betashares.com.au",
+    "HGBL.AX": "betashares.com.au",
+    "DHHF.AX": "betashares.com.au",
+    "STW.AX": "ssga.com",
+    "SFY.AX": "ssga.com",
+    "QOZ.AX": "betashares.com.au",
+    "IOZ.AX": "blackrock.com",
+    "MVW.AX": "vaneck.com.au",
+    "QUAL.AX": "vaneck.com.au",
+}
+
 def fetch_holding_meta(ticker, exchange):
     """Fetch sector, industry, logo from yfinance for a ticker. Returns dict or None."""
     ysym = yf_symbol(ticker, exchange)
@@ -766,17 +1054,21 @@ def fetch_holding_meta(ticker, exchange):
         "SELECT sector, industry, long_name, website, logo_url FROM holding_meta WHERE symbol = ?", (ysym,)
     ).fetchone()
     conn.close()
-    if existing:
+    if existing and existing[4]:  # has logo_url
         return {"sector": existing[0], "industry": existing[1], "longName": existing[2], "website": existing[3], "logo_url": existing[4]}
 
     try:
         t = yf.Ticker(ysym)
         info = t.info
         website = info.get("website", "")
-        logo_url = ""
-        if website:
-            # Use Google Favicons service to pull the company's logo
-            logo_url = f"https://www.google.com/s2/favicons?domain={website.replace('https://','').replace('http://','').split('/')[0]}&sz=64"
+        domain = website.replace("https://", "").replace("http://", "").split("/")[0] if website else ""
+
+        # Fall back to known domain mapping when yfinance has no website
+        if not domain and ysym in _KNOWN_WEBSITES:
+            domain = _KNOWN_WEBSITES[ysym]
+            website = f"https://{domain}"
+
+        logo_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=128" if domain else ""
 
         entry = {
             "sector": info.get("sector", ""),
@@ -793,8 +1085,10 @@ def fetch_holding_meta(ticker, exchange):
 
 def get_holding_country(ticker, exchange, name, user_id):
     """Determine country for a holding: override > exchange heuristic > 'Unknown'."""
-    sym = yf_symbol(ticker, exchange)
     overrides = load_country_overrides(user_id)
+    if ticker in overrides:
+        return overrides[ticker]
+    sym = yf_symbol(ticker, exchange)
     if sym in overrides:
         return overrides[sym]
     # Heuristic: US exchanges → US, ASX → AU, else based on name
@@ -1035,13 +1329,25 @@ def get_transactions():
         if t["action"].lower() == "buy":
             if t.get("currency", "AUD") == "USD":
                 current_price_aud = current_price / audusd
+                # Split the total gain into a price-driven component (current price vs
+                # buy price, FX held at the original rate) and an FX-driven component
+                # (same price, FX moved from the original rate to today's). The two
+                # sum back to gain_aud exactly.
+                exch_rate_then = t.get("exch_rate") or 1.0
+                value_at_original_fx = (current_price / exch_rate_then) * t["units"]
+                price_gain_aud = value_at_original_fx - abs(t["value"])
+                fx_gain_aud = current_price_aud * t["units"] - value_at_original_fx
             else:
                 current_price_aud = current_price
+                price_gain_aud = current_price_aud * t["units"] - abs(t["value"])
+                fx_gain_aud = 0.0
             current_value = current_price_aud * t["units"]
             entry["current_price"] = round(current_price, 4)
             entry["current_value_aud"] = round(current_value, 2)
             entry["gain_aud"] = round(current_value - abs(t["value"]), 2)
             entry["gain_pct"] = round((current_value - abs(t["value"])) / abs(t["value"]) * 100, 2) if t["value"] != 0 else 0.0
+            entry["price_gain_aud"] = round(price_gain_aud, 2)
+            entry["fx_gain_aud"] = round(fx_gain_aud, 2)
         elif t["action"].lower() == "sell":
             # For sells, "gain" is the realized gain — the sell value minus the proportional cost
             # Simplified: show the sell proceeds as the reference
@@ -1049,11 +1355,15 @@ def get_transactions():
             entry["current_value_aud"] = round(t["value"], 2)
             entry["gain_aud"] = 0.0
             entry["gain_pct"] = 0.0
+            entry["price_gain_aud"] = 0.0
+            entry["fx_gain_aud"] = 0.0
         else:
             entry["current_price"] = 0.0
             entry["current_value_aud"] = 0.0
             entry["gain_aud"] = 0.0
             entry["gain_pct"] = 0.0
+            entry["price_gain_aud"] = 0.0
+            entry["fx_gain_aud"] = 0.0
 
         enriched.append(entry)
 
@@ -1309,17 +1619,209 @@ def _run_sync(force=False):
     return results
 
 
+_sync_jobs: dict = {}  # job_id -> {status, results, started_at, finished_at, error}
+_sync_lock = threading.Lock()
+
+def _run_sync_job(job_id: str, force: bool):
+    try:
+        results = _run_sync(force=force)
+        with _sync_lock:
+            _sync_jobs[job_id] = {
+                "status": "done",
+                "results": results,
+                "finished_at": datetime.now().isoformat(),
+            }
+    except Exception as e:
+        with _sync_lock:
+            _sync_jobs[job_id]["status"] = "error"
+            _sync_jobs[job_id]["error"] = str(e)
+            _sync_jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+
 @app.route("/api/sync", methods=["POST"])
 @jwt_required()
 def sync_data():
-    """Trigger update of cached price data and exchange rates. Deliberately syncs
-    tickers across every user account, not just the caller's — the price cache is
-    global/shared, so this stays consistent with the twice-daily background job."""
+    """Start an async sync — returns a job_id immediately. Poll /api/sync/progress/<job_id>."""
     force = request.args.get("force", "").lower() == "true"
-    results = _run_sync(force=force)
-    if not results:
-        return jsonify({"results": [], "message": "No transactions to sync"})
-    return jsonify({"results": results, "at": datetime.now().isoformat()})
+    job_id = uuid.uuid4().hex[:10]
+    with _sync_lock:
+        _sync_jobs[job_id] = {"status": "running", "started_at": datetime.now().isoformat()}
+    threading.Thread(target=_run_sync_job, args=(job_id, force), daemon=True).start()
+    return jsonify({"job_id": job_id, "status": "running"})
+
+
+@app.route("/api/sync/progress/<job_id>", methods=["GET"])
+@jwt_required()
+def sync_progress(job_id):
+    with _sync_lock:
+        job = _sync_jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(job)
+
+
+# ── IBKR Flex Web Service sync ───────────────────────────────────────────────
+@app.route("/api/ibkr/credentials", methods=["POST"])
+@jwt_required()
+def save_ibkr_credentials():
+    """Save (or replace) this user's Flex token + query ID. The token is only ever
+    written here — no GET route on this table ever selects flex_token."""
+    data = request.json or {}
+    token = (data.get("flex_token") or "").strip()
+    query_id = (data.get("query_id") or "").strip()
+    if not token or not query_id:
+        return jsonify({"ok": False, "error": "Both flex_token and query_id are required"}), 400
+    conn = db()
+    conn.execute(
+        "INSERT INTO ibkr_credentials (user_id, flex_token, query_id, updated_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET flex_token=excluded.flex_token, "
+        "query_id=excluded.query_id, updated_at=excluded.updated_at",
+        (current_user_id(), token, query_id, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ibkr/credentials", methods=["GET"])
+@jwt_required()
+def get_ibkr_credentials():
+    conn = db()
+    row = conn.execute(
+        "SELECT query_id, last_synced FROM ibkr_credentials WHERE user_id=?",
+        (current_user_id(),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"configured": False, "query_id": None, "last_synced": None})
+    query_id, last_synced = row
+    return jsonify({"configured": True, "query_id": query_id, "last_synced": last_synced})
+
+
+@app.route("/api/ibkr/credentials", methods=["DELETE"])
+@jwt_required()
+def delete_ibkr_credentials():
+    conn = db()
+    conn.execute("DELETE FROM ibkr_credentials WHERE user_id=?", (current_user_id(),))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+_ibkr_sync_jobs: dict = {}  # job_id -> {status, results, duplicate_warnings, started_at, finished_at, error}
+_ibkr_sync_lock = threading.Lock()
+
+def _run_ibkr_sync_job(job_id, user_id, token, query_id):
+    try:
+        raw = fetch_ibkr_flex_report(token, query_id)
+        trades, stats = parse_and_aggregate_ibkr_trades(raw)
+
+        conn = db()
+
+        # A single real-world ticker must always resolve to the same exchange bucket —
+        # the per-ticker transaction list filters by (ticker, exchange) together, so a
+        # split would silently hide rows. IBKR reports a different execution venue per
+        # fill (NASDAQ vs ARCA vs blank), which fragments one position across exchange
+        # values if trusted as-is. Prefer whatever exchange this user already holds the
+        # ticker under (manual entry or an earlier sync); for a ticker with no prior
+        # record, pin every fill in this batch to the first-resolved exchange for it.
+        existing_exchange = {}
+        for tk, ex in conn.execute(
+            "SELECT ticker, exchange FROM transactions WHERE user_id=? ORDER BY id", (user_id,)
+        ).fetchall():
+            existing_exchange.setdefault(tk, ex)
+        batch_exchange = {}
+        for t in trades:
+            t["exchange"] = existing_exchange.get(t["ticker"]) or batch_exchange.setdefault(t["ticker"], t["exchange"])
+
+        for t in trades:
+            if t["action"] == "sell":
+                aud_value = (-t["units"] * t["price"] + t["brokerage"]) / t["exch_rate"]
+            else:
+                aud_value = (t["units"] * t["price"] + t["brokerage"]) / t["exch_rate"]
+            conn.execute(
+                "INSERT INTO transactions (date, exchange, ticker, name, action, units, price, "
+                "currency, brokerage, brokerage_currency, exch_rate, value, user_id, source, external_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(user_id, external_id) DO UPDATE SET date=excluded.date, exchange=excluded.exchange, "
+                "ticker=excluded.ticker, name=excluded.name, action=excluded.action, units=excluded.units, "
+                "price=excluded.price, currency=excluded.currency, brokerage=excluded.brokerage, "
+                "brokerage_currency=excluded.brokerage_currency, exch_rate=excluded.exch_rate, value=excluded.value "
+                "WHERE transactions.source='ibkr'",
+                (t["date"], t["exchange"], t["ticker"], t["name"], t["action"], t["units"], t["price"],
+                 t["currency"], t["brokerage"], t["currency"], t["exch_rate"], round(aud_value, 2),
+                 user_id, "ibkr", t["external_id"]),
+            )
+        warnings = find_ibkr_manual_duplicates(conn, user_id)
+        conn.execute(
+            "UPDATE ibkr_credentials SET last_synced=? WHERE user_id=?",
+            (datetime.now().isoformat(), user_id),
+        )
+        conn.commit()
+        conn.close()
+
+        # A ticker this import touched might be brand new (no price history yet) — left
+        # alone it'd sit at a $0 value until the next manual price sync. Piggyback a
+        # "missing only" price pass right away so newly-imported holdings show a real
+        # value immediately. Cheap for tickers already synced recently: sync_symbol has
+        # its own per-symbol cooldown, so this only actually hits yfinance for the new
+        # ones. Filtered down to just this import's tickers so the reported summary
+        # stays relevant instead of dumping the whole tracked-symbol universe.
+        price_sync_results = []
+        if trades:
+            imported_symbols = {yf_symbol(t["ticker"], t["exchange"]) for t in trades}
+            price_sync_results = [r for r in _run_sync(force=False) if r["symbol"] in imported_symbols]
+
+        with _ibkr_sync_lock:
+            _ibkr_sync_jobs[job_id] = {
+                "status": "done",
+                "results": {
+                    "trades_processed": len(trades),
+                    "skipped_options": stats["skipped_options"],
+                    "skipped_currency": stats["skipped_currency"],
+                },
+                "duplicate_warnings": warnings,
+                "price_sync_results": price_sync_results,
+                "finished_at": datetime.now().isoformat(),
+            }
+    except Exception as e:
+        with _ibkr_sync_lock:
+            _ibkr_sync_jobs[job_id] = {
+                "status": "error",
+                "error": str(e),
+                "finished_at": datetime.now().isoformat(),
+            }
+
+
+@app.route("/api/ibkr/sync", methods=["POST"])
+@jwt_required()
+def sync_ibkr():
+    """Start an async IBKR trade import — returns a job_id immediately. Poll
+    /api/ibkr/sync/progress/<job_id>. Uses its own job dict (not /api/sync's) since
+    the result shape is different and job ids shouldn't collide across sync kinds."""
+    uid = current_user_id()
+    conn = db()
+    row = conn.execute("SELECT flex_token, query_id FROM ibkr_credentials WHERE user_id=?", (uid,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"ok": False, "error": "IBKR credentials not configured"}), 400
+    token, query_id = row
+    job_id = uuid.uuid4().hex[:10]
+    with _ibkr_sync_lock:
+        _ibkr_sync_jobs[job_id] = {"status": "running", "started_at": datetime.now().isoformat()}
+    threading.Thread(target=_run_ibkr_sync_job, args=(job_id, uid, token, query_id), daemon=True).start()
+    return jsonify({"job_id": job_id, "status": "running"})
+
+
+@app.route("/api/ibkr/sync/progress/<job_id>", methods=["GET"])
+@jwt_required()
+def ibkr_sync_progress(job_id):
+    with _ibkr_sync_lock:
+        job = _ibkr_sync_jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(job)
+
 
 @app.route("/api/sync-status", methods=["GET"])
 @jwt_required()
@@ -1595,6 +2097,10 @@ def _compute_active_holdings(user_id):
     """).fetchall()
     for sym, close in prev_rows:
         prev_prices[sym] = close
+
+    # Last-synced timestamps per symbol for staleness display in Holdings tab
+    sync_rows = conn.execute("SELECT symbol, last_synced FROM sync_log").fetchall()
+    last_synced_map = {r[0]: r[1] for r in sync_rows}
     conn.close()
 
     audusd = latest_prices.get("AUDUSD=X", 0.65)
@@ -1643,6 +2149,23 @@ def _compute_active_holdings(user_id):
                 h["cost_local"] = 0
             h["sells_count"] += 1
 
+    # Lifetime income per holding, reported in dollars only. Deliberately NOT
+    # turned into a percentage: this is income earned across every unit ever held,
+    # while cost_aud below covers only the units still held. Dividing one by the
+    # other overstates badly on trimmed positions (VAS earned ~$29k of income on a
+    # position that peaked near 2,600 units but is down to 430 — the ratio reads
+    # >100% and means nothing). Franking is tracked separately because it's a tax
+    # credit, not cash received.
+    div_conn = db()
+    income_by_symbol, franking_by_symbol = {}, {}
+    for sym_, net_, fr_ in div_conn.execute(
+        "SELECT symbol, COALESCE(SUM(net_amount_aud), 0), COALESCE(SUM(franking_credit_aud), 0) "
+        "FROM dividends WHERE user_id = ? GROUP BY symbol", (user_id,)
+    ).fetchall():
+        income_by_symbol[sym_] = net_
+        franking_by_symbol[sym_] = fr_
+    div_conn.close()
+
     active_holdings = []
     total_portfolio_value = 0.0
 
@@ -1672,6 +2195,13 @@ def _compute_active_holdings(user_id):
         return_aud = value_aud - h["cost_aud"]
         return_pct = (return_aud / h["cost_aud"] * 100) if h["cost_aud"] > 0 else 0.0
 
+        # Total return in dollars = unrealised capital gain on the units still held,
+        # plus all income the holding has paid out. return_pct stays capital-only so
+        # it keeps matching the figure the rest of the app already reports.
+        income_aud = round(income_by_symbol.get(sym, 0.0), 2)
+        franking_aud = round(franking_by_symbol.get(sym, 0.0), 2)
+        total_return_aud = return_aud + income_aud
+
         meta = fetch_holding_meta(h["ticker"], h["exchange"])
 
         active_holdings.append({
@@ -1692,10 +2222,14 @@ def _compute_active_holdings(user_id):
             "value_aud": round(value_aud, 2),
             "return_aud": round(return_aud, 2),
             "return_pct": round(return_pct, 2),
+            "income_aud": income_aud,
+            "franking_aud": franking_aud,
+            "total_return_aud": round(total_return_aud, 2),
             "daily_change": round(daily_change, 2),
             "daily_change_pct": round(daily_change_pct, 2),
             "buys_count": h["buys_count"],
-            "sells_count": h["sells_count"]
+            "sells_count": h["sells_count"],
+            "last_synced": last_synced_map.get(sym),
         })
 
     # Portfolio weightings
@@ -1711,6 +2245,105 @@ def _compute_active_holdings(user_id):
 def get_portfolio():
     """Return detailed analytics of current active holdings."""
     return jsonify(_compute_active_holdings(current_user_id()))
+
+RANGE_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+
+@app.route("/api/portfolio/range-performance", methods=["GET"])
+@jwt_required()
+def get_range_performance():
+    """Per-holding performance scoped to a time window, so the Holding Performance
+    treemap can follow the same 1M/3M/6M/1Y/All selector as the net worth chart.
+
+    'All' keeps the existing meaning — total return against what you actually paid,
+    matching the Holdings tab. A bounded window can't use cost basis (you may not
+    have held the position for the whole window), so it reports the price move over
+    that window instead, converted to AUD at each end so FX is included the same
+    way it is everywhere else in the app.
+    """
+    rng = request.args.get("range", "All")
+    holdings = _compute_active_holdings(current_user_id())
+
+    if rng not in RANGE_DAYS:
+        return jsonify([
+            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["return_pct"]}
+            for h in holdings
+        ])
+
+    cutoff = (date.today() - timedelta(days=RANGE_DAYS[rng])).isoformat()
+    conn = db()
+
+    # When did each position actually open? A window that reaches back further than
+    # you've held something would otherwise report the market's move over a period
+    # you had no exposure to — e.g. NVDA bought four weeks ago showing a full year
+    # of price action. For those, your return since purchase is the honest number.
+    first_buy = dict(conn.execute(
+        "SELECT ticker, MIN(date) FROM transactions WHERE user_id = ? AND action = 'buy' "
+        "GROUP BY ticker", (current_user_id(),)
+    ).fetchall())
+
+    def close_on_or_before(symbol, day):
+        row = conn.execute(
+            "SELECT close FROM prices WHERE symbol = ? AND date <= ? ORDER BY date DESC LIMIT 1",
+            (symbol, day),
+        ).fetchone()
+        return float(row[0]) if row else None
+
+    def latest_close(symbol):
+        row = conn.execute(
+            "SELECT close FROM prices WHERE symbol = ? ORDER BY date DESC LIMIT 1", (symbol,)
+        ).fetchone()
+        return float(row[0]) if row else None
+
+    fx_then = close_on_or_before("AUDUSD=X", cutoff) or 0.65
+    fx_now = latest_close("AUDUSD=X") or 0.65
+
+    out = []
+    for h in holdings:
+        sym = h["symbol"]
+        opened = first_buy.get(h["ticker"])
+        held_whole_window = opened is not None and opened <= cutoff
+
+        start, end = close_on_or_before(sym, cutoff), latest_close(sym)
+        if held_whole_window and start and end and start > 0:
+            if h.get("currency") == "USD":
+                start_aud, end_aud = start / fx_then, end / fx_now
+            else:
+                start_aud, end_aud = start, end
+            pct = (end_aud - start_aud) / start_aud * 100
+        else:
+            # Position younger than the window (or no price that far back): report
+            # its return since purchase rather than a market move you didn't own.
+            pct = h["return_pct"]
+        out.append({"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": round(pct, 2)})
+
+    conn.close()
+    return jsonify(out)
+
+@app.route("/api/portfolio/sparklines", methods=["GET"])
+@jwt_required()
+def get_portfolio_sparklines():
+    """Recent closing prices per held ticker, for the trend column in the holdings
+    table. One round trip for the whole portfolio rather than a request per row.
+    Keyed by ticker (not yfinance symbol) so the frontend can look up by the same
+    key it already renders. Prices are the shared cache, so no user scoping here
+    beyond choosing which tickers to return."""
+    try:
+        days = max(2, min(90, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    holdings = _compute_active_holdings(current_user_id())
+    conn = db()
+    series = {}
+    for h in holdings:
+        rows = conn.execute(
+            "SELECT close FROM prices WHERE symbol = ? ORDER BY date DESC LIMIT ?",
+            (h["symbol"], days),
+        ).fetchall()
+        if len(rows) >= 2:
+            series[h["ticker"]] = [round(r[0], 4) for r in reversed(rows)]
+    conn.close()
+    return jsonify(series)
 
 @app.route("/api/holding-groups", methods=["GET"])
 @jwt_required()
@@ -1744,7 +2377,11 @@ def get_holding_groups():
                 cost_basis += h["cost_aud"]
                 currencies.add(h["currency"])
             income += income_by_symbol.get(sym, 0.0)
-        return_pct = ((capital_gain + income) / cost_basis * 100) if cost_basis > 0 else 0.0
+        # Capital-only, matching the per-holding return_pct. Income is reported
+        # alongside in dollars but deliberately kept out of this ratio: it spans
+        # every unit ever held, while cost_basis covers only units still held, so
+        # folding it in inflates the figure on any group holding a trimmed position.
+        return_pct = (capital_gain / cost_basis * 100) if cost_basis > 0 else 0.0
         currency = currencies.pop() if len(currencies) == 1 else ("Mixed" if len(currencies) > 1 else "AUD")
         return {
             "value": round(value, 2), "capital_gain": round(capital_gain, 2),
@@ -1855,6 +2492,37 @@ def _build_daily_market_return_series(conn, user_id):
         portfolio_value += units_df[sym] * prices
     return portfolio_value - cash_flow
 
+def _calc_cagr(txns: list, total_value: float, total_cost: float):
+    """Return (pct, years, annualised) from first buy date to today.
+
+    Only annualises once a full year has elapsed. Below that, `(v/c) ** (1/years)`
+    blows up as years approaches zero — a few percent over a couple of days
+    annualises into the thousands — so the plain cumulative return is reported
+    instead and `annualised` is False so the caller can label it honestly.
+    """
+    if not txns or total_cost <= 0 or total_value <= 0:
+        return 0.0, 0.0, False
+    buy_dates = [t["date"] for t in txns if t.get("action", "").lower() == "buy"]
+    if not buy_dates:
+        return 0.0, 0.0, False
+    first = date.fromisoformat(min(buy_dates))
+    years = (date.today() - first).days / 365.25
+    cumulative = (total_value / total_cost - 1) * 100
+    if years < 1:
+        return round(cumulative, 2), round(years, 2), False
+    return round(((total_value / total_cost) ** (1 / years) - 1) * 100, 2), round(years, 2), True
+
+
+def _calc_dividend_income(user_id: int) -> float:
+    """Total dividend income received (AUD) across all holdings."""
+    conn = db()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(net_amount_aud), 0) FROM dividends WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return round(float(row[0]), 2) if row else 0.0
+
+
 @app.route("/api/stats", methods=["GET"])
 @jwt_required()
 def get_stats():
@@ -1960,6 +2628,8 @@ def get_stats():
         print(f"[stats] daily_ath calc failed (non-fatal): {e}")
     conn2.close()
 
+    cagr_pct, cagr_years, cagr_annualised = _calc_cagr(txns, total_value, total_cost)
+
     return jsonify({
         "total_value": round(total_value, 2),
         "total_principal": round(total_cost, 2),
@@ -1977,6 +2647,11 @@ def get_stats():
         "daily_ath_date": daily_ath_date,
         "day_pl": round(day_pl, 2),
         "day_pl_pct": round(day_pl_pct, 2),
+        "cost_basis": round(total_cost, 2),
+        "cagr": cagr_pct,
+        "cagr_years": cagr_years,
+        "cagr_annualised": cagr_annualised,
+        "dividend_income": _calc_dividend_income(uid),
     })
 
 def _get_latest_portfolio_value(user_id):
@@ -2672,16 +3347,19 @@ def get_monthly_change():
     uid = current_user_id()
     txns = load_transactions(uid)
     conn = db()
-    all_snapshots = conn.execute("SELECT date, super, cash FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
+    all_snapshots = conn.execute("SELECT date, super, cash, COALESCE(source,'manual') FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
 
-    # Monthly Change is meant to show one point per calendar month — filter out any
-    # mid-month manual/corrective snapshot (e.g. a one-off entry to fix a specific
-    # date's cash figure) so it doesn't show up as a spurious extra data point.
-    snapshots = [s for s in all_snapshots if pd.Timestamp(s[0]).day == 1]
+    # One point per calendar month — keep only the last snapshot of each month so
+    # mid-month corrections don't create duplicate bars.
+    by_month: dict = {}
+    for s in all_snapshots:
+        ym = pd.Timestamp(s[0]).to_period("M")
+        by_month[ym] = s
+    snapshots = [by_month[k] for k in sorted(by_month)]
 
     if not snapshots:
-        return jsonify({"months": [], "change": [], "change_pct": []})
+        return jsonify({"months": [], "change": [], "change_pct": [], "sources": []})
 
     # Build portfolio value at each snapshot date
     df = pd.DataFrame(txns)
@@ -2708,9 +3386,10 @@ def get_monthly_change():
     months = []
     changes = []
     changes_pct = []
+    sources = []
     prev_nw = None
 
-    for s_date, s_super, s_cash in snapshots:
+    for s_date, s_super, s_cash, s_source in snapshots:
         s_ts = pd.Timestamp(s_date)
         # Calculate portfolio value at this snapshot date
         portfolio_val = 0.0
@@ -2744,6 +3423,7 @@ def get_monthly_change():
 
         total_nw = portfolio_val + s_cash + s_super
         months.append(s_date)
+        sources.append(s_source)
 
         if prev_nw is not None and prev_nw > 0:
             change = total_nw - prev_nw
@@ -2756,7 +3436,166 @@ def get_monthly_change():
 
         prev_nw = total_nw
 
-    return jsonify({"months": months, "change": changes, "change_pct": changes_pct})
+    return jsonify({"months": months, "change": changes, "change_pct": changes_pct, "sources": sources})
+
+
+def _compute_monthly_nw_series(uid):
+    """Return month-by-month absolute NW data for a user.
+
+    Each element: {date, nw, portfolio, cash, super, source, change_pct}
+    change_pct is None for the first data point.
+    """
+    txns = load_transactions(uid)
+    conn = db()
+    all_snapshots = conn.execute(
+        "SELECT date, super, cash, COALESCE(source,'manual') FROM snapshots WHERE user_id = ? ORDER BY date",
+        (uid,)
+    ).fetchall()
+    conn.close()
+
+    by_month: dict = {}
+    for s in all_snapshots:
+        ym = pd.Timestamp(s[0]).to_period("M")
+        by_month[ym] = s
+    snapshots = [by_month[k] for k in sorted(by_month)]
+
+    if not txns or not snapshots:
+        return []
+
+    df = pd.DataFrame(txns)
+    df["date"] = pd.to_datetime(df["date"])
+    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+    df = df.sort_values("date")
+
+    conn = db()
+    price_data = {}
+    symbols_to_read = list(df["sym"].unique()) + ["AUDUSD=X"]
+    for sym in symbols_to_read:
+        rows = conn.execute(
+            "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (sym,)
+        ).fetchall()
+        price_data[sym] = {pd.Timestamp(d): c for d, c in rows} if rows else {}
+    conn.close()
+
+    audusd_rates = price_data.get("AUDUSD=X", {})
+    sym_currency = df.groupby("sym")["currency"].first().to_dict()
+
+    result = []
+    prev_nw = None
+
+    for s_date, s_super, s_cash, s_source in snapshots:
+        s_ts = pd.Timestamp(s_date)
+        portfolio_val = 0.0
+
+        for sym in df["sym"].unique():
+            units = 0.0
+            for _, row in df.iterrows():
+                if row["date"] > s_ts:
+                    break
+                if row["sym"] != sym:
+                    continue
+                action = row["action"].lower()
+                if action == "buy":
+                    units += row["units"]
+                elif action == "split":
+                    units += row["units"]
+                elif action == "sell":
+                    units = max(0, units - row["units"])
+
+            sym_prices = price_data.get(sym, {})
+            available_dates = [d for d in sym_prices if d <= s_ts]
+            if available_dates:
+                closest = max(available_dates)
+                price = sym_prices[closest]
+                if sym_currency.get(sym, "AUD") == "USD":
+                    aud_dates = [d for d in audusd_rates if d <= s_ts]
+                    rate = audusd_rates[max(aud_dates)] if aud_dates else 0.65
+                    price = price / rate
+                portfolio_val += units * price
+
+        total_nw = portfolio_val + s_cash + s_super
+        change_pct = None
+        if prev_nw is not None and prev_nw > 0:
+            change_pct = round((total_nw - prev_nw) / prev_nw * 100, 2)
+
+        result.append({
+            "date": s_date,
+            "nw": round(total_nw, 2),
+            "portfolio": round(portfolio_val, 2),
+            "cash": round(s_cash, 2),
+            "super": round(s_super, 2),
+            "source": s_source,
+            "change_pct": change_pct,
+        })
+        prev_nw = total_nw
+
+    return result
+
+
+@app.route("/api/compounder", methods=["GET"])
+@jwt_required()
+def get_compounder():
+    """FY-grouped net worth analytics for the Compounder tab."""
+    uid = current_user_id()
+    monthly = _compute_monthly_nw_series(uid)
+
+    if not monthly:
+        return jsonify({
+            "monthly": [],
+            "fy_rows": [],
+            "summary": {"peak_nw": 0, "avg_mom": 0, "months_positive": 0, "months_negative": 0},
+        })
+
+    all_changes = [m["change_pct"] for m in monthly if m["change_pct"] is not None]
+    peak_nw = max(m["nw"] for m in monthly)
+    months_positive = sum(1 for c in all_changes if c > 0)
+    months_negative = sum(1 for c in all_changes if c < 0)
+    avg_mom = round(sum(all_changes) / len(all_changes), 2) if all_changes else 0
+
+    def fy_year(date_str):
+        ts = pd.Timestamp(date_str)
+        return ts.year + 1 if ts.month >= 7 else ts.year
+
+    from collections import defaultdict
+    fy_groups = defaultdict(list)
+    for m in monthly:
+        fy_groups[fy_year(m["date"])].append(m)
+
+    fy_rows = []
+    sorted_fys = sorted(fy_groups.keys())
+    for i, fy in enumerate(sorted_fys):
+        months_in_fy = fy_groups[fy]
+        last = months_in_fy[-1]
+
+        prior_nw = fy_groups[sorted_fys[i - 1]][-1]["nw"] if i > 0 else None
+        fy_changes = [m["change_pct"] for m in months_in_fy if m["change_pct"] is not None]
+
+        fy_rows.append({
+            "fy": f"FY{fy}",
+            "nw_end": last["nw"],
+            "prior_nw": prior_nw,
+            "growth_dollar": round(last["nw"] - prior_nw, 2) if prior_nw is not None else None,
+            "growth_pct": round((last["nw"] - prior_nw) / prior_nw * 100, 2) if prior_nw else None,
+            "best_month": max(fy_changes) if fy_changes else None,
+            "worst_month": min(fy_changes) if fy_changes else None,
+            "avg_mom": round(sum(fy_changes) / len(fy_changes), 2) if fy_changes else None,
+            "portfolio_end": last["portfolio"],
+            "cash_end": last["cash"],
+            "port_pct": round(last["portfolio"] / last["nw"] * 100, 2) if last["nw"] else None,
+            "months_count": len(months_in_fy),
+        })
+
+    return jsonify({
+        "monthly": monthly,
+        "fy_rows": fy_rows,
+        "summary": {
+            "peak_nw": round(peak_nw, 2),
+            "avg_mom": avg_mom,
+            "months_positive": months_positive,
+            "months_negative": months_negative,
+        },
+    })
+
 
 # On startup: seed snapshots if DB is empty, then start background price sync
 try:
@@ -2775,7 +3614,20 @@ def _scheduled_sync():
     except Exception as e:
         print(f"[scheduler] Sync failed: {e}")
 
+def _is_market_open() -> bool:
+    """True if ASX or US market is currently open (UTC clock, weekdays only)."""
+    now = datetime.utcnow()
+    if now.weekday() >= 5:          # Saturday or Sunday
+        return False
+    h = now.hour + now.minute / 60
+    asx_open  = 0.0  <= h < 6.17   # 10:00–16:10 AEST  = 00:00–06:10 UTC
+    us_open   = 14.5 <= h < 21.08  # 09:30–16:05 ET    = 14:30–21:05 UTC
+    return asx_open or us_open
+
+
 def _scheduled_intraday_refresh():
+    if not _is_market_open():
+        return
     try:
         results = _run_intraday_refresh()
         ok = sum(1 for r in results if r.get("ok"))
@@ -2804,7 +3656,7 @@ def _scheduled_monthly_snapshot():
             ).fetchone()
             super_val = prior[0] if prior else 0.0
             conn.execute(
-                "INSERT OR REPLACE INTO snapshots (date, super, cash, user_id) VALUES (?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO snapshots (date, super, cash, user_id, source) VALUES (?, ?, ?, ?, 'auto')",
                 (today_str, super_val, cash_total, uid),
             )
             conn.commit()

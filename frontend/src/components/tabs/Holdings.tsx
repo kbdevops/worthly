@@ -1,14 +1,16 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3, Pencil, Check, Layers } from 'lucide-react'
 import {
   useCashAccounts, useSuperHoldings, usePortfolio, useSnapshots, useBreakdown,
   useSaveCashAccounts, useSaveSuperHoldings, useAddSnapshot,
   useTransactions, useAddTransaction, useUpdateTransaction, useDeleteTransaction,
   useHoldingGroups, useAddHoldingGroup, useUpdateHoldingGroup, useDeleteHoldingGroup,
+  useDividends, useSparklines,
 } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import type { CashAccount, SuperHolding, Snapshot, Holding, Transaction } from '../../types'
 import HistorySlideout from '../layout/HistorySlideout'
+import { LogoBadge } from '../ui/LogoBadge'
 
 const CARD = 'rounded-xl border border-[var(--border)] overflow-hidden'
 const CARD_BG = { background: 'var(--bg-card)' }
@@ -19,18 +21,20 @@ const TD2 = 'px-3 py-2.5 text-sm whitespace-nowrap'
 
 const EXCHANGES = ['ASX', 'NASDAQ', 'NYSE', 'US']
 
-type ColKey = 'units' | 'price' | 'currency' | 'fx' | 'brokerage' | 'cost' | 'gain_aud' | 'gain_pct'
+type ColKey = 'units' | 'price' | 'currency' | 'fx' | 'brokerage' | 'cost' | 'fx_gain' | 'dividends' | 'gain_aud' | 'gain_pct'
 const ALL_COLS: { key: ColKey; label: string }[] = [
-  { key: 'units',     label: 'Units' },
-  { key: 'price',     label: 'Price' },
-  { key: 'currency',  label: 'Curr' },
-  { key: 'fx',        label: 'FX Rate' },
-  { key: 'brokerage', label: 'Brokerage' },
-  { key: 'cost',      label: 'Cost (AUD)' },
-  { key: 'gain_aud',  label: 'Gain ($)' },
-  { key: 'gain_pct',  label: 'Gain (%)' },
+  { key: 'units',      label: 'Units' },
+  { key: 'price',      label: 'Price' },
+  { key: 'currency',   label: 'Curr' },
+  { key: 'fx',         label: 'FX Rate' },
+  { key: 'brokerage',  label: 'Brokerage' },
+  { key: 'cost',       label: 'Cost (AUD)' },
+  { key: 'fx_gain',    label: 'FX Gain ($)' },
+  { key: 'dividends',  label: 'Dividends ($)' },
+  { key: 'gain_aud',   label: 'Return ($)' },
+  { key: 'gain_pct',   label: 'Return (%)' },
 ]
-const DEFAULT_COLS: ColKey[] = ['units', 'price', 'cost', 'gain_aud', 'gain_pct']
+const DEFAULT_COLS: ColKey[] = ['units', 'price', 'cost', 'dividends', 'gain_aud', 'gain_pct']
 
 const blank_form = {
   date: new Date().toISOString().slice(0, 10),
@@ -128,8 +132,179 @@ function AddTxnModal({
   )
 }
 
+/** Trend line for the holdings table. Coloured by net direction over the window,
+ *  via CSS custom properties so it follows the active theme. */
+function Sparkline({ series }: { series?: number[] }) {
+  if (!series || series.length < 2) return <span className="text-slate-600">—</span>
+  const W = 76, H = 24, pad = 2
+  const min = Math.min(...series), max = Math.max(...series)
+  const span = max - min || 1
+  const x = (i: number) => (i / (series.length - 1)) * W
+  const y = (v: number) => pad + (1 - (v - min) / span) * (H - pad * 2)
+  const d = series.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ')
+  const up = series[series.length - 1] >= series[0]
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true"
+      style={{ width: W, height: H, display: 'block' }}>
+      <path d={d} fill="none" strokeWidth={1.4} strokeLinejoin="round" strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        style={{ stroke: up ? 'var(--gain)' : 'var(--loss)' }} />
+    </svg>
+  )
+}
+
+type HoldingSort = 'ticker' | 'daily_change_pct' | 'units' | 'value_aud' | 'return_aud' | 'return_pct'
+  | 'income_aud' | 'total_return_aud'
+
+/** Dense, sortable view of every holding — replaces one card per holding, which
+ *  repeated the same four labels N times and made two holdings impossible to
+ *  compare without scrolling. Cards are still used below the md breakpoint. */
+function HoldingsTable({
+  holdings, sparklines, onSelect,
+}: {
+  holdings: Holding[]
+  sparklines: Record<string, number[]>
+  onSelect: (h: Holding) => void
+}) {
+  const [sortKey, setSortKey] = useState<HoldingSort>('value_aud')
+  const [sortDir, setSortDir] = useState<1 | -1>(-1)
+
+  const total = holdings.reduce((s, h) => s + h.value_aud, 0)
+
+  const sorted = useMemo(() => {
+    return [...holdings].sort((a, b) => {
+      if (sortKey === 'ticker') return a.ticker.localeCompare(b.ticker) * -sortDir
+      return ((a[sortKey] as number) - (b[sortKey] as number)) * sortDir
+    })
+  }, [holdings, sortKey, sortDir])
+
+  function toggle(k: HoldingSort) {
+    if (k === sortKey) setSortDir(d => (d === 1 ? -1 : 1))
+    else { setSortKey(k); setSortDir(-1) }
+  }
+
+  const COLS: { key?: HoldingSort; label: string; align: 'left' | 'right' }[] = [
+    { key: 'ticker',           label: 'Holding',  align: 'left'  },
+    { key: 'daily_change_pct', label: 'Today',    align: 'right' },
+    {                          label: '30 days',  align: 'right' },
+    { key: 'units',            label: 'Units',    align: 'right' },
+    { key: 'value_aud',        label: 'Value',    align: 'right' },
+    {                          label: 'Weight',   align: 'right' },
+    { key: 'return_aud',       label: 'Capital',  align: 'right' },
+    { key: 'return_pct',       label: 'Capital %', align: 'right' },
+    { key: 'income_aud',       label: 'Income',   align: 'right' },
+    { key: 'total_return_aud', label: 'Total',    align: 'right' },
+  ]
+
+  const cell = 'px-3 py-2.5 text-sm whitespace-nowrap tabular-nums'
+
+  return (
+    <div className={CARD} style={CARD_BG}>
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead style={{ background: 'var(--bg-elevated)' }}>
+            <tr>
+              {COLS.map(c => {
+                const active = c.key && c.key === sortKey
+                return (
+                  <th key={c.label}
+                    onClick={c.key ? () => toggle(c.key!) : undefined}
+                    tabIndex={c.key ? 0 : undefined}
+                    onKeyDown={c.key ? e => {
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(c.key!) }
+                    } : undefined}
+                    className={`px-3 py-2.5 text-xs font-medium uppercase tracking-wider whitespace-nowrap
+                      ${c.align === 'left' ? 'text-left' : 'text-right'}
+                      ${c.key ? 'cursor-pointer select-none hover:text-white' : ''}
+                      ${active ? 'text-white' : 'text-slate-400'}`}
+                  >
+                    {c.label}
+                    {active && (
+                      <span className="ml-1 text-[9px]" style={{ color: 'var(--accent)' }}>
+                        {sortDir < 0 ? '▼' : '▲'}
+                      </span>
+                    )}
+                  </th>
+                )
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map(h => {
+              const weight = total > 0 ? (h.value_aud / total) * 100 : 0
+              return (
+                <tr key={h.ticker}
+                  onClick={() => onSelect(h)}
+                  className="border-t border-[var(--border)] hover:bg-white/5 cursor-pointer"
+                >
+                  <td className={cell}>
+                    <div className="flex items-center gap-2.5">
+                      <LogoBadge logoUrl={h.logo_url} ticker={h.ticker} size={26} />
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white leading-tight">{h.ticker}</div>
+                        <div className="text-[10px] text-slate-500 tracking-wide">{h.exchange} · {h.currency}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className={cell + ' text-right'}>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      h.daily_change_pct >= 0 ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'}`}>
+                      {h.daily_change_pct >= 0 ? '+' : ''}{h.daily_change_pct?.toFixed(2)}%
+                    </span>
+                  </td>
+                  <td className={cell}>
+                    <div className="flex justify-end"><Sparkline series={sparklines[h.ticker]} /></div>
+                  </td>
+                  <td className={cell + ' text-right text-slate-400'}>
+                    {h.units.toLocaleString('en-AU', { maximumFractionDigits: 3 })}
+                  </td>
+                  <td className={cell + ' text-right text-white font-medium'}>{fmtCurrency(h.value_aud)}</td>
+                  <td className={cell + ' text-right'}>
+                    <div className="flex items-center justify-end gap-2">
+                      <span className="text-slate-400">{weight.toFixed(1)}%</span>
+                      <span className="w-14 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--bg-elevated)' }}>
+                        <span className="block h-full rounded-full"
+                          style={{ width: `${weight}%`, background: 'var(--accent)', opacity: 0.8 }} />
+                      </span>
+                    </div>
+                  </td>
+                  <td className={cell + ` text-right font-medium ${h.return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {h.return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.return_aud)}
+                  </td>
+                  <td className={cell + ` text-right font-medium ${h.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmtPct(h.return_pct)}
+                  </td>
+                  <td className={cell + ' text-right font-medium ' + (h.income_aud > 0 ? 'text-amber-400' : 'text-slate-600')}>
+                    {h.income_aud > 0 ? fmtCurrency(h.income_aud) : '—'}
+                    {h.franking_aud > 0 && (
+                      <div className="text-[10px] font-normal text-slate-500 leading-tight">
+                        +{fmtCurrency(h.franking_aud)} franking
+                      </div>
+                    )}
+                  </td>
+                  <td className={cell + ` text-right font-semibold ${h.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {h.total_return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.total_return_aud)}
+                  </td>
+                </tr>
+              )
+            })}
+            {sorted.length === 0 && (
+              <tr>
+                <td colSpan={COLS.length} className="px-4 py-10 text-center text-sm text-slate-500">
+                  No holdings yet — add a transaction to get started.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () => void }) {
   const { data: txns = [] } = useTransactions()
+  const { data: divs = [] } = useDividends()
   const deleteTxn = useDeleteTransaction()
 
   const [search, setSearch] = useState('')
@@ -137,16 +312,45 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
   const [editingTxn, setEditingTxn] = useState<Transaction | null>(null)
   const [cols, setCols] = useState<ColKey[]>(DEFAULT_COLS)
   const [showColPicker, setShowColPicker] = useState(false)
+  const colPickerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!showColPicker) return
+    function handleClickOutside(e: MouseEvent) {
+      if (colPickerRef.current && !colPickerRef.current.contains(e.target as Node)) {
+        setShowColPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [showColPicker])
 
   const tickerTxns = useMemo(() =>
     txns.filter(t => t.ticker === holding.ticker && t.exchange === holding.exchange),
     [txns, holding.ticker, holding.exchange]
   )
 
+  const tickerDivs = useMemo(() =>
+    divs.filter(d => d.ticker === holding.ticker && d.exchange === holding.exchange),
+    [divs, holding.ticker, holding.exchange]
+  )
+
+  // Attribute each dividend payment back to the buy lot(s) that were held on its ex-date,
+  // split proportionally by units — `d.units` is already the total units held then, so a
+  // lot bought before the ex-date gets its share via (lot units / units held that day).
+  // Lots bought after the ex-date get none.
+  function dividendsForTxn(t: Transaction): number {
+    if (t.action !== 'buy') return 0
+    return tickerDivs.reduce((sum, d) => {
+      if (d.date < t.date || !d.units) return sum
+      return sum + d.net_amount_aud * (t.units / d.units)
+    }, 0)
+  }
+
   const filtered = useMemo(() =>
-    tickerTxns.filter(t =>
-      !search || t.action.includes(search.toLowerCase()) || t.date.includes(search)
-    ),
+    tickerTxns
+      .filter(t => !search || t.action.includes(search.toLowerCase()) || t.date.includes(search))
+      .sort((a, b) => b.date.localeCompare(a.date)),
     [tickerTxns, search]
   )
 
@@ -154,7 +358,7 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
     setCols(c => c.includes(key) ? c.filter(k => k !== key) : [...c, key])
   }
 
-  function handleDelete(id: number) {
+  function handleDeleteTxn(id: number) {
     if (!confirm('Delete this transaction?')) return
     deleteTxn.mutate(id)
   }
@@ -172,10 +376,7 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]" style={{ background: 'var(--bg-card)' }}>
           <div className="flex items-center gap-3">
-            {holding.logo_url && (
-              <img src={holding.logo_url} alt="" className="w-8 h-8 rounded-lg"
-                onError={e => (e.currentTarget.style.display = 'none')} />
-            )}
+            <LogoBadge logoUrl={holding.logo_url} ticker={holding.ticker} size={32} />
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-semibold text-white">{holding.ticker}</h2>
@@ -214,7 +415,7 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
           </div>
 
           {/* Column picker */}
-          <div className="relative">
+          <div className="relative" ref={colPickerRef}>
             <button onClick={() => setShowColPicker(s => !s)}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 border border-[var(--border)] hover:border-[var(--border-hover)] transition-colors"
               style={{ background: 'var(--bg-card)' }}>
@@ -258,37 +459,58 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
             </thead>
             <tbody>
               {filtered.map((t, i) => {
-                const gain = t.gain_aud ?? 0
-                const gainPct = t.gain_pct ?? 0
+                const capitalGain = t.gain_aud ?? 0
+                const fxGain = t.fx_gain_aud ?? 0
                 const isBuy = t.action === 'buy'
+                const cost = Math.abs(t.value)
+                const dividendsAud = dividendsForTxn(t)
+                const totalGain = capitalGain + dividendsAud
+                const totalGainPct = cost > 0 ? (totalGain / cost) * 100 : 0
                 return (
                   <tr key={t.id ?? i} className="border-t border-[var(--border)] hover:bg-white/5">
                     <td className={TD2 + ' text-slate-400'}>{fmtDate(t.date)}</td>
                     <td className={TD2}>
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${t.action === 'buy' ? 'bg-emerald-500/20 text-emerald-400' : t.action === 'sell' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                        {t.action}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${t.action === 'buy' ? 'bg-emerald-500/20 text-emerald-400' : t.action === 'sell' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                          {t.action}
+                        </span>
+                        {t.source === 'ibkr' && (
+                          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-indigo-500/20 text-indigo-300" title="Imported from Interactive Brokers">
+                            IBKR
+                          </span>
+                        )}
+                      </div>
                     </td>
                     {cols.includes('units')     && <td className={TD2 + ' text-slate-300'}>{t.units}</td>}
                     {cols.includes('price')     && <td className={TD2 + ' text-slate-300'}>{t.price}</td>}
                     {cols.includes('currency')  && <td className={TD2 + ' text-slate-500'}>{t.currency}</td>}
                     {cols.includes('fx')        && <td className={TD2 + ' text-slate-500'}>{t.exch_rate}</td>}
                     {cols.includes('brokerage') && <td className={TD2 + ' text-slate-500'}>{t.brokerage}</td>}
-                    {cols.includes('cost')      && <td className={TD2 + ' text-white font-medium'}>{fmtCurrency(Math.abs(t.value))}</td>}
+                    {cols.includes('cost')      && <td className={TD2 + ' text-white font-medium'}>{fmtCurrency(cost)}</td>}
+                    {cols.includes('fx_gain')   && (
+                      <td className={TD2 + ' font-medium ' + (!isBuy || t.currency !== 'USD' ? 'text-slate-600' : fxGain >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {isBuy && t.currency === 'USD' ? `${fxGain >= 0 ? '+' : ''}${fmtCurrency(fxGain)}` : '—'}
+                      </td>
+                    )}
+                    {cols.includes('dividends') && (
+                      <td className={TD2 + ' font-medium ' + (isBuy && dividendsAud > 0 ? 'text-amber-400' : 'text-slate-600')}>
+                        {isBuy && dividendsAud > 0 ? fmtCurrency(dividendsAud) : '—'}
+                      </td>
+                    )}
                     {cols.includes('gain_aud')  && (
-                      <td className={TD2 + ' font-medium ' + (!isBuy ? 'text-slate-600' : gain >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {isBuy ? `${gain >= 0 ? '+' : ''}${fmtCurrency(gain)}` : '—'}
+                      <td className={TD2 + ' font-medium ' + (!isBuy ? 'text-slate-600' : totalGain >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {isBuy ? `${totalGain >= 0 ? '+' : ''}${fmtCurrency(totalGain)}` : '—'}
                       </td>
                     )}
                     {cols.includes('gain_pct')  && (
-                      <td className={TD2 + ' font-medium ' + (!isBuy ? 'text-slate-600' : gainPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {isBuy ? `${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}%` : '—'}
+                      <td className={TD2 + ' font-medium ' + (!isBuy ? 'text-slate-600' : totalGainPct >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {isBuy ? `${totalGainPct >= 0 ? '+' : ''}${totalGainPct.toFixed(2)}%` : '—'}
                       </td>
                     )}
                     <td className={TD2}>
                       <div className="flex items-center gap-2">
                         <button onClick={() => setEditingTxn(t)} className="text-slate-500 hover:text-white"><Pencil size={13} /></button>
-                        <button onClick={() => t.id != null && handleDelete(t.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={13} /></button>
+                        <button onClick={() => t.id != null && handleDeleteTxn(t.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={13} /></button>
                       </div>
                     </td>
                   </tr>
@@ -339,6 +561,7 @@ export default function Holdings() {
   const { data: snapshots = [] } = useSnapshots()
   const { data: bd } = useBreakdown()
   const { data: groupsData } = useHoldingGroups()
+  const { data: sparklines = {} } = useSparklines()
 
   const saveCash = useSaveCashAccounts()
   const saveSuper = useSaveSuperHoldings()
@@ -610,7 +833,7 @@ export default function Holdings() {
                   <th className={TH2}>Capital Gain</th>
                   <th className={TH2}>Income</th>
                   <th className={TH2}>Currency</th>
-                  <th className={TH2}>Return</th>
+                  <th className={TH2}>Capital %</th>
                   <th className={TH2}></th>
                 </tr>
               </thead>
@@ -678,7 +901,17 @@ export default function Holdings() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      {/* Dense sortable table on desktop; the card layout below is kept for narrow
+          screens, where a wide table genuinely doesn't work. */}
+      <div className="hidden md:block">
+        <HoldingsTable
+          holdings={activeHoldings}
+          sparklines={sparklines}
+          onSelect={setSelectedHolding}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:hidden">
         {activeHoldings.map(h => (
           <div
             key={h.ticker}
@@ -688,15 +921,27 @@ export default function Holdings() {
           >
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                {h.logo_url && <img src={h.logo_url} alt="" className="w-6 h-6 rounded" onError={e => (e.currentTarget.style.display = 'none')} />}
+                <LogoBadge logoUrl={h.logo_url} ticker={h.ticker} size={24} />
                 <div>
                   <span className="font-semibold text-white text-sm">{h.ticker}</span>
                   <span className="ml-1 text-xs text-slate-400">{h.exchange}</span>
                 </div>
               </div>
-              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${h.daily_change_pct >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-                {h.daily_change_pct >= 0 ? '+' : ''}{h.daily_change_pct?.toFixed(2)}%
-              </span>
+              <div className="flex items-center gap-2">
+                {h.last_synced && (() => {
+                  const mins = Math.floor((Date.now() - new Date(h.last_synced).getTime()) / 60000)
+                  const label = mins < 1 ? 'live' : mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h`
+                  const stale = mins > 120
+                  return (
+                    <span className="text-[10px]" style={{ color: stale ? '#f59e0b' : '#475569' }} title={`Last synced: ${h.last_synced}`}>
+                      {stale ? '⚠ ' : ''}{label}
+                    </span>
+                  )
+                })()}
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${h.daily_change_pct >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                  {h.daily_change_pct >= 0 ? '+' : ''}{h.daily_change_pct?.toFixed(2)}%
+                </span>
+              </div>
             </div>
             <p className="text-xs text-slate-500 mb-3 truncate">{h.name}</p>
             <div className="grid grid-cols-2 gap-2 text-xs">

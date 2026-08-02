@@ -57,8 +57,18 @@ https://github.com/user-attachments/assets/60ecbf40-c88f-4a89-9565-d526a927afcb
 
 
 
+### Compounder
+Long-run growth view: monthly net worth history, Australian FY annual snapshots (Jul-Jun) with per-year growth, and a CAGR calculator you can point at any two months or jump to a financial year with one click.
+
+Returns under a year are reported as plain cumulative growth rather than annualised - annualising a short period produces numbers that are arithmetically true and completely meaningless (a 3% move over two days annualises to roughly 25,000%).
+
 ### Data Sync
 Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health - per-symbol errors, staleness warnings, last-run results - instead of a black box.
+
+### Brokerage import (Interactive Brokers)
+Connect an IBKR **Flex Web Service** token and query ID once, then pull trade executions straight in. Partial fills within the same minute are merged into a single trade, AUD conversion uses IBKR's own reported FX rate, and newly-imported tickers trigger a price sync automatically.
+
+Imports are idempotent - each trade carries a deterministic external id, so re-syncing updates in place instead of duplicating. Trades that look like ones you'd already entered by hand are flagged as **duplicate warnings** for you to review; nothing is ever auto-deleted. The Flex token is write-only: no API route ever returns it.
 
 
 https://github.com/user-attachments/assets/13b2fe3e-f030-4dd5-9aa8-e191eaeb1847
@@ -110,14 +120,22 @@ Mount a volume at `DATA_DIR` (defaults to the app directory if unset) - this is 
 | Env var | Default | Purpose |
 |---|---|---|
 | `DATA_DIR` | app directory | Where `prices.db` and CSV/Excel imports live |
+| `JWT_SECRET_KEY` | `dev-only-insecure-change-me` | Signs session tokens. **Set this to a random value in any real deployment.** |
 
-There's no built-in authentication - Worthly assumes it's running somewhere you already trust (a home network, a VPN, behind your own reverse-auth proxy). If you're exposing it beyond that, put an auth layer in front of it (Traefik BasicAuth middleware, Tailscale, OAuth2 Proxy, etc.) before you do.
+If `DATA_DIR` is unset the app falls back to the repo directory and will happily create an empty `prices.db` there - if the UI shows no holdings after a restart, check you're pointing at the right directory.
+
+### Authentication
+
+Worthly ships with email/password login (JWT-based); every API route requires a valid token, and all data is scoped per user. Passwords are stored hashed.
+
+That said, the threat model is still "runs somewhere you already trust" - a home network, a VPN, or behind your own reverse proxy. If you expose it to the public internet, set `JWT_SECRET_KEY`, terminate TLS in front of it, and consider an additional auth layer (Traefik, Tailscale, OAuth2 Proxy).
 
 ## Tech Stack
 
-- **Backend**: Flask, SQLite, `yfinance`, APScheduler (for the twice-daily background price sync)
+- **Backend**: Flask, SQLite, `yfinance`, APScheduler (for the twice-daily background price sync), `flask-jwt-extended`, `requests` (IBKR Flex Web Service)
 - **Frontend**: React 19 + TypeScript + Vite, Tailwind, Recharts, `@dnd-kit` (drag-to-reorder widgets)
 - **Data**: everything lives in a single `prices.db` SQLite file - no external database to run
+- **Theming**: OKLCH colour tokens driven by four CSS seed variables, so a whole palette swaps by changing hue/chroma rather than restyling components
 
 ## Project Structure
 
