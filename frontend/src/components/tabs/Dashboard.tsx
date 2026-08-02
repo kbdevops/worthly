@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
-  LineChart, Line, BarChart, Bar, Cell,
+  Line, BarChart, Bar, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Treemap,
   ComposedChart, Area, CartesianGrid,
 } from 'recharts'
@@ -17,15 +17,12 @@ import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Settings, X, Eye, EyeOff, Pencil, Plus, Trash2, Check } from 'lucide-react'
 import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
-import { CHART_COLORS, SERIES_COLORS } from '../../lib/chartColors'
+import { SERIES_COLORS } from '../../lib/chartColors'
 import { DonutBreakdown } from '../ui/DonutBreakdown'
 import { LogoBadge } from '../ui/LogoBadge'
 
 const CARD = 'rounded-xl p-5 border border-[var(--border)]'
 const CARD_BG = { background: 'var(--bg-card)' }
-// Single source of truth lives in lib/chartColors — kept as a local alias so the
-// treemap and any other per-index consumers keep reading the same palette.
-const COLORS = CHART_COLORS
 
 // Accent hue/chroma per preset — mirrors the seeds in index.css so the swatch
 // shows the colour the theme will actually produce.
@@ -646,13 +643,6 @@ export default function Dashboard() {
     ? mc.months.map((m, i) => ({ month: m, change: mc.change[i], pct: mc.change_pct[i], source: mc.sources?.[i] ?? 'manual' }))
     : []
 
-  const perfData = portfolio
-    ? [...portfolio]
-        .filter(h => h.units > 0)
-        .sort((a, b) => b.return_pct - a.return_pct)
-        .map(h => ({ ticker: h.ticker, gain_pct: h.return_pct }))
-    : []
-
   const holdingsData = portfolio
     ? [...portfolio]
         .filter(h => h.units > 0 && h.value_aud > 0)
@@ -1182,7 +1172,6 @@ export default function Dashboard() {
       }
 
       case 'holdings': {
-        const totalHoldingsValue = holdingsData.reduce((s, d) => s + d.value, 0)
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
             <p className="text-sm font-medium text-slate-300 mb-4">Portfolio Holdings</p>

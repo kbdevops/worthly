@@ -112,29 +112,37 @@ function FYReturnsChart({ fyRows }: { fyRows: CompounterFYRow[] }) {
             }}
             labelStyle={{ color: '#e2e8f0', fontWeight: 600, marginBottom: 2 }}
             itemStyle={{ color: '#e2e8f0' }}
-            formatter={(v: number, _: string, entry: { payload: { isCurrent: boolean } }) => [
-              `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`,
-              entry.payload.isCurrent ? 'YTD' : 'Growth',
-            ]}
+            formatter={(v, _n, entry) => {
+              // Recharts types the value as ValueType | undefined, so narrow it here.
+              const n = Number(v ?? 0)
+              const isCurrent = (entry as { payload?: { isCurrent?: boolean } })?.payload?.isCurrent
+              return [`${n >= 0 ? '+' : ''}${n.toFixed(2)}%`, isCurrent ? 'YTD' : 'Growth']
+            }}
             cursor={false}
           />
           <ReferenceLine y={0} stroke="#1e293b" strokeWidth={1} />
           <Bar dataKey="pct" radius={[4, 4, 0, 0]} isAnimationActive={false} maxBarSize={80} minPointSize={14}>
             <LabelList
               dataKey="pct"
-              content={(props: { x?: number; y?: number; width?: number; value?: number }) => {
-                const { x = 0, y = 0, width = 0, value } = props
+              content={props => {
+                // Recharts widens x/y/width to string | number | undefined.
+                const { x, y, width, value } = props as {
+                  x?: string | number; y?: string | number
+                  width?: string | number; value?: string | number
+                }
                 if (value == null) return null
+                const n = Number(value)
+                if (Number.isNaN(n)) return null
                 return (
                   <text
-                    x={x + width / 2}
-                    y={y - 8}
+                    x={Number(x ?? 0) + Number(width ?? 0) / 2}
+                    y={Number(y ?? 0) - 8}
                     textAnchor="middle"
                     fontSize={12}
                     fontWeight={700}
                     fill="#e2e8f0"
                   >
-                    {`${value >= 0 ? '+' : ''}${value.toFixed(1)}%`}
+                    {`${n >= 0 ? '+' : ''}${n.toFixed(1)}%`}
                   </text>
                 )
               }}
