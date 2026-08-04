@@ -33,8 +33,81 @@ app = Flask(__name__, template_folder="templates", static_folder="static")
 # A default secret means anyone can forge valid tokens; this is not safe to ship
 # as-is to a real multi-user deployment without setting this explicitly.
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "dev-only-insecure-change-me")
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=30)  # long-lived — this is a personal finance app people check occasionally, not a banking session
+# Long enough that a phone doesn't ask for a password every visit, short enough that a
+# leaked token expires on its own. There is no revocation list, so this window IS the
+# containment. Override with JWT_DAYS.
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=int(os.environ.get("JWT_DAYS", "7")))
 jwt = JWTManager(app)
+
+# ── Exposure hardening ────────────────────────────────────────────────────────
+# Registration is CLOSED by default. Anyone who reached an open /api/register on an
+# internet-facing instance could create an account inside the same SQLite file as the
+# owner's data, where separation is only application-level user_id filtering. The one
+# exception is bootstrapping a brand-new instance that has no users yet.
+ALLOW_REGISTRATION = os.environ.get("ALLOW_REGISTRATION", "").lower() in ("1", "true", "yes")
+MIN_PASSWORD_LEN = int(os.environ.get("MIN_PASSWORD_LEN", "10"))
+# True when this instance is reachable from outside the LAN; tightens a few defaults.
+PUBLIC_MODE = os.environ.get("PUBLIC_MODE", "").lower() in ("1", "true", "yes")
+
+# Per-IP throttle for the credential endpoints. In-process and best-effort — it exists so
+# an exposed login can't be brute-forced at machine speed, not as a substitute for an
+# edge rate limiter. Single worker (see deploy/entrypoint.sh) keeps this counter coherent.
+_AUTH_HITS = {}
+_AUTH_LOCK = threading.Lock()
+AUTH_MAX_ATTEMPTS = int(os.environ.get("AUTH_MAX_ATTEMPTS", "10"))
+AUTH_WINDOW_SECONDS = int(os.environ.get("AUTH_WINDOW_SECONDS", "900"))
+
+
+def _client_ip():
+    """Caller's IP, honouring one proxy hop.
+
+    Behind Traefik every request appears to come from the ingress, so throttling on
+    remote_addr alone would rate-limit the whole internet as a single client. Only the
+    left-most X-Forwarded-For entry is used, and only when TRUST_PROXY is set — the
+    header is client-supplied and trivially spoofed otherwise.
+    """
+    if os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes"):
+        fwd = request.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _auth_throttled(bucket):
+    """Record an attempt; return seconds to wait if the caller is over the limit."""
+    ip = _client_ip()
+    key = f"{bucket}:{ip}"
+    now = time.time()
+    with _AUTH_LOCK:
+        hits = [t for t in _AUTH_HITS.get(key, []) if now - t < AUTH_WINDOW_SECONDS]
+        if len(hits) >= AUTH_MAX_ATTEMPTS:
+            _AUTH_HITS[key] = hits
+            return int(AUTH_WINDOW_SECONDS - (now - hits[0])) + 1
+        hits.append(now)
+        _AUTH_HITS[key] = hits
+        # Opportunistic prune so the dict can't grow without bound.
+        if len(_AUTH_HITS) > 2048:
+            for k in [k for k, v in _AUTH_HITS.items() if not any(now - t < AUTH_WINDOW_SECONDS for t in v)]:
+                _AUTH_HITS.pop(k, None)
+    return 0
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    # No inline-script CSP: the built Vite bundle is external, but Recharts injects
+    # inline styles, so style-src has to allow them.
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+    )
+    if PUBLIC_MODE:
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return resp
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
@@ -452,10 +525,10 @@ def current_user_id():
 
 @app.route("/api/register", methods=["POST"])
 def register():
-    # Deliberately permissive by request: no email format required (plain usernames
-    # are fine), no minimum password length. This is intended for trusted personal/
-    # local use, not a public-facing signup — if this instance is ever exposed
-    # beyond your own network, this is the first thing to tighten back up.
+    wait = _auth_throttled("register")
+    if wait:
+        return jsonify({"ok": False, "error": f"Too many attempts. Try again in {wait}s."}), 429
+
     data = request.json or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
@@ -463,7 +536,19 @@ def register():
         return jsonify({"ok": False, "error": "Username required"}), 400
     if not password:
         return jsonify({"ok": False, "error": "Password required"}), 400
+
     conn = db()
+    # Closed unless explicitly enabled — except on a fresh instance with no users, so a
+    # new deployment can still create its first account.
+    existing_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if existing_users > 0 and not ALLOW_REGISTRATION:
+        conn.close()
+        return jsonify({"ok": False,
+                        "error": "Registration is closed on this instance."}), 403
+    if len(password) < MIN_PASSWORD_LEN:
+        conn.close()
+        return jsonify({"ok": False,
+                        "error": f"Password must be at least {MIN_PASSWORD_LEN} characters."}), 400
     if conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
         conn.close()
         return jsonify({"ok": False, "error": "An account with this email already exists"}), 409
@@ -477,8 +562,28 @@ def register():
     token = create_access_token(identity=str(user_id))
     return jsonify({"ok": True, "token": token, "user": {"id": user_id, "email": email}})
 
+@app.route("/api/auth/config", methods=["GET"])
+def auth_config():
+    """Unauthenticated: lets the login screen hide Register when it's closed.
+
+    Deliberately exposes nothing but the flags — no user count, no email, since this is
+    reachable pre-login.
+    """
+    conn = db()
+    bootstrap = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    conn.close()
+    return jsonify({
+        "registration_open": bool(ALLOW_REGISTRATION or bootstrap),
+        "bootstrap": bootstrap,
+        "min_password_len": MIN_PASSWORD_LEN,
+    })
+
+
 @app.route("/api/login", methods=["POST"])
 def login():
+    wait = _auth_throttled("login")
+    if wait:
+        return jsonify({"ok": False, "error": f"Too many attempts. Try again in {wait}s."}), 429
     data = request.json or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
