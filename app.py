@@ -101,15 +101,32 @@ def _auth_throttled(bucket):
 URL_PREFIX = os.environ.get("URL_PREFIX", "/worthly")
 
 
-@app.before_request
-def _strip_url_prefix():
-    if not URL_PREFIX:
-        return
-    path = request.environ.get("PATH_INFO", "")
-    if path == URL_PREFIX:
-        request.environ["PATH_INFO"] = "/"
-    elif path.startswith(URL_PREFIX + "/"):
-        request.environ["PATH_INFO"] = path[len(URL_PREFIX):]
+class _PrefixMiddleware:
+    """Strip URL_PREFIX from PATH_INFO before Flask routes the request.
+
+    This has to be WSGI middleware, not @app.before_request: Flask matches the URL when
+    the request context is pushed, which is BEFORE before_request handlers run. Rewriting
+    PATH_INFO there is too late — the route has already been chosen, so /worthly/api/...
+    fell through to the SPA catch-all and returned index.html instead of JSON.
+
+    SCRIPT_NAME is extended rather than discarded so url_for() and redirects still emit
+    URLs that include the prefix.
+    """
+
+    def __init__(self, wsgi_app, prefix):
+        self.wsgi_app = wsgi_app
+        self.prefix = (prefix or "").rstrip("/")
+
+    def __call__(self, environ, start_response):
+        if self.prefix:
+            path = environ.get("PATH_INFO", "")
+            if path == self.prefix or path.startswith(self.prefix + "/"):
+                environ["SCRIPT_NAME"] = environ.get("SCRIPT_NAME", "") + self.prefix
+                environ["PATH_INFO"] = path[len(self.prefix):] or "/"
+        return self.wsgi_app(environ, start_response)
+
+
+app.wsgi_app = _PrefixMiddleware(app.wsgi_app, URL_PREFIX)
 
 
 @app.after_request
