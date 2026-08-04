@@ -126,7 +126,54 @@ class _PrefixMiddleware:
         return self.wsgi_app(environ, start_response)
 
 
+# Hostnames this instance answers to. Unset (the default) serves any Host, which is what
+# local dev and the LAN NodePort rely on — both arrive by bare IP. Setting it is how you
+# stop the public IP from serving the app once a DNS name is in front of it: gunicorn has
+# no notion of a canonical hostname, so without this check it answers to the raw public IP
+# and to every name anyone points at that IP, and the bare-IP URL stays live forever.
+ALLOWED_HOSTS = [h.strip().lower() for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()]
+
+# Loopback always passes, so container health checks and `curl localhost:5050` keep working
+# even when ALLOWED_HOSTS lists only a public name.
+_ALWAYS_ALLOWED_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+class _HostAllowlistMiddleware:
+    """Reject requests whose Host header isn't in ALLOWED_HOSTS.
+
+    Wrapped outermost so this runs before URL matching and before the prefix rewrite — a
+    request for the wrong hostname should never reach a route or the SPA catch-all.
+
+    Only HTTP_HOST is consulted, never X-Forwarded-Host: that header is client-supplied
+    and would let a caller spoof its way past the allowlist. Traefik passes the original
+    Host through untouched, so the real hostname is already in HTTP_HOST.
+    """
+
+    def __init__(self, wsgi_app, allowed):
+        self.wsgi_app = wsgi_app
+        self.allowed = tuple(allowed)
+
+    def __call__(self, environ, start_response):
+        if self.allowed:
+            host = environ.get("HTTP_HOST", "").strip().lower()
+            # Host usually carries a port (name:5050); the allowlist holds hostnames only.
+            if host.startswith("[") and "]" in host:
+                host = host[: host.index("]") + 1]  # [::1]:5050 -> [::1]
+            else:
+                host = host.partition(":")[0]
+            if host not in self.allowed and host not in _ALWAYS_ALLOWED_HOSTS:
+                # 404, not 403: a wrong-Host caller learns nothing about what runs here.
+                body = b'{"error": "not found"}'
+                start_response(
+                    "404 NOT FOUND",
+                    [("Content-Type", "application/json"), ("Content-Length", str(len(body)))],
+                )
+                return [body]
+        return self.wsgi_app(environ, start_response)
+
+
 app.wsgi_app = _PrefixMiddleware(app.wsgi_app, URL_PREFIX)
+app.wsgi_app = _HostAllowlistMiddleware(app.wsgi_app, ALLOWED_HOSTS)
 
 
 @app.after_request

@@ -121,8 +121,38 @@ Mount a volume at `DATA_DIR` (defaults to the app directory if unset) - this is 
 |---|---|---|
 | `DATA_DIR` | app directory | Where `prices.db` and CSV/Excel imports live |
 | `JWT_SECRET_KEY` | `dev-only-insecure-change-me` | Signs session tokens. **Set this to a random value in any real deployment.** |
+| `ALLOWED_HOSTS` | _(unset - any host)_ | Comma-separated hostnames this instance will answer to. Anything else gets a bare 404. See below. |
 
 If `DATA_DIR` is unset the app falls back to the repo directory and will happily create an empty `prices.db` there - if the UI shows no holdings after a restart, check you're pointing at the right directory.
+
+### Restricting which hostnames are served
+
+By default the app answers to *any* `Host` header. That is what local dev and LAN access rely
+on, since both arrive by bare IP - but on an internet-facing deployment it means the app is
+served at your raw public IP as well as at whatever DNS name you put in front of it. Pointing
+a name (DuckDNS or otherwise) at the box does not replace the IP URL, it just adds an alias;
+the IP keeps working until something checks the hostname.
+
+`ALLOWED_HOSTS` is that check:
+
+```bash
+ALLOWED_HOSTS=worthly.example.duckdns.org
+```
+
+Requests for any other hostname - including the bare public IP - get `404 {"error": "not found"}`,
+which reveals nothing about what is running. `localhost` and `127.0.0.1` are always allowed so
+container health checks keep working.
+
+Two things to watch:
+
+- **It matches hostnames, not ports.** `name` covers `name:80` and `name:5050`.
+- **Bare-IP access on the LAN breaks too.** If you also reach the app at `http://192.168.1.50:30080`,
+  add that IP to the list: `ALLOWED_HOSTS=worthly.example.duckdns.org,192.168.1.50`.
+
+This is enforced in the app, so it holds regardless of what the ingress in front of it does.
+Restricting the Traefik router with a `Host(...)` rule as well is worth doing - see
+[CLAUDE.md](CLAUDE.md) - but an app-level check survives an ingress that gets bypassed or
+misconfigured.
 
 ### Authentication
 

@@ -134,6 +134,7 @@ React 19 + TypeScript + Vite 8. TanStack Query v5 for server state. Recharts for
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATA_DIR` | app directory | Path where `prices.db` is stored |
+| `ALLOWED_HOSTS` | _(unset — any host)_ | Comma-separated hostnames served; anything else 404s. Enforced in `_HostAllowlistMiddleware`, wrapped outermost so it runs before routing. |
 
 ### Build and run
 
@@ -151,8 +152,44 @@ Mount `prices.db` to persist all data across container restarts.
 
 See `deploy/k3s/k3s-deploy.yaml` — PVC, Deployment (Recreate strategy), Service, Traefik Ingress.
 
+> **This file is not in the repo.** It is referenced here but was never committed, and it is
+> not covered by `.gitignore` either — so the live cluster's PVC, Deployment, Service and
+> Ingress exist only on the node. Export it (`kubectl get ingress,svc,deploy,pvc -o yaml`)
+> and commit it, otherwise the deployment cannot be rebuilt from this repo.
+
 - `strategy: Recreate` — avoids two pods writing to the same SQLite file
 - Mount volume at `/app/data`, set `DATA_DIR=/app/data`
+
+### Restricting the served hostname
+
+The Ingress routes on `PathPrefix(/worthly)` with no host match, so Traefik forwards requests
+for *any* hostname — including the node's bare public IP. Two independent layers fix that;
+apply both, since each covers a case the other does not:
+
+1. **Ingress** — add a `host:` to the rule so Traefik 404s non-matching hostnames at the edge:
+
+   ```yaml
+   spec:
+     rules:
+       - host: worthly.example.duckdns.org   # add this
+         http:
+           paths:
+             - path: /worthly
+               pathType: Prefix
+   ```
+
+2. **App** — set `ALLOWED_HOSTS` on the Deployment, which still holds if the ingress is
+   bypassed (e.g. someone hits the NodePort directly) or misconfigured:
+
+   ```yaml
+   env:
+     - name: ALLOWED_HOSTS
+       value: worthly.example.duckdns.org
+   ```
+
+Adding a `host:` rule makes the Ingress host-exclusive: bare-IP and NodePort access stop
+working. If you still want LAN-by-IP access, add the node IP to `ALLOWED_HOSTS` and keep a
+second host-less route, or reach it via `kubectl port-forward`.
 
 ## Port & Debug
 
