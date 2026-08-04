@@ -1172,6 +1172,7 @@ export default function Dashboard() {
                   tickFormatter={d => new Date(d + 'T00:00:00').toLocaleDateString('en-AU', { month: 'short', year: '2-digit' })}
                 />
                 <YAxis
+                  yAxisId="left"
                   tick={{ fill: axisColor, fontSize: 11 }}
                   tickLine={false} axisLine={false} width={52}
                   // A stack is only honest anchored at zero; with no bands shown
@@ -1179,6 +1180,20 @@ export default function Dashboard() {
                   domain={bands.length ? [0, 'auto'] : ['auto', 'auto']}
                   tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'}
                 />
+                {/* Return gets its own axis. It is a P&L, not a balance, and it goes
+                    negative (to -$29k on the reference data) while net worth never does.
+                    Sharing one axis forced the floor below zero — Recharts rounded it to
+                    -$350k — which squashed the whole stack into the top two-thirds and
+                    made the composition look completely different just from toggling it. */}
+                {activeLines.includes('Return') && (
+                  <YAxis
+                    yAxisId="right" orientation="right"
+                    tick={{ fill: nwColor('Return'), fontSize: 11 }}
+                    tickLine={false} axisLine={false} width={52}
+                    domain={['auto', 'auto']}
+                    tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'}
+                  />
+                )}
                 <Tooltip
                   cursor={{ stroke: axisColor, strokeDasharray: '3 3' }}
                   content={({ active, payload, label }) => {
@@ -1209,16 +1224,16 @@ export default function Dashboard() {
                 {/* Composition, bottom-up. Hiding a band shrinks the fill but never
                     the Net Worth line, which is its own series. */}
                 {bands.map(b => (
-                  <Area key={b} type="monotone" dataKey={b} stackId="nw"
+                  <Area key={b} yAxisId="left" type="monotone" dataKey={b} stackId="nw"
                     stroke="none" fill={nwColor(b)} fillOpacity={0.62} isAnimationActive={false} />
                 ))}
 
                 {activeLines.includes('Return') && (
-                  <Line type="monotone" dataKey="Return" stroke={nwColor('Return')}
+                  <Line yAxisId="right" type="monotone" dataKey="Return" stroke={nwColor('Return')}
                     dot={false} strokeWidth={1.5} strokeDasharray="4 3" isAnimationActive={false} />
                 )}
                 {activeLines.includes('Net Worth') && (
-                  <Line type="monotone" dataKey="Net Worth" stroke={nwColor('Net Worth')}
+                  <Line yAxisId="left" type="monotone" dataKey="Net Worth" stroke={nwColor('Net Worth')}
                     dot={false} strokeWidth={2.4} isAnimationActive={false}
                     activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--bg-card)' }} />
                 )}
