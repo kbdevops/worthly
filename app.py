@@ -92,6 +92,26 @@ def _auth_throttled(bucket):
     return 0
 
 
+# Serving path prefix. The app is reachable two ways: at the root (LAN NodePort) and
+# under /worthly on a shared port 80 behind Traefik. The frontend is built with
+# base=/worthly/ so its asset and API URLs are absolute under that prefix, which works
+# through Traefik's stripPrefix but would 404 at the root. Stripping it here makes both
+# entry points serve the same bundle, and keeps the app working even if the middleware
+# is missing or misordered.
+URL_PREFIX = os.environ.get("URL_PREFIX", "/worthly")
+
+
+@app.before_request
+def _strip_url_prefix():
+    if not URL_PREFIX:
+        return
+    path = request.environ.get("PATH_INFO", "")
+    if path == URL_PREFIX:
+        request.environ["PATH_INFO"] = "/"
+    elif path.startswith(URL_PREFIX + "/"):
+        request.environ["PATH_INFO"] = path[len(URL_PREFIX):]
+
+
 @app.after_request
 def _security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -102,7 +122,11 @@ def _security_headers(resp):
     # inline styles, so style-src has to allow them.
     resp.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; "
+        # fonts.googleapis.com serves the webfont stylesheet and fonts.gstatic.com the
+        # font files; style-src 'self' alone silently killed the app's typeface.
+        "default-src 'self'; img-src 'self' data: https:; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
         "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
     )
     if PUBLIC_MODE:

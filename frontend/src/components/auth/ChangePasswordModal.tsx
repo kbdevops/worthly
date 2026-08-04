@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { apiUrl } from '../../lib/apiBase'
 import { X, Check } from 'lucide-react'
 import { getToken } from '../../lib/auth'
 
@@ -19,7 +20,7 @@ export default function ChangePasswordModal({ onClose }: { onClose: () => void }
     }
     setLoading(true)
     try {
-      const res = await fetch('/api/change-password', {
+      const res = await fetch(apiUrl('/api/change-password'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getToken()}` },
         body: JSON.stringify({ current_password: current, new_password: next }),

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { login, register } from '../../lib/auth'
+import { apiUrl } from '../../lib/apiBase'
 
 export default function AuthScreen({ onAuthed }: { onAuthed: () => void }) {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -14,7 +15,7 @@ export default function AuthScreen({ onAuthed }: { onAuthed: () => void }) {
   const [minLen, setMinLen] = useState(10)
 
   useEffect(() => {
-    fetch('/api/auth/config')
+    fetch(apiUrl('/api/auth/config'))
       .then(r => r.json())
       .then(c => { setRegOpen(!!c.registration_open); setMinLen(c.min_password_len ?? 10) })
       .catch(() => setRegOpen(false))

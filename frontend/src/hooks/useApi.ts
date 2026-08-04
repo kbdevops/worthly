@@ -6,6 +6,7 @@ import type {
   CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
+import { apiUrl } from '../lib/apiBase'
 
 function authHeaders(): Record<string, string> {
   const token = getToken()
@@ -21,13 +22,13 @@ async function handleAuthError(res: Response) {
 }
 
 const get = async <T>(url: string): Promise<T> => {
-  const res = await fetch(url, { headers: { ...authHeaders() } })
+  const res = await fetch(apiUrl(url), { headers: { ...authHeaders() } })
   if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
 }
 
 const post = async <T>(url: string, body?: unknown): Promise<T> => {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -37,13 +38,13 @@ const post = async <T>(url: string, body?: unknown): Promise<T> => {
 }
 
 const del = async (url: string) => {
-  const res = await fetch(url, { method: 'DELETE', headers: { ...authHeaders() } })
+  const res = await fetch(apiUrl(url), { method: 'DELETE', headers: { ...authHeaders() } })
   if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
   return res.json()
 }
 
 const put = async <T>(url: string, body: unknown): Promise<T> => {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),

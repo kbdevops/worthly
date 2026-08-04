@@ -1,3 +1,4 @@
+import { apiUrl } from './apiBase'
 // Central place for auth token storage and the login/register/logout calls.
 // Deliberately framework-light (no context provider needed) — components read
 // isAuthed()/getToken() directly, and useAuth() below gives a reactive hook
@@ -48,7 +49,7 @@ export function clearSession() {
 }
 
 async function authRequest(path: string, email: string, password: string, remember: boolean) {
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
