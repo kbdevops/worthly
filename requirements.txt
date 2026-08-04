@@ -3,4 +3,5 @@ flask-jwt-extended
 yfinance
 pandas
 APScheduler
-requestsgunicorn
+requests
+gunicorn
