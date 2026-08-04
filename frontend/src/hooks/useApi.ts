@@ -3,7 +3,7 @@ import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
   CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
-  CompounterData, IbkrCredentialsStatus, IbkrSyncJob,
+  CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
 
@@ -126,12 +126,73 @@ export const useSnapshots = () =>
 export const useSyncStatus = () =>
   useQuery({ queryKey: ['sync-status'], queryFn: () => get<SyncStatus[]>('/api/sync-status') })
 
-export const useCGT = (from: string, to: string, method: string, enabled: boolean) =>
+export const useCGT = (from: string, to: string, method: string, enabled: boolean, priorLosses?: number) =>
   useQuery({
-    queryKey: ['cgt', from, to, method],
-    queryFn: () => get<CGTResult>(`/api/cgt?from=${from}&to=${to}&method=${method}`),
+    queryKey: ['cgt', from, to, method, priorLosses ?? null],
+    queryFn: () => get<CGTResult>(
+      `/api/cgt?from=${from}&to=${to}&method=${method}` +
+      (priorLosses != null ? `&prior_losses=${priorLosses}` : '')),
     enabled,
   })
+
+export const useTaxIncome = (from: string, to: string, enabled: boolean) =>
+  useQuery({
+    queryKey: ['tax-income', from, to],
+    queryFn: () => get<TaxIncomeResult>(`/api/tax/income?from=${from}&to=${to}`),
+    enabled,
+  })
+
+export const useExtendedHours = () =>
+  useQuery({
+    queryKey: ['extended-hours'],
+    queryFn: () => get<{
+      session: string; label: string; market_state: string
+      total_aud: number; pct: number; us_value_aud: number
+      covered: number; total_holdings: number
+      movers: { ticker: string; delta_aud: number; pct: number; price: number }[]
+      note: string | null
+    }>('/api/portfolio/extended-hours'),
+    // Server caches for 60s; poll a little slower than that.
+    refetchInterval: 90_000,
+  })
+
+export const useTaxSettings = () =>
+  useQuery({ queryKey: ['tax-settings'], queryFn: () => get<TaxSettings>('/api/tax/settings') })
+
+export const useTaxLock = () =>
+  useQuery({
+    queryKey: ['tax-lock'],
+    queryFn: () => get<{
+      locked_disposals: number
+      last_locked_at: string | null
+      locked_to: string | null
+      disposals: { sell_id: number; date: string; ticker: string; method: string; parcels: number; units: number }[]
+    }>('/api/tax/lock'),
+  })
+
+export const useSetTaxLock = () => {
+  const qc = useQueryClient()
+  const done = () => {
+    qc.invalidateQueries({ queryKey: ['tax-lock'] })
+    qc.invalidateQueries({ queryKey: ['cgt'] })
+  }
+  return {
+    lock: useMutation({ mutationFn: (v: { to: string; method?: string }) => post('/api/tax/lock', v), onSuccess: done }),
+    unlock: useMutation({ mutationFn: (to?: string) => del(`/api/tax/lock${to ? `?to=${to}` : ''}`), onSuccess: done }),
+  }
+}
+
+export const useSaveTaxSettings = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (s: { entity_type: string; allocation_method: string }) =>
+      post('/api/tax/settings', s),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tax-settings'] })
+      qc.invalidateQueries({ queryKey: ['cgt'] })
+    },
+  })
+}
 
 const invalidateTransactionDependents = (qc: ReturnType<typeof useQueryClient>) => {
   qc.invalidateQueries({ queryKey: ['transactions'] })

@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Settings, X, Eye, EyeOff, Pencil, Plus, Trash2, Check } from 'lucide-react'
-import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance } from '../../hooks/useApi'
+import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance, useExtendedHours } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import { SERIES_COLORS } from '../../lib/chartColors'
 import { DonutBreakdown } from '../ui/DonutBreakdown'
@@ -125,21 +125,24 @@ function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
 
 // ── Stat card config ──────────────────────────────────────────────────────────
 type StatKey = 'net_worth' | 'portfolio' | 'super' | 'cash' | 'total_return' | 'return_pct' | 'best' | 'worst' | 'daily_ath' | 'day_pl' | 'cost_basis' | 'cagr' | 'dividends'
+  | 'realised' | 'total_all' | 'income_fy' | 'ext_hours'
 
+// Only metrics that appear NOWHERE else on the dashboard. Everything removed from this
+// list is already shown by the hero panel (net worth, portfolio, super, cash, today's
+// P&L), the return ledger (total/unrealised/realised/income) or the Holding Performance
+// treemap (best/worst, and there with position weight). Dropping them from the options
+// rather than migrating saved layouts is deliberate: cleanedStatKeys filters by this
+// list, so a stale saved list can no longer resurrect them — a one-time migration lost
+// that race against localStorage every time.
 const STAT_OPTIONS: { key: StatKey; label: string }[] = [
-  { key: 'net_worth',    label: 'Total Net Worth' },
-  { key: 'portfolio',   label: 'Portfolio Value' },
-  { key: 'super',       label: 'Superannuation' },
-  { key: 'cash',        label: 'Cash' },
-  { key: 'cost_basis',  label: 'Cost Basis' },
-  { key: 'cagr',        label: 'Ann. Return (CAGR)' },
-  { key: 'dividends',   label: 'Dividend Income' },
-  { key: 'best',        label: 'Best Performer' },
-  { key: 'worst',       label: 'Worst Performer' },
+  // 'cagr' now renders the money-weighted return. The key is deliberately unchanged
+  // so saved layouts keep working — only the maths and the label moved.
+  { key: 'cagr',        label: 'Return p.a.' },
+  { key: 'return_pct',  label: 'Unrealised (%)' },
+  { key: 'income_fy',   label: 'Income This FY' },
+  { key: 'ext_hours',   label: 'Pre / After Market' },
   { key: 'daily_ath',   label: 'Best Day Ever' },
-  { key: 'day_pl',      label: "Today's P&L" },
-  { key: 'total_return', label: 'Total Return ($)' },
-  { key: 'return_pct',  label: 'Total Return (%)' },
+  { key: 'cost_basis',  label: 'Cost Basis' },
 ]
 
 // ── Allocation widget types ───────────────────────────────────────────────────
@@ -211,7 +214,10 @@ const FULL_WIDGET_H = 560
 const DEFAULT_VISIBLE: Record<string, boolean> = {
   networth: true, 'alloc_country': true, monthly: true, performance: true, holdings: true,
 }
-const DEFAULT_STATS: StatKey[] = ['net_worth', 'portfolio', 'super', 'cash', 'cost_basis', 'cagr', 'dividends', 'best', 'daily_ath', 'day_pl']
+
+
+
+const DEFAULT_STATS: StatKey[] = ['cagr', 'return_pct', 'income_fy', 'cost_basis', 'daily_ath']
 
 // ── Time range ────────────────────────────────────────────────────────────────
 type Range = '1M' | '3M' | '6M' | '1Y' | 'All'
@@ -232,6 +238,104 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
       <p className="text-xs text-slate-400 mb-1">{label}</p>
       <p className="text-xl sm:text-2xl font-bold text-white truncate" title={value} style={color ? { color } : {}}>{value}</p>
       {sub && <p className="text-xs text-slate-400 mt-1">{sub}</p>}
+    </div>
+  )
+}
+
+/**
+ * Net worth as the one hero figure, with the composition that produces it.
+ *
+ * Portfolio + Super + Cash were previously four equal-weight cards with no operator
+ * between them, so the only real relationship in the data — that the three sum to the
+ * headline — was invisible. The segment colours come from SERIES_COLORS so the bar
+ * reads as the "now" slice of the stacked timeline directly below it.
+ *
+ * The delta is rebased to net worth: stats.day_pl_pct divides by the previous
+ * PORTFOLIO value, which printed +1.63% beside a $1m headline that had moved +1.16%.
+ */
+function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
+  netWorth: number; portfolio: number; superAnn: number; cash: number; dayPl: number
+}) {
+  const legs = [
+    { label: 'Portfolio', value: portfolio, color: SERIES_COLORS['Portfolio'] },
+    { label: 'Super',     value: superAnn,  color: SERIES_COLORS['Super'] },
+    { label: 'Cash',      value: cash,      color: SERIES_COLORS['Cash'] },
+  ]
+  const pct = (v: number) => (netWorth > 0 ? (v / netWorth) * 100 : 0)
+  const prev = netWorth - dayPl
+  const dayPct = prev > 0 ? (dayPl / prev) * 100 : 0
+  const up = dayPl >= 0
+  return (
+    <div>
+      <p className="text-xs uppercase tracking-wider text-slate-400">Net worth</p>
+      <p className="text-3xl sm:text-4xl font-semibold text-white tabular-nums mt-1 leading-none">
+        {fmtCurrency(netWorth)}
+      </p>
+      <span
+        className="inline-block mt-2 px-2 py-1 rounded-md text-xs font-semibold tabular-nums"
+        style={{
+          background: up ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+          color: up ? '#10b981' : '#ef4444',
+        }}
+      >
+        {up ? '+' : '−'}{fmtCurrency(dayPl)} · {up ? '+' : ''}{dayPct.toFixed(2)}%
+      </span>
+      <div className="flex h-2 rounded-full overflow-hidden mt-4">
+        {legs.map(l => (
+          <div key={l.label} style={{ width: `${pct(l.value)}%`, background: l.color }} />
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-3 mt-3">
+        {legs.map(l => (
+          <div key={l.label} className="min-w-0">
+            <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: l.color }} />
+              <span className="truncate">{l.label} {pct(l.value).toFixed(1)}%</span>
+            </p>
+            <p className="text-sm font-semibold text-white tabular-nums mt-0.5 truncate">
+              {fmtCurrency(l.value)}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Lifetime return, split into the three things that actually make it up.
+ *
+ * "Total Return" previously named the unrealised figure alone, which understated
+ * lifetime profit by everything banked on a sale plus every dividend — $75,720 of it
+ * on the reference portfolio. The rows sum to the headline exactly.
+ */
+function ReturnLedger({ total, unrealised, realised, income }: {
+  total: number; unrealised: number; realised: number; income: number
+}) {
+  const rows = [
+    { label: 'Unrealised', value: unrealised },
+    { label: 'Realised',   value: realised },
+    { label: 'Income',     value: income },
+  ]
+  const sign = (v: number) => (v >= 0 ? '+' : '−')
+  return (
+    <div>
+      <p className="text-xs uppercase tracking-wider text-slate-400">Total return</p>
+      <p className="text-2xl sm:text-3xl font-semibold tabular-nums mt-1 leading-none"
+        style={{ color: total >= 0 ? '#10b981' : '#ef4444' }}>
+        {sign(total)}{fmtCurrency(total)}
+      </p>
+      <div className="mt-3">
+        {rows.map(r => (
+          <div key={r.label}
+            className="flex justify-between items-baseline text-xs py-1.5 border-t border-[var(--border)] tabular-nums">
+            <span className="text-slate-400">{r.label}</span>
+            <span className="font-semibold" style={{ color: r.value >= 0 ? '#10b981' : '#ef4444' }}>
+              {sign(r.value)}{fmtCurrency(r.value)}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -437,6 +541,7 @@ export default function Dashboard() {
   const [range, setRange] = useLocalStorage<Range>('dash_range', 'All')
   // Declared after `range` — the treemap follows the same selector as the chart.
   const { data: rangePerf } = useRangePerformance(range)
+  const { data: ext } = useExtendedHours()
 
   type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super' | 'Return'
   // Portfolio + Cash + Super sum exactly to net worth, so those three render as a
@@ -589,6 +694,7 @@ export default function Dashboard() {
   const VALID_STAT_KEYS = new Set(STAT_OPTIONS.map(o => o.key))
   const cleanedStatKeys = statKeys.filter(k => VALID_STAT_KEYS.has(k))
   const setStatKeys = setStatKeysRaw
+
   const [showCustomise, setShowCustomise] = useState(false)
 
   // ── Layout persistence ───────────────────────────────────────────────────
@@ -617,6 +723,14 @@ export default function Dashboard() {
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [order, visible, statKeys, allocWidgets, layoutLoadedFromAccount])
+
+  // One-time migration. A layout saved before the hero and ledger existed still lists
+  // net_worth, portfolio, cash, day_pl, total_return and so on, which would now print
+  // twice. Strip those once, then never again — so deliberately re-adding one in
+  // Customise sticks instead of being silently filtered away on every render.
+  //
+  // Gated on layoutLoadedFromAccount, and declared after it: the server's stat_keys land
+  // in the effect above and would overwrite anything migrated on mount.
 
   // ── Data transforms ──────────────────────────────────────────────────────
   const nwRaw = (() => {
@@ -720,28 +834,64 @@ export default function Dashboard() {
       case 'portfolio':    return { label: 'Portfolio Value',   value: fmtCurrency(bd?.portfolio ?? 0), sub: `Return: ${fmtCurrencySigned(totalReturn)} (${fmtPct(returnPct)})`, color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
       case 'super':        return { label: 'Superannuation',    value: fmtCurrency(bd?.super ?? 0) }
       case 'cash':         return { label: 'Cash',              value: fmtCurrency(bd?.cash ?? 0) }
-      case 'total_return': return { label: 'Total Return ($)',  value: fmtCurrencySigned(totalReturn), color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
-      case 'return_pct':   return { label: 'Total Return (%)',  value: fmtPct(returnPct), color: returnPct >= 0 ? '#10b981' : '#ef4444' }
-      case 'best':         return { label: 'Best Performer',    value: stats?.best_performer ?? '—', sub: stats?.best_performer ? fmtPct(stats.best_performer_pct) : undefined, color: '#10b981' }
-      case 'worst':        return { label: 'Worst Performer',   value: stats?.worst_performer ?? '—', sub: stats?.worst_performer ? fmtPct(stats.worst_performer_pct) : undefined, color: '#ef4444' }
+      // Renamed from "Total Return" — it is market value less the cost of units still
+      // held, i.e. unrealised only. The lifetime figure is 'total_all'.
+      case 'total_return': return { label: 'Unrealised Gain',   value: fmtCurrencySigned(totalReturn), sub: 'on current holdings', color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
+      case 'return_pct':   return { label: 'Unrealised (%)',    value: fmtPct(returnPct), sub: 'on cost of holdings', color: returnPct >= 0 ? '#10b981' : '#ef4444' }
+      // sub carries the position's weight, not its own percentage again — the value
+      // already prints the percentage, previously repeated at a second precision.
+      case 'best':         return { label: 'Best Performer',    value: stats?.best_performer ?? '—', sub: 'largest gain on cost', color: '#10b981' }
+      case 'worst':        return { label: 'Worst Performer',   value: stats?.worst_performer ?? '—', sub: 'largest loss on cost', color: '#ef4444' }
       case 'cost_basis': {
         const basis = stats?.cost_basis ?? 0
-        const gain = (bd?.portfolio ?? 0) - basis
-        return { label: 'Cost Basis', value: fmtCurrency(basis), sub: basis > 0 ? `${gain >= 0 ? '+' : ''}${fmtCurrency(gain)} unrealised` : undefined, color: gain >= 0 ? '#10b981' : '#ef4444' }
+        return { label: 'Cost Basis', value: fmtCurrency(basis), sub: 'average cost, units held' }
+      }
+      case 'realised': {
+        const r = stats?.realised_gain ?? 0
+        return { label: 'Realised Gain', value: fmtCurrencySigned(r), sub: 'banked on sales, after cost', color: r >= 0 ? '#10b981' : '#ef4444' }
+      }
+      case 'total_all': {
+        const t = stats?.total_return_all ?? 0
+        return { label: 'Total Return (all)', value: fmtCurrencySigned(t), sub: 'unrealised + realised + income', color: t >= 0 ? '#10b981' : '#ef4444' }
       }
       case 'cagr': {
-        const cagr = stats?.cagr ?? 0
-        const ann = stats?.cagr_annualised ?? true
+        // Money-weighted (XIRR) over the real dated cash flows. The old CAGR here
+        // divided by the cost of units still held and ignored sales and dividends
+        // entirely, reading +4.0% where the money-weighted rate is +16.0%.
+        const mwr = stats?.mwr_pct
+        const ann = stats?.mwr_annualised ?? true
+        const yrs = stats?.mwr_years ?? 0
+        if (mwr == null) return { label: 'Return p.a.', value: '—', sub: 'not enough history' }
         return {
-          label: ann ? 'Ann. Return (CAGR)' : 'Return since first buy',
-          value: `${cagr >= 0 ? '+' : ''}${cagr.toFixed(1)}%`,
-          sub: ann ? 'annualised since first buy' : 'under 1 yr — not annualised',
-          color: cagr >= 0 ? '#10b981' : '#ef4444',
+          label: ann ? 'Return p.a.' : 'Return to date',
+          value: `${mwr >= 0 ? '+' : ''}${mwr.toFixed(1)}%`,
+          sub: ann ? `money-weighted · over ${yrs.toFixed(1)} yrs` : `over ${yrs.toFixed(1)} yrs — not annualised`,
+          color: mwr >= 0 ? '#10b981' : '#ef4444',
         }
       }
       case 'dividends': {
-        const div = stats?.dividend_income ?? 0
-        return { label: 'Dividend Income', value: fmtCurrency(div), sub: 'total received (AUD)', color: '#f59e0b' }
+        const div = stats?.income_total ?? stats?.dividend_income ?? 0
+        const fr = stats?.franking_total ?? 0
+        return { label: 'Dividend Income', value: fmtCurrency(div), sub: fr > 0 ? `+${fmtCurrency(fr)} franking credits` : 'total received (AUD)', color: '#f59e0b' }
+      }
+      case 'ext_hours': {
+        // Flips between pre-market and after-hours on its own, driven by Yahoo's
+        // marketState. Covers US holdings only — yfinance has no ASX extended session,
+        // so the percentage is against the US sleeve, not net worth.
+        if (!ext || ext.covered === 0) {
+          return { label: 'Pre / After Market', value: '—', sub: ext?.note ?? 'no extended-hours quotes' }
+        }
+        const up = ext.total_aud >= 0
+        return {
+          label: ext.label,
+          value: `${up ? '+' : '−'}${fmtCurrency(ext.total_aud)}`,
+          sub: `${up ? '+' : ''}${ext.pct.toFixed(2)}% of US holdings · ${ext.covered} of ${ext.total_holdings}`,
+          color: up ? '#10b981' : '#ef4444',
+        }
+      }
+      case 'income_fy': {
+        const fy = stats?.income_fy ?? 0
+        return { label: 'Income This FY', value: fmtCurrency(fy), sub: 'since 1 Jul', color: '#f59e0b' }
       }
       case 'daily_ath': {
         const athDate = stats?.daily_ath_date
@@ -1347,6 +1497,30 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Hero: net worth, its composition, and the lifetime return ledger. These own
+          net_worth / portfolio / super / cash / day_pl and total_all / total_return /
+          realised / dividends, so those are absent from DEFAULT_STATS below — still
+          selectable in Customise for anyone who wants them as cards too. */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <div className={CARD + ' xl:col-span-2'} style={CARD_BG}>
+          <NetWorthHero
+            netWorth={(bd?.portfolio ?? 0) + (bd?.super ?? 0) + (bd?.cash ?? 0)}
+            portfolio={bd?.portfolio ?? 0}
+            superAnn={bd?.super ?? 0}
+            cash={bd?.cash ?? 0}
+            dayPl={stats?.day_pl ?? 0}
+          />
+        </div>
+        <div className={CARD} style={CARD_BG}>
+          <ReturnLedger
+            total={stats?.total_return_all ?? 0}
+            unrealised={stats?.total_return ?? 0}
+            realised={stats?.realised_gain ?? 0}
+            income={stats?.income_total ?? 0}
+          />
+        </div>
+      </div>
 
       {/* Stat cards + prices-as-of timestamp */}
       <div>

@@ -291,6 +291,66 @@ def db():
         "ON transactions(user_id, external_id)"
     )
 
+    # AMIT / attribution components of a trust distribution. Australian ETFs (VAS, NDQ,
+    # IVV are unit trusts) pass through realised capital gains, tax-deferred amounts and
+    # foreign income inside what looks like one "dividend". Treating the whole payment as
+    # ordinary income both over-declares income and omits the capital-gains component
+    # from the CGT report — on the reference portfolio Sharesight shows $4,289.86 of
+    # discounted capital-gain distributions that were invisible here. These figures come
+    # from the annual tax statement; no price feed publishes them, so they're entered.
+    for col, defn in [
+        ("cg_discounted_aud", "REAL NOT NULL DEFAULT 0"),   # discountable capital gain
+        ("cg_other_aud", "REAL NOT NULL DEFAULT 0"),        # non-discountable capital gain
+        ("tax_deferred_aud", "REAL NOT NULL DEFAULT 0"),    # reduces cost base, not income
+        ("foreign_income_aud", "REAL NOT NULL DEFAULT 0"),  # attributed foreign income
+        ("foreign_tax_paid_aud", "REAL NOT NULL DEFAULT 0"),# foreign tax offset
+        ("pay_date", "TEXT"),                               # `date` is the ex-date
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE dividends ADD COLUMN {col} {defn}")
+        except Exception:
+            pass
+
+    # Per-user tax settings. The 50% CGT discount is an INDIVIDUAL/trust rate; an SMSF
+    # gets 33 1/3% and a company gets none, so it can't stay hardcoded. carry_forward
+    # losses are prior-year net capital losses the ATO requires be applied before the
+    # discount — there was previously no way to enter them at all.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tax_settings (
+            user_id INTEGER PRIMARY KEY,
+            entity_type TEXT NOT NULL DEFAULT 'individual',
+            allocation_method TEXT NOT NULL DEFAULT 'fifo',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS capital_loss_carryforward (
+            user_id INTEGER NOT NULL,
+            fy_start TEXT NOT NULL,
+            amount_aud REAL NOT NULL DEFAULT 0,
+            note TEXT,
+            PRIMARY KEY (user_id, fy_start)
+        )
+    """)
+
+    # Locked sale allocations. Parcel selection is otherwise recomputed on every request,
+    # so changing the method would retroactively rewrite an already-filed year AND shift
+    # the leftover parcels, corrupting every later year's cost base. Once a year is
+    # lodged, which parcels each disposal actually consumed becomes a stored fact.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sale_allocations (
+            user_id INTEGER NOT NULL,
+            sell_txn_id INTEGER NOT NULL,
+            buy_txn_id INTEGER NOT NULL,
+            units REAL NOT NULL,
+            cost_aud REAL NOT NULL,
+            method TEXT NOT NULL,
+            locked_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, sell_txn_id, buy_txn_id)
+        )
+    """)
+
     # snapshots originally had `date` alone as PRIMARY KEY — two users both getting a
     # snapshot on the same date (e.g. the monthly auto-snapshot) would collide and
     # overwrite each other. Same fix as dividends/records/country_overrides above.
@@ -2037,8 +2097,12 @@ def sync_dividends():
                     "INSERT INTO dividends (date, symbol, ticker, exchange, per_share, units, currency, "
                     "gross_amount, gross_amount_aud, franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, source, user_id) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    # franking_credit_aud must be re-set too: it's derived from the gross
+                    # amount, so leaving it out left a stale credit attached to a freshly
+                    # recomputed dividend whenever units or FX changed.
                     "ON CONFLICT(user_id, symbol, date) DO UPDATE SET per_share=excluded.per_share, units=excluded.units, "
                     "gross_amount=excluded.gross_amount, gross_amount_aud=excluded.gross_amount_aud, "
+                    "franking_credit_aud=excluded.franking_credit_aud, "
                     "net_amount_aud=excluded.net_amount_aud",
                     (row["date"], row["symbol"], row["ticker"], row["exchange"], row["per_share"], row["units"],
                      row["currency"], row["gross_amount"], row["gross_amount_aud"], row["franking_pct"],
@@ -2121,7 +2185,8 @@ def _compute_active_holdings(user_id):
                 "cost_aud": 0.0,
                 "cost_local": 0.0,
                 "buys_count": 0,
-                "sells_count": 0
+                "sells_count": 0,
+                "realised_aud": 0.0,
             }
 
         h = holdings[sym]
@@ -2140,6 +2205,12 @@ def _compute_active_holdings(user_id):
             if h["units"] > 0:
                 avg_cost_before = h["cost_aud"] / h["units"]
                 avg_cost_local_before = h["cost_local"] / h["units"]
+                # Realised gain on this sale, average-cost basis: proceeds less the
+                # cost the units carried. `value` is AUD-and-signed (negative for a
+                # sell, brokerage already folded in — see add_transaction), so the
+                # proceeds are -value. Accumulated here rather than derived later
+                # because this is the only place the pre-sale average cost exists.
+                h["realised_aud"] += (-t["value"]) - (qty * avg_cost_before)
                 h["units"] -= qty
                 h["cost_aud"] -= qty * avg_cost_before
                 h["cost_local"] -= qty * avg_cost_local_before
@@ -2224,6 +2295,7 @@ def _compute_active_holdings(user_id):
             "return_pct": round(return_pct, 2),
             "income_aud": income_aud,
             "franking_aud": franking_aud,
+            "realised_aud": round(h["realised_aud"], 2),
             "total_return_aud": round(total_return_aud, 2),
             "daily_change": round(daily_change, 2),
             "daily_change_pct": round(daily_change_pct, 2),
@@ -2318,6 +2390,146 @@ def get_range_performance():
 
     conn.close()
     return jsonify(out)
+
+# Extended-hours quotes are a live call per symbol (~0.5s each), so they're cached briefly.
+# Without this, every dashboard poll would fan out 7 yfinance requests.
+_EXT_HOURS_CACHE = {"at": 0.0, "data": None}
+_EXT_HOURS_TTL = 60
+# Last payload that actually had quotes. Served (flagged stale) when the price feed is
+# unreachable, so a transient DNS or rate-limit blip doesn't blank the card and read as
+# "the market has no data" — which is a different and much more alarming thing.
+_EXT_HOURS_LAST_GOOD = {"at": 0.0, "data": None}
+
+
+@app.route("/api/portfolio/extended-hours", methods=["GET"])
+@jwt_required()
+def extended_hours():
+    """Pre-market or after-hours movement of the portfolio, in AUD.
+
+    Which session is reported depends on the time: Yahoo's marketState drives it, and the
+    card flips between pre-market and after-hours on its own. Only US-listed holdings are
+    covered — yfinance exposes no extended session for the ASX, so ASX holdings are
+    excluded from the total rather than silently counted as flat.
+    """
+    uid = current_user_id()
+    now = time.time()
+    if _EXT_HOURS_CACHE["data"] and now - _EXT_HOURS_CACHE["at"] < _EXT_HOURS_TTL:
+        return jsonify(_EXT_HOURS_CACHE["data"])
+
+    holdings = [h for h in _compute_active_holdings(uid) if h["currency"] == "USD"]
+    total_value = sum(h["value_aud"] for h in _compute_active_holdings(uid))
+    if not holdings:
+        out = {"session": "none", "label": "Extended hours", "total_aud": 0.0, "pct": 0.0,
+               "covered": 0, "total_holdings": 0, "movers": [],
+               "note": "No US-listed holdings — the ASX has no extended session."}
+        _EXT_HOURS_CACHE.update(at=now, data=out)
+        return jsonify(out)
+
+    fx_conn = db()
+    fx_row = fx_conn.execute(
+        "SELECT close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+    fx_conn.close()
+    audusd = float(fx_row[0]) if fx_row else 0.65
+
+    def quote(h):
+        try:
+            info = yf.Ticker(h["symbol"]).info
+            state = info.get("marketState") or ""
+            reg = info.get("regularMarketPrice")
+            pre = info.get("preMarketPrice")
+            post = info.get("postMarketPrice")
+            prev = info.get("regularMarketPreviousClose")
+            # Prefer whichever session is actually live; pre-market wins when both exist.
+            # During the regular session neither exists, so fall back to today's move
+            # against the previous close — otherwise the card is blank 6.5 hours a day.
+            if pre:
+                ext, which, base = pre, "pre", reg
+            elif post:
+                ext, which, base = post, "post", reg
+            elif reg and prev:
+                ext, which, base = reg, "regular", prev
+            else:
+                return {"failed": True}
+            if not base or not ext:
+                return {"failed": True}
+            return {"ticker": h["ticker"], "state": state, "which": which,
+                    "reg": float(base), "ext": float(ext), "units": h["units"]}
+        except Exception:
+            return {"failed": True}
+
+    with ThreadPoolExecutor(max_workers=min(8, len(holdings))) as pool:
+        results = list(pool.map(quote, holdings))
+    quotes = [q for q in results if q and not q.get("failed")]
+    failures = sum(1 for q in results if not q or q.get("failed"))
+
+    if not quotes:
+        # Distinguish "the feed is down" from "there is genuinely nothing to report", and
+        # keep showing the last good figure rather than a bare dash.
+        last = _EXT_HOURS_LAST_GOOD.get("data")
+        if last:
+            out = dict(last)
+            out["stale"] = True
+            out["note"] = (f"Price feed unreachable — showing the last reading from "
+                           f"{datetime.fromtimestamp(_EXT_HOURS_LAST_GOOD['at']):%H:%M}.")
+        else:
+            out = {"session": "unavailable", "label": "Pre / After Market",
+                   "total_aud": 0.0, "pct": 0.0, "covered": 0,
+                   "total_holdings": len(holdings), "movers": [], "stale": True,
+                   "note": f"Couldn't reach the price feed ({failures} of {len(holdings)} "
+                           f"symbols failed). This is a connection problem, not a market state."}
+        _EXT_HOURS_CACHE.update(at=now, data=out)
+        return jsonify(out)
+
+    if any(q["which"] == "pre" for q in quotes):
+        which = "pre"
+    elif any(q["which"] == "post" for q in quotes):
+        which = "post"
+    else:
+        which = "regular"
+    states = {q["state"] for q in quotes}
+    total_aud = 0.0
+    base_aud = 0.0
+    movers = []
+    for q in quotes:
+        delta_native = q["ext"] - q["reg"]
+        delta_aud = delta_native * q["units"] / audusd
+        total_aud += delta_aud
+        base_aud += q["reg"] * q["units"] / audusd
+        movers.append({
+            "ticker": q["ticker"],
+            "delta_aud": round(delta_aud, 2),
+            "pct": round((delta_native / q["reg"] * 100) if q["reg"] else 0.0, 2),
+            "price": round(q["ext"], 2),
+        })
+    movers.sort(key=lambda m: -abs(m["delta_aud"]))
+
+    label = {"pre": "Pre-market", "post": "After hours", "regular": "Market open"}[which]
+    # PREPRE means pre-market hasn't opened yet, so a post price is last night's session.
+    if which == "post" and "PREPRE" in states:
+        label = "After hours (last session)"
+
+    out = {
+        "session": which,
+        "label": label,
+        "as_of": datetime.now().strftime("%H:%M"),
+        "stale": False,
+        "failures": failures,
+        "market_state": sorted(states)[0] if states else "",
+        "total_aud": round(total_aud, 2),
+        # Percent is against the US sleeve that actually has quotes, not whole net worth.
+        "pct": round((total_aud / base_aud * 100) if base_aud else 0.0, 2),
+        "us_value_aud": round(base_aud, 2),
+        "portfolio_value_aud": round(total_value, 2),
+        "covered": len(quotes),
+        "total_holdings": len(holdings),
+        "movers": movers[:5],
+        "note": None,
+    }
+    _EXT_HOURS_CACHE.update(at=now, data=out)
+    _EXT_HOURS_LAST_GOOD.update(at=now, data=out)
+    return jsonify(out)
+
 
 @app.route("/api/portfolio/sparklines", methods=["GET"])
 @jwt_required()
@@ -2492,6 +2704,115 @@ def _build_daily_market_return_series(conn, user_id):
         portfolio_value += units_df[sym] * prices
     return portfolio_value - cash_flow
 
+def _calc_realised_gain(txns: list) -> float:
+    """Lifetime realised gain in AUD, average-cost basis, across every symbol.
+
+    Deliberately a standalone replay rather than a sum over _compute_active_holdings'
+    output: a position sold down to zero is filtered out of that list, so summing it
+    there would lose the gain the moment a holding is fully exited. `value` is AUD and
+    signed — positive on a buy, negative on a sell, brokerage already folded in (see
+    add_transaction) — so sale proceeds are -value.
+    """
+    units, cost, realised = {}, {}, 0.0
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        sym = f"{t['ticker']}:{t.get('exchange', '')}"
+        action = (t.get("action") or "").lower()
+        u = units.get(sym, 0.0)
+        if action == "buy":
+            units[sym] = u + t["units"]
+            cost[sym] = cost.get(sym, 0.0) + t["value"]
+        elif action == "split":
+            units[sym] = u + t["units"]
+        elif action == "sell":
+            if u > 0:
+                avg = cost.get(sym, 0.0) / u
+                realised += (-t["value"]) - (t["units"] * avg)
+                units[sym] = u - t["units"]
+                cost[sym] = cost.get(sym, 0.0) - t["units"] * avg
+            else:
+                units[sym], cost[sym] = 0.0, 0.0
+    return round(realised, 2)
+
+
+def _xirr(flows, tol=1e-7, max_iter=300):
+    """Annualised money-weighted rate from dated (date, amount) flows, or None.
+
+    Bisection rather than Newton: no derivative, no divergence, and a guaranteed
+    answer whenever the NPV actually brackets zero. Returns None when it doesn't
+    (all-positive or all-negative flows), so callers must handle the null instead
+    of being handed a fabricated rate.
+    """
+    if len(flows) < 2:
+        return None
+    t0 = min(d for d, _ in flows)
+
+    def npv(r):
+        return sum(a / (1.0 + r) ** ((d - t0).days / 365.0) for d, a in flows)
+
+    lo, hi = -0.9999, 10.0
+    try:
+        n_lo, n_hi = npv(lo), npv(hi)
+    except (OverflowError, ZeroDivisionError):
+        return None
+    if n_lo * n_hi > 0:
+        return None
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2
+        n_mid = npv(mid)
+        if abs(n_mid) < tol:
+            return mid
+        if n_lo * n_mid <= 0:
+            hi = mid
+        else:
+            lo, n_lo = mid, n_mid
+    return (lo + hi) / 2
+
+
+def _calc_mwr(txns: list, div_rows: list, total_value: float):
+    """Money-weighted (dollar-weighted) return p.a. over the real dated cash flows.
+
+    This replaces the old CAGR, which computed (total_value / cost_of_units_still_held)
+    ** (1/years_since_first_buy) and was wrong on three counts: it ignored every dollar
+    returned by a sale, ignored all dividend income, and treated capital deployed last
+    month as though it had been invested since the first ever buy. On the reference
+    portfolio it reported +4.07% p.a. where the money-weighted rate is +15.96%.
+
+    Returns a dict. `annualised` is False for holding periods under a year, where the
+    figure is a plain cumulative return instead — raising a short period to 1/years
+    explodes (a few percent over two days annualises into the thousands).
+    """
+    buys_sells = [t for t in txns if (t.get("action") or "").lower() in ("buy", "sell")]
+    if not buys_sells or total_value <= 0:
+        return {"pct": None, "years": 0.0, "annualised": False, "pct_ex_income": None}
+
+    # value is AUD and signed: +buy, -sell. A cash flow is its negation — money
+    # leaving the pocket is negative, money coming back is positive.
+    cap = [(date.fromisoformat(t["date"][:10]), -t["value"]) for t in buys_sells]
+    income = [(date.fromisoformat(r["date"][:10]), r["net_amount_aud"]) for r in div_rows]
+    today = date.today()
+    first = min(d for d, _ in cap)
+    years = (today - first).days / 365.25
+
+    terminal = [(today, total_value)]
+    r_all = _xirr(cap + income + terminal)
+    r_ex = _xirr(cap + terminal)
+
+    if years < 1:
+        # Too short to annualise; report cumulative money in vs money out instead.
+        out = sum(-a for _, a in cap if a < 0)
+        back = sum(a for _, a in cap if a > 0) + sum(a for _, a in income) + total_value
+        cum = ((back / out - 1) * 100) if out > 0 else None
+        return {"pct": round(cum, 2) if cum is not None else None,
+                "years": round(years, 2), "annualised": False, "pct_ex_income": None}
+
+    return {
+        "pct": round(r_all * 100, 2) if r_all is not None else None,
+        "years": round(years, 2),
+        "annualised": True,
+        "pct_ex_income": round(r_ex * 100, 2) if r_ex is not None else None,
+    }
+
+
 def _calc_cagr(txns: list, total_value: float, total_cost: float):
     """Return (pct, years, annualised) from first buy date to today.
 
@@ -2630,11 +2951,45 @@ def get_stats():
 
     cagr_pct, cagr_years, cagr_annualised = _calc_cagr(txns, total_value, total_cost)
 
+    # Realised gain, income and the true total return. total_return above is
+    # unrealised only (market value less the cost of units still held), which
+    # understated lifetime profit by everything banked on a sale and every dividend.
+    inc_conn = db()
+    div_rows = [
+        {"date": d, "net_amount_aud": n or 0.0, "franking_credit_aud": f or 0.0}
+        for d, n, f in inc_conn.execute(
+            "SELECT date, net_amount_aud, franking_credit_aud FROM dividends WHERE user_id = ?", (uid,)
+        ).fetchall()
+    ]
+    inc_conn.close()
+    realised_gain = _calc_realised_gain(txns)
+    income_total = round(sum(r["net_amount_aud"] for r in div_rows), 2)
+    franking_total = round(sum(r["franking_credit_aud"] or 0 for r in div_rows), 2)
+    # Australian FY window, bounded at BOTH ends — a lower bound alone counted any
+    # future-dated dividend into the current year.
+    _t = date.today()
+    fy_start = date(_t.year - (1 if _t.month < 7 else 0), 7, 1)
+    fy_end = date(fy_start.year + 1, 6, 30)
+    income_fy = round(sum(r["net_amount_aud"] for r in div_rows
+                          if fy_start.isoformat() <= r["date"][:10] <= fy_end.isoformat()), 2)
+    fy_start = fy_start.isoformat()
+    total_return_all = round(total_return + realised_gain + income_total, 2)
+    mwr = _calc_mwr(txns, div_rows, total_value)
+
     return jsonify({
         "total_value": round(total_value, 2),
         "total_principal": round(total_cost, 2),
         "total_return": round(total_return, 2),
         "total_return_pct": round(total_return_pct, 2),
+        "realised_gain": realised_gain,
+        "income_total": income_total,
+        "franking_total": franking_total,
+        "income_fy": income_fy,
+        "total_return_all": total_return_all,
+        "mwr_pct": mwr["pct"],
+        "mwr_years": mwr["years"],
+        "mwr_annualised": mwr["annualised"],
+        "mwr_pct_ex_income": mwr["pct_ex_income"],
         "best_performer": f"{best_h['ticker']} ({best_h['return_pct']:+.1f}%)",
         "best_performer_pct": round(best_h["return_pct"], 2),
         "worst_performer": f"{worst_h['ticker']} ({worst_h['return_pct']:+.1f}%)",
@@ -2711,6 +3066,73 @@ def _get_latest_portfolio_value(user_id):
             active_value += val
     return total_value, active_value, passive_value
 
+# CGT discount by entity type. 50% is the individual/trust rate; a complying super fund
+# gets one third; companies get no discount at all. Previously hardcoded to 0.5.
+CGT_DISCOUNT_RATES = {"individual": 0.5, "trust": 0.5, "smsf": 1.0 / 3.0, "company": 0.0}
+
+
+def _get_tax_settings(user_id):
+    conn = db()
+    row = conn.execute(
+        "SELECT entity_type, allocation_method FROM tax_settings WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"entity_type": "individual", "allocation_method": "fifo"}
+    entity = row[0] if row[0] in CGT_DISCOUNT_RATES else "individual"
+    method = row[1] if row[1] in ("fifo", "lifo", "hifo") else "fifo"
+    return {"entity_type": entity, "allocation_method": method}
+
+
+def _get_carryforward(user_id, fy_start):
+    """Prior-year net capital loss the user has recorded against this FY."""
+    if not fy_start:
+        return 0.0
+    conn = db()
+    row = conn.execute(
+        "SELECT amount_aud FROM capital_loss_carryforward WHERE user_id = ? AND fy_start = ?",
+        (user_id, fy_start[:10]),
+    ).fetchone()
+    conn.close()
+    return max(0.0, float(row[0])) if row else 0.0
+
+
+def _distribution_capital_gains(user_id, from_date, to_date):
+    """Capital-gain components attributed by trust distributions in the period.
+
+    Australian ETFs distribute realised capital gains inside what the app records as a
+    dividend. They are assessable as CAPITAL GAINS (the discounted portion attracting the
+    CGT discount), not as ordinary income, and were previously omitted from CGT entirely.
+    Also returns tax_deferred, which reduces the cost base rather than being assessable.
+    """
+    conn = db()
+    sql = ("SELECT COALESCE(SUM(cg_discounted_aud),0), COALESCE(SUM(cg_other_aud),0), "
+           "COALESCE(SUM(tax_deferred_aud),0) FROM dividends WHERE user_id = ?")
+    args = [user_id]
+    if from_date:
+        sql += " AND date >= ?"; args.append(from_date)
+    if to_date:
+        sql += " AND date <= ?"; args.append(to_date)
+    d, o, td = conn.execute(sql, args).fetchone()
+    conn.close()
+    return {"discounted": float(d or 0), "other": float(o or 0), "tax_deferred": float(td or 0)}
+
+
+def _load_sale_allocations(user_id):
+    """Locked allocations as {sell_txn_id: [(buy_txn_id, units), ...]} in stored order."""
+    conn = db()
+    rows = conn.execute(
+        "SELECT sell_txn_id, buy_txn_id, units, method FROM sale_allocations "
+        "WHERE user_id = ? ORDER BY sell_txn_id, rowid", (user_id,)
+    ).fetchall()
+    conn.close()
+    locked, method_by_sell = {}, {}
+    for sell_id, buy_id, units, method in rows:
+        locked.setdefault(sell_id, []).append((buy_id, float(units)))
+        method_by_sell[sell_id] = method
+    return locked, method_by_sell
+
+
 def _order_parcels_for_disposal(parcels, method):
     """Return parcels ordered by which should be treated as sold first, per method.
     fifo = oldest first (default, what Sharesight uses unless configured otherwise)
@@ -2732,35 +3154,70 @@ def get_cgt():
     lot tracking (not blended average cost) so the 12-month discount test applies to
     the specific units actually disposed of — a single sale can legitimately be part
     discount-eligible and part not, if it draws from parcels of different ages."""
+    uid = current_user_id()
     from_date = request.args.get("from", "")
     to_date = request.args.get("to", "")
-    method = request.args.get("method", "fifo").lower()
-    if method not in ("fifo", "lifo", "hifo"):
-        method = "fifo"
+    method = request.args.get("method", "").lower()
 
-    txns = load_transactions(current_user_id())
+    settings = _get_tax_settings(uid)
+    if method not in ("fifo", "lifo", "hifo"):
+        method = settings["allocation_method"]
+    discount_rate = CGT_DISCOUNT_RATES.get(settings["entity_type"], 0.5)
+
+    # Prior-year net capital losses. The ATO requires these be applied to gains BEFORE
+    # the discount, and there was previously no way to supply them, so every year was
+    # computed in isolation and net gain was overstated for anyone carrying a loss.
+    prior_losses = request.args.get("prior_losses")
+    if prior_losses is None:
+        prior_losses = _get_carryforward(uid, from_date)
+    else:
+        try:
+            prior_losses = max(0.0, float(prior_losses))
+        except (TypeError, ValueError):
+            prior_losses = 0.0
+
+    def empty(extra_note=None):
+        return jsonify({
+            "gains": [], "total_gain": 0, "gross_gains": 0, "gross_losses": 0,
+            "discounted_gains": 0, "non_discounted_gains": 0,
+            "distribution_gains": 0, "distribution_gains_discounted": 0,
+            "losses_applied": 0, "prior_losses_available": round(prior_losses, 2),
+            "prior_losses_applied": 0, "losses_carried_forward": round(prior_losses, 2),
+            "cgt_discount": 0, "net_gain": 0, "net_capital_loss": 0,
+            "from": from_date, "to": to_date, "method": method,
+            "entity_type": settings["entity_type"], "discount_rate": discount_rate,
+            "warnings": [extra_note] if extra_note else [],
+        })
+
+    txns = load_transactions(uid)
     if not txns:
-        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date, "method": method})
+        return empty()
 
     sells = [t for t in txns if t["action"].lower() == "sell"]
     if from_date:
         sells = [t for t in sells if t["date"] >= from_date]
     if to_date:
         sells = [t for t in sells if t["date"] <= to_date]
-    if not sells:
-        return jsonify({"gains": [], "total_gain": 0, "losses_applied": 0, "cgt_discount": 0, "net_gain": 0, "from": from_date, "to": to_date, "method": method})
+    dist = _distribution_capital_gains(uid, from_date, to_date)
+    if not sells and not (dist["discounted"] or dist["other"]):
+        return empty()
+
+    locked, lock_method = _load_sale_allocations(uid)
 
     txns_sorted = sorted(txns, key=lambda x: x["date"])
     parcels_by_sym = {}  # sym -> list of {date, units, cost_aud} — one entry per buy lot, consumed over time
 
     gains = []
+    warnings = []
     for t in txns_sorted:
         sym = yf_symbol(t["ticker"], t["exchange"])
         parcels = parcels_by_sym.setdefault(sym, [])
         action = t["action"].lower()
 
         if action == "buy":
-            parcels.append({"date": t["date"], "units": t["units"], "cost_aud": t["value"]})
+            # buy_id gives the parcel a stable identity so a locked allocation can name it.
+            parcels.append({"date": t["date"], "units": t["units"], "cost_aud": t["value"],
+                            "buy_id": t.get("id")})
 
         elif action == "split":
             # Scale every existing parcel's units up proportionally, cost basis unchanged
@@ -2777,12 +3234,29 @@ def get_cgt():
 
             in_range = (not from_date or t["date"] >= from_date) and (not to_date or t["date"] <= to_date)
 
-            ordered = _order_parcels_for_disposal(parcels, method)
+            # A locked disposal replays the parcels it actually consumed when the year was
+            # lodged, in that order, ignoring the currently-selected method. Without this,
+            # switching method would rewrite a filed year and shift every later cost base.
+            lock = locked.get(t.get("id"))
+            if lock:
+                by_id = {p.get("buy_id"): p for p in parcels}
+                ordered = [by_id[b] for b, _u in lock if b in by_id]
+                locked_units = {b: u for b, u in lock}
+                effective_method = f"{lock_method.get(t.get('id'), method)} (locked)"
+            else:
+                ordered = _order_parcels_for_disposal(parcels, method)
+                locked_units = None
+                effective_method = method
             remaining = units_to_sell
             for p in ordered:
                 if remaining <= 1e-9:
                     break
+                # A locked allocation dictates the exact units drawn from this parcel.
                 take = min(p["units"], remaining)
+                if locked_units is not None:
+                    take = min(take, locked_units.get(p.get("buy_id"), 0.0))
+                    if take <= 1e-9:
+                        continue
                 per_unit_cost = p["cost_aud"] / p["units"] if p["units"] > 0 else 0
                 slice_cost = take * per_unit_cost
                 slice_proceeds = take * proceeds_per_unit
@@ -2790,7 +3264,10 @@ def get_cgt():
 
                 buy_dt = pd.Timestamp(p["date"])
                 sell_dt = pd.Timestamp(t["date"])
-                held_12m = (sell_dt - buy_dt).days >= 365
+                # MORE than 12 months, not "at least 365 days". The ATO test excludes the
+                # acquisition day: bought 1 Jul 2020, the earliest qualifying disposal is
+                # 2 Jul 2021 — 366 days. `>= 365` granted the 50% discount a day early.
+                held_12m = (sell_dt - buy_dt).days > 365
 
                 if in_range:
                     gains.append({
@@ -2804,38 +3281,364 @@ def get_cgt():
                         "gain": round(slice_gain, 2),
                         "held_12m": held_12m,
                         "discount_eligible": held_12m and slice_gain > 0,
+                        "buy_id": p.get("buy_id"),
+                        "sell_id": t.get("id"),
+                        "locked": bool(lock),
+                        "method": effective_method,
                     })
 
                 p["units"] -= take
                 p["cost_aud"] -= slice_cost
                 remaining -= take
 
+            # Units disposed of with no parcel to draw from. Previously the loop simply
+            # exited and the proceeds vanished from the report with no indication, so a
+            # missing or mis-dated buy silently understated the gain.
+            if remaining > 1e-6 and in_range:
+                warnings.append(
+                    f"{t['ticker']}: sold {remaining:.4f} units on {t['date']} with no matching "
+                    f"purchase parcel — proceeds of "
+                    f"{round(remaining * proceeds_per_unit, 2)} AUD are NOT in this report. "
+                    f"Check for a missing buy transaction."
+                )
+
     # Calculate CGT summary
     total_gain = sum(g["gain"] for g in gains)
     total_losses = sum(g["gain"] for g in gains if g["gain"] < 0)
     total_discountable = sum(g["gain"] for g in gains if g["discount_eligible"])
+    # Trust distributions add capital gains that have no disposal behind them.
+    total_discountable += dist["discounted"]
 
-    # Apply losses first to non-discounted gains, then to discounted
-    losses_remaining = abs(total_losses)
-    discounted_after_losses = max(0, total_discountable - losses_remaining)
-    losses_remaining = max(0, losses_remaining - total_discountable)
+    # Capital losses must be applied BEFORE the 50% discount, and the ATO lets the
+    # taxpayer choose which gains to apply them against. Non-discounted gains first is
+    # always at least as good: a dollar of loss cancels a full taxable dollar there,
+    # versus only fifty cents against a discounted gain. This previously ran the other
+    # way round despite the comment, overstating the taxable gain.
     non_discounted = sum(g["gain"] for g in gains if g["gain"] > 0 and not g["discount_eligible"])
-    non_discounted_after_losses = max(0, non_discounted - losses_remaining)
+    non_discounted += dist["other"]
 
-    cgt_discount = round(discounted_after_losses * 0.5, 2)
-    net_gain = round(discounted_after_losses * 0.5 + non_discounted_after_losses, 2)
-    losses_applied = round(abs(total_losses), 2)
+    # Current-year losses first, then prior-year carried-forward losses. Within each, hit
+    # non-discounted gains before discounted ones: a dollar of loss cancels a full taxable
+    # dollar there, versus only fifty cents against a discounted gain. Verified against
+    # Sharesight, whose net capital gain matches this ordering to the cent.
+    current_losses = abs(total_losses)
+    pool = current_losses + prior_losses
+
+    non_discounted_after = max(0.0, non_discounted - pool)
+    pool = max(0.0, pool - non_discounted)
+
+    discounted_after = max(0.0, total_discountable - pool)
+    pool = max(0.0, pool - total_discountable)
+
+    absorbed = (current_losses + prior_losses) - pool
+    current_applied = min(current_losses, absorbed)
+    prior_applied = max(0.0, absorbed - current_applied)
+
+    cgt_discount = round(discounted_after * discount_rate, 2)
+    net_gain = round(discounted_after * (1 - discount_rate) + non_discounted_after, 2)
+
+    # A loss-making year has no taxable gain AND a loss to carry forward. Reporting only
+    # a floored-at-zero net_gain hid the carry-forward amount the user must record.
+    net_capital_loss = round(pool, 2)
+
+    if len(warnings) == 0 and prior_losses > 0 and prior_applied == 0:
+        warnings.append(
+            f"{prior_losses:,.2f} of prior-year losses were available but no gains "
+            f"remained to absorb them; the full amount still carries forward."
+        )
 
     return jsonify({
         "gains": gains,
+        # total_gain is NET of losses — gross_gains/gross_losses are the reconcilable pair.
         "total_gain": round(total_gain, 2),
-        "losses_applied": losses_applied,
+        "gross_gains": round(sum(g["gain"] for g in gains if g["gain"] > 0), 2),
+        "gross_losses": round(current_losses, 2),
+        "discounted_gains": round(total_discountable, 2),
+        "non_discounted_gains": round(non_discounted, 2),
+        "distribution_gains_discounted": round(dist["discounted"], 2),
+        "distribution_gains_other": round(dist["other"], 2),
+        "tax_deferred_distributions": round(dist["tax_deferred"], 2),
+        "losses_applied": round(current_applied, 2),
+        "prior_losses_available": round(prior_losses, 2),
+        "prior_losses_applied": round(prior_applied, 2),
+        "losses_carried_forward": net_capital_loss,
+        "net_capital_loss": net_capital_loss,
         "cgt_discount": cgt_discount,
         "net_gain": net_gain,
         "from": from_date,
         "to": to_date,
         "method": method,
+        "entity_type": settings["entity_type"],
+        "discount_rate": discount_rate,
+        "warnings": warnings,
     })
+@app.route("/api/tax/income", methods=["GET"])
+@jwt_required()
+def get_taxable_income():
+    """Australian taxable income report for a date range — the counterpart to /api/cgt.
+
+    Assessable dividend income is the GROSS amount plus the franking credit, not the net
+    cash received. The app previously only ever surfaced net_amount_aud (gross less foreign
+    withholding), which under-declares foreign income and loses the foreign tax offset the
+    user is entitled to claim.
+
+    Trust distributions are split into their attribution components: the capital-gains
+    parts belong in the CGT report (and are excluded here to avoid double counting), while
+    tax-deferred amounts are not assessable at all — they reduce the cost base.
+    """
+    uid = current_user_id()
+    from_date = request.args.get("from", "")
+    to_date = request.args.get("to", "")
+
+    conn = db()
+    sql = ("SELECT date, ticker, symbol, exchange, currency, gross_amount, gross_amount_aud, "
+           "franking_pct, franking_credit_aud, withholding_tax_pct, net_amount_aud, "
+           "cg_discounted_aud, cg_other_aud, tax_deferred_aud, foreign_income_aud, "
+           "foreign_tax_paid_aud FROM dividends WHERE user_id = ?")
+    args = [uid]
+    if from_date:
+        sql += " AND date >= ?"; args.append(from_date)
+    if to_date:
+        sql += " AND date <= ?"; args.append(to_date)
+    rows = conn.execute(sql + " ORDER BY date", args).fetchall()
+    conn.close()
+
+    cols = ["date", "ticker", "symbol", "exchange", "currency", "gross_amount",
+            "gross_amount_aud", "franking_pct", "franking_credit_aud",
+            "withholding_tax_pct", "net_amount_aud", "cg_discounted_aud", "cg_other_aud",
+            "tax_deferred_aud", "foreign_income_aud", "foreign_tax_paid_aud"]
+    items, agg = [], {
+        "gross_income": 0.0, "franking_credits": 0.0, "withholding_tax": 0.0,
+        "net_cash": 0.0, "franked_income": 0.0, "unfranked_income": 0.0,
+        "foreign_income": 0.0, "foreign_tax_offsets": 0.0,
+        "capital_gain_distributions": 0.0, "tax_deferred": 0.0,
+    }
+
+    for r in rows:
+        d = dict(zip(cols, r))
+        for k in cols[5:]:
+            d[k] = float(d[k] or 0)
+
+        # Components that are NOT ordinary income: capital gains belong to the CGT
+        # report, tax-deferred amounts reduce cost base and are never assessable.
+        cg = d["cg_discounted_aud"] + d["cg_other_aud"]
+        income_aud = max(0.0, d["gross_amount_aud"] - cg - d["tax_deferred_aud"])
+
+        is_foreign = (d["currency"] or "AUD").upper() != "AUD"
+        franked = income_aud * (d["franking_pct"] / 100.0)
+        withheld = d["gross_amount_aud"] * (d["withholding_tax_pct"] / 100.0)
+        foreign_tax = d["foreign_tax_paid_aud"] or (withheld if is_foreign else 0.0)
+
+        agg["gross_income"] += income_aud
+        agg["franking_credits"] += d["franking_credit_aud"]
+        agg["withholding_tax"] += withheld
+        agg["net_cash"] += d["net_amount_aud"]
+        agg["franked_income"] += franked
+        agg["unfranked_income"] += income_aud - franked
+        agg["foreign_income"] += d["foreign_income_aud"] or (income_aud if is_foreign else 0.0)
+        agg["foreign_tax_offsets"] += foreign_tax
+        agg["capital_gain_distributions"] += cg
+        agg["tax_deferred"] += d["tax_deferred_aud"]
+
+        items.append({
+            "date": d["date"], "ticker": d["ticker"], "exchange": d["exchange"],
+            "currency": d["currency"],
+            "income_aud": round(income_aud, 2),
+            "franking_credit_aud": round(d["franking_credit_aud"], 2),
+            "withholding_tax_aud": round(withheld, 2),
+            "net_cash_aud": round(d["net_amount_aud"], 2),
+            "capital_gain_aud": round(cg, 2),
+            "tax_deferred_aud": round(d["tax_deferred_aud"], 2),
+            "foreign": is_foreign,
+        })
+
+    out = {k: round(v, 2) for k, v in agg.items()}
+    # Grossed-up: what actually goes in the return. Franking credits are assessable income
+    # and then claimed back as a credit — omitting them under-declares income.
+    out["assessable_income"] = round(agg["gross_income"] + agg["franking_credits"], 2)
+    out["items"] = items
+    out["from"] = from_date
+    out["to"] = to_date
+    out["components_entered"] = bool(agg["capital_gain_distributions"] or agg["tax_deferred"])
+    return jsonify(out)
+
+
+@app.route("/api/tax/settings", methods=["GET", "POST"])
+@jwt_required()
+def tax_settings():
+    uid = current_user_id()
+    if request.method == "GET":
+        s = _get_tax_settings(uid)
+        s["discount_rate"] = CGT_DISCOUNT_RATES.get(s["entity_type"], 0.5)
+        s["entity_options"] = list(CGT_DISCOUNT_RATES.keys())
+        return jsonify(s)
+    data = request.json or {}
+    entity = data.get("entity_type", "individual")
+    method = data.get("allocation_method", "fifo")
+    if entity not in CGT_DISCOUNT_RATES:
+        return jsonify({"error": f"entity_type must be one of {list(CGT_DISCOUNT_RATES)}"}), 400
+    if method not in ("fifo", "lifo", "hifo"):
+        return jsonify({"error": "allocation_method must be fifo, lifo or hifo"}), 400
+    conn = db()
+    conn.execute(
+        "INSERT INTO tax_settings (user_id, entity_type, allocation_method, updated_at) "
+        "VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET entity_type=excluded.entity_type, "
+        "allocation_method=excluded.allocation_method, updated_at=excluded.updated_at",
+        (uid, entity, method, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "entity_type": entity, "allocation_method": method,
+                    "discount_rate": CGT_DISCOUNT_RATES[entity]})
+
+
+@app.route("/api/tax/lock", methods=["GET", "POST", "DELETE"])
+@jwt_required()
+def sale_allocation_lock():
+    """Freeze which parcels each disposal consumed, up to and including a date.
+
+    Lodge FY2025 under LIFO, then switch to FIFO next year, and without this the FY2025
+    figures silently change — and so do the leftover parcels, which corrupts FY2026's cost
+    base too. Locking records the actual allocation so a later method change only affects
+    disposals after the locked date.
+    """
+    uid = current_user_id()
+    conn = db()
+
+    if request.method == "GET":
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT sell_txn_id), MAX(locked_at) FROM sale_allocations WHERE user_id = ?",
+            (uid,)).fetchone()
+        rows = conn.execute(
+            "SELECT sa.sell_txn_id, t.date, t.ticker, sa.method, COUNT(*), SUM(sa.units) "
+            "FROM sale_allocations sa JOIN transactions t ON t.id = sa.sell_txn_id "
+            "WHERE sa.user_id = ? GROUP BY sa.sell_txn_id ORDER BY t.date", (uid,)).fetchall()
+        conn.close()
+        return jsonify({
+            "locked_disposals": row[0] or 0,
+            "last_locked_at": row[1],
+            "locked_to": max((r[1] for r in rows), default=None),
+            "disposals": [{"sell_id": r[0], "date": r[1], "ticker": r[2], "method": r[3],
+                           "parcels": r[4], "units": round(r[5], 4)} for r in rows],
+        })
+
+    if request.method == "DELETE":
+        # Unlocking re-exposes filed years to method changes, so it is explicit and loud.
+        to_date = request.args.get("to", "")
+        if to_date:
+            conn.execute(
+                "DELETE FROM sale_allocations WHERE user_id = ? AND sell_txn_id IN "
+                "(SELECT id FROM transactions WHERE user_id = ? AND date <= ?)", (uid, uid, to_date))
+        else:
+            conn.execute("DELETE FROM sale_allocations WHERE user_id = ?", (uid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "unlocked_to": to_date or "all"})
+
+    conn.close()
+    data = request.json or {}
+    to_date = (data.get("to") or request.args.get("to") or "")[:10]
+    if not to_date:
+        return jsonify({"error": "to (YYYY-MM-DD) required — the last date to lock"}), 400
+
+    # Recompute allocations under the CURRENT method, then persist them for every disposal
+    # up to the cut-off. Anything already locked is left as-is — re-locking must never
+    # silently rewrite a year that was filed under a different method.
+    settings = _get_tax_settings(uid)
+    method = data.get("method") or settings["allocation_method"]
+    if method not in ("fifo", "lifo", "hifo"):
+        return jsonify({"error": "method must be fifo, lifo or hifo"}), 400
+
+    already, _ = _load_sale_allocations(uid)
+    txns = load_transactions(uid)
+    parcels_by_sym, to_store = {}, []
+
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        parcels = parcels_by_sym.setdefault(sym, [])
+        action = (t["action"] or "").lower()
+        if action == "buy":
+            parcels.append({"date": t["date"], "units": t["units"], "cost_aud": t["value"],
+                            "buy_id": t.get("id")})
+        elif action == "split":
+            tot = sum(p["units"] for p in parcels)
+            if tot > 1e-9:
+                ratio = (tot + t["units"]) / tot
+                for p in parcels:
+                    p["units"] *= ratio
+        elif action == "sell":
+            sell_id = t.get("id")
+            prior = already.get(sell_id)
+            if prior:
+                # Replay the existing lock so downstream parcels stay consistent.
+                by_id = {p.get("buy_id"): p for p in parcels}
+                for buy_id, units in prior:
+                    p = by_id.get(buy_id)
+                    if not p or p["units"] <= 1e-9:
+                        continue
+                    take = min(p["units"], units)
+                    p["cost_aud"] -= take * (p["cost_aud"] / p["units"])
+                    p["units"] -= take
+                continue
+            remaining = t["units"]
+            for p in _order_parcels_for_disposal(parcels, method):
+                if remaining <= 1e-9:
+                    break
+                take = min(p["units"], remaining)
+                per_unit = p["cost_aud"] / p["units"] if p["units"] > 0 else 0
+                if t["date"] <= to_date:
+                    to_store.append((uid, sell_id, p.get("buy_id"), take, take * per_unit, method))
+                p["units"] -= take
+                p["cost_aud"] -= take * per_unit
+                remaining -= take
+
+    conn = db()
+    now = datetime.now().isoformat()
+    for uid_, sell_id, buy_id, units, cost, m in to_store:
+        conn.execute(
+            "INSERT INTO sale_allocations (user_id, sell_txn_id, buy_txn_id, units, cost_aud, method, locked_at) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(user_id, sell_txn_id, buy_txn_id) DO NOTHING",
+            (uid_, sell_id, buy_id, units, cost, m, now))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "locked_to": to_date, "method": method,
+                    "allocations_written": len(to_store),
+                    "disposals_already_locked": len(already)})
+
+
+@app.route("/api/tax/carryforward", methods=["GET", "POST"])
+@jwt_required()
+def carryforward_losses():
+    """Prior-year net capital losses the user is bringing into a financial year."""
+    uid = current_user_id()
+    if request.method == "GET":
+        conn = db()
+        rows = conn.execute(
+            "SELECT fy_start, amount_aud, note FROM capital_loss_carryforward "
+            "WHERE user_id = ? ORDER BY fy_start", (uid,)
+        ).fetchall()
+        conn.close()
+        return jsonify([{"fy_start": r[0], "amount_aud": r[1], "note": r[2]} for r in rows])
+    data = request.json or {}
+    fy_start = (data.get("fy_start") or "")[:10]
+    if not fy_start:
+        return jsonify({"error": "fy_start required (YYYY-MM-DD, the first day of the FY)"}), 400
+    try:
+        amount = max(0.0, float(data.get("amount_aud", 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount_aud must be a number"}), 400
+    conn = db()
+    conn.execute(
+        "INSERT INTO capital_loss_carryforward (user_id, fy_start, amount_aud, note) "
+        "VALUES (?,?,?,?) ON CONFLICT(user_id, fy_start) DO UPDATE SET "
+        "amount_aud=excluded.amount_aud, note=excluded.note",
+        (uid, fy_start, amount, data.get("note", "")),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "fy_start": fy_start, "amount_aud": amount})
+
+
 @app.route("/api/snapshots", methods=["GET"])
 @jwt_required()
 def get_snapshots():

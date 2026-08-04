@@ -24,11 +24,26 @@ export interface Stats {
   day_pl: number
   day_pl_pct: number
   cost_basis: number
+  /** Legacy cost-basis CAGR. Understates badly — ignores sales and dividends and
+   *  stretches all capital back to the first buy. No card reads it; use mwr_pct. */
   cagr: number
-  /** Years since first buy. Under 1, `cagr` is a plain cumulative return. */
   cagr_years: number
-  /** False when the period is too short to annualise meaningfully. */
   cagr_annualised: boolean
+  /** Money-weighted (XIRR) return p.a. over the real dated cash flows. Null when
+   *  the flows don't bracket a root or there's no history. */
+  mwr_pct: number | null
+  mwr_years: number
+  /** False under one year, where mwr_pct is a plain cumulative return instead. */
+  mwr_annualised: boolean
+  mwr_pct_ex_income: number | null
+  /** Lifetime realised gain, average-cost basis, including closed positions. */
+  realised_gain: number
+  income_total: number
+  franking_total: number
+  /** Income received since 1 July (Australian FY). */
+  income_fy: number
+  /** unrealised + realised + income. */
+  total_return_all: number
   dividend_income: number
 }
 
@@ -148,11 +163,66 @@ export interface CGTGain {
 
 export interface CGTResult {
   gains: CGTGain[]
+  /** NET of losses. Use gross_gains/gross_losses for a reconcilable pair. */
   total_gain: number
+  gross_gains: number
+  gross_losses: number
+  discounted_gains: number
+  non_discounted_gains: number
+  /** Capital gains attributed by trust (ETF) distributions, from annual tax statements. */
+  distribution_gains_discounted: number
+  distribution_gains_other: number
+  /** Reduces cost base rather than being assessable. */
+  tax_deferred_distributions: number
   losses_applied: number
+  prior_losses_available: number
+  prior_losses_applied: number
+  losses_carried_forward: number
+  net_capital_loss: number
   cgt_discount: number
   net_gain: number
   method: 'fifo' | 'lifo' | 'hifo'
+  entity_type: string
+  discount_rate: number
+  warnings: string[]
+}
+
+export interface TaxIncomeItem {
+  date: string
+  ticker: string
+  exchange: string
+  currency: string
+  income_aud: number
+  franking_credit_aud: number
+  withholding_tax_aud: number
+  net_cash_aud: number
+  capital_gain_aud: number
+  tax_deferred_aud: number
+  foreign: boolean
+}
+
+export interface TaxIncomeResult {
+  gross_income: number
+  franking_credits: number
+  /** gross_income + franking_credits — what goes in the return. */
+  assessable_income: number
+  withholding_tax: number
+  net_cash: number
+  franked_income: number
+  unfranked_income: number
+  foreign_income: number
+  foreign_tax_offsets: number
+  capital_gain_distributions: number
+  tax_deferred: number
+  components_entered: boolean
+  items: TaxIncomeItem[]
+}
+
+export interface TaxSettings {
+  entity_type: string
+  allocation_method: 'fifo' | 'lifo' | 'hifo'
+  discount_rate: number
+  entity_options: string[]
 }
 
 export interface SyncStatus {
