@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Check } from 'lucide-react'
 
 /**
  * Pull down at the top of the page to force a price refresh.
@@ -21,11 +21,16 @@ export default function PullToRefresh({
   onRefresh,
   children,
 }: {
-  onRefresh: () => Promise<unknown>
+  /** Return a short string to confirm what happened; it shows for a couple of seconds. */
+  onRefresh: () => Promise<string | void>
   children: React.ReactNode
 }) {
   const [pull, setPull] = useState(0)
   const [busy, setBusy] = useState(false)
+  // Without this the indicator collapses the instant the request lands and you get no
+  // confirmation at all — which reads as "nothing happened", especially outside market
+  // hours when no number on the page actually moves.
+  const [done, setDone] = useState<string | null>(null)
   const startY = useRef<number | null>(null)
   const armed = useRef(false)
 
@@ -69,14 +74,18 @@ export default function PullToRefresh({
     if (pull < THRESHOLD || busy) { setPull(0); return }
     setBusy(true)
     setPull(THRESHOLD)
+    setDone(null)
     try {
-      await onRefresh()
+      const msg = await onRefresh()
+      setDone(typeof msg === 'string' ? msg : 'Prices updated')
     } catch {
-      // Swallowed on purpose: the mutation surfaces its own error state, and a
-      // rejected promise here would leave the spinner stuck.
+      // The mutation surfaces its own error state; a rejected promise here must not
+      // leave the spinner stuck, so still report something.
+      setDone("Couldn't reach the price feed")
     } finally {
       setBusy(false)
       setPull(0)
+      window.setTimeout(() => setDone(null), 2600)
     }
   }, [pull, busy, onRefresh])
 
@@ -96,7 +105,7 @@ export default function PullToRefresh({
   }, [onTouchStart, onTouchMove, onTouchEnd])
 
   const ready = pull >= THRESHOLD
-  const visible = pull > 4 || busy
+  const visible = pull > 4 || busy || done !== null
 
   return (
     <div>
@@ -104,20 +113,24 @@ export default function PullToRefresh({
         aria-hidden={!visible}
         className="flex items-center justify-center gap-2 overflow-hidden transition-[height] duration-150"
         style={{
-          height: visible ? Math.max(pull, busy ? THRESHOLD : 0) : 0,
-          opacity: busy ? 1 : Math.min(1, pull / THRESHOLD),
+          height: visible ? Math.max(pull, busy || done ? THRESHOLD : 0) : 0,
+          opacity: busy || done ? 1 : Math.min(1, pull / THRESHOLD),
         }}
       >
-        <RefreshCw
-          size={16}
-          className={busy ? 'animate-spin' : ''}
-          style={{
-            color: ready || busy ? 'var(--accent)' : 'var(--text-muted)',
-            transform: busy ? undefined : `rotate(${(pull / THRESHOLD) * 180}deg)`,
-          }}
-        />
-        <span className="text-xs" style={{ color: ready || busy ? 'var(--accent)' : 'var(--text-muted)' }}>
-          {busy ? 'Refreshing prices…' : ready ? 'Release to refresh' : 'Pull to refresh'}
+        {done ? (
+          <Check size={16} style={{ color: 'var(--accent)' }} />
+        ) : (
+          <RefreshCw
+            size={16}
+            className={busy ? 'animate-spin' : ''}
+            style={{
+              color: ready || busy ? 'var(--accent)' : 'var(--text-muted)',
+              transform: busy ? undefined : `rotate(${(pull / THRESHOLD) * 180}deg)`,
+            }}
+          />
+        )}
+        <span className="text-xs" style={{ color: ready || busy || done ? 'var(--accent)' : 'var(--text-muted)' }}>
+          {done ?? (busy ? 'Refreshing prices…' : ready ? 'Release to refresh' : 'Pull to refresh')}
         </span>
       </div>
       {children}

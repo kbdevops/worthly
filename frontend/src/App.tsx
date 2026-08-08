@@ -79,7 +79,13 @@ export default function App() {
         />
 
         <main className="flex-1 p-4 md:p-6 overflow-auto">
-          <PullToRefresh onRefresh={() => refreshPrices.mutateAsync()}>
+          <PullToRefresh onRefresh={async () => {
+            const r = await refreshPrices.mutateAsync()
+            // Say when the market is shut, otherwise a pull that changes nothing looks broken.
+            return r.market_active
+              ? `Prices updated · ${r.symbols_refreshed}/${r.symbols_total} symbols`
+              : `Market closed · showing last close (${r.symbols_refreshed}/${r.symbols_total})`
+          }}>
             {activeTab === 'dashboard' && <Dashboard />}
             {activeTab === 'holdings' && <Holdings />}
             {activeTab === 'tax' && <Tax />}
