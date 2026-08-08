@@ -219,6 +219,21 @@ const FULL_WIDGET_H = 560
 // and shifts back a day in eastern timezones.
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
+/** Phone-width, for the handful of places where a Tailwind class can't help because the
+ *  DATA has to change rather than the styling. Matches Tailwind's `md` breakpoint. */
+function useIsNarrow(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches,
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)')
+    const on = () => setNarrow(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return narrow
+}
+
 /** "2026-05-01" -> "1 May" */
 const dayMonth = (iso: string): string => {
   const [, m, d] = iso.split('-').map(Number)
@@ -816,16 +831,27 @@ export default function Dashboard() {
       }))
     : []
 
-  // Indices of the biggest gain and biggest loss among completed months only.
+  // On a phone the full history is not a chart, it is a smear: 66 bars in the ~285px of
+  // plot a 375px screen leaves works out at 2px per bar with 0.7px gaps. The last 18
+  // months at ~13px each is legible, and the whole series is still there on a wider
+  // screen. Recomputed on resize so rotating the phone re-decides.
+  const narrow = useIsNarrow()
+  const mcVisible = useMemo(
+    () => (narrow && mcData.length > 18 ? mcData.slice(-18) : mcData),
+    [mcData, narrow],
+  )
+
+  // Biggest gain and biggest loss among completed months — of what is actually drawn, so
+  // the annotation never points off-chart at a month the reader cannot see.
   const { bestIdx, worstIdx } = useMemo(() => {
     let b = -1, w = -1
-    mcData.forEach((d, i) => {
+    mcVisible.forEach((d, i) => {
       if (d.mtd) return
-      if (b < 0 || d.change > mcData[b].change) b = i
-      if (w < 0 || d.change < mcData[w].change) w = i
+      if (b < 0 || d.change > mcVisible[b].change) b = i
+      if (w < 0 || d.change < mcVisible[w].change) w = i
     })
-    return { bestIdx: b, worstIdx: mcData[w]?.change < 0 ? w : -1 }
-  }, [mcData])
+    return { bestIdx: b, worstIdx: mcVisible[w]?.change < 0 ? w : -1 }
+  }, [mcVisible])
 
   const holdingsData = portfolio
     ? [...portfolio]
@@ -1303,11 +1329,16 @@ export default function Dashboard() {
       case 'monthly':
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
-            <div className="flex items-center justify-between mb-4">
+            {/* Stacks on a phone: side by side, the title wrapped to two lines and the
+                meta to two more, eating a quarter of the card before the chart began. */}
+            <div className="flex flex-col gap-0.5 mb-4 md:flex-row md:items-center md:justify-between">
               <p className="text-sm font-medium text-slate-300">Monthly Change</p>
-              <div className="flex items-center gap-3 text-[10px] text-slate-600">
-                <span>{mcData.length} months · best and worst annotated</span>
-                {mcData.some(d => d.mtd) && (
+              <div className="flex items-center gap-3 text-[10px] text-slate-600 whitespace-nowrap">
+                <span>
+                  {mcVisible.length} months{narrow && mcVisible.length < mcData.length ? ' (latest)' : ''}
+                  <span className="hidden md:inline"> · best and worst annotated</span>
+                </span>
+                {mcVisible.some(d => d.mtd) && (
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#10b981', opacity: 0.45 }} />
                     month-to-date
@@ -1318,19 +1349,23 @@ export default function Dashboard() {
             {/* min-h-0 so the flex child can actually shrink and let the chart fill the card */}
             <div className="flex-1 min-h-0">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={mcData} margin={{ top: 26, right: 12, left: 0, bottom: 0 }}>
+                {/* right margin carries the final bar's annotation: "MTD +$23k" is wider than a
+                    bar, and at right: 12 it was clipped to "MTD +$23". */}
+                <BarChart data={mcVisible} margin={{ top: 26, right: 46, left: 0, bottom: 0 }}>
                   <XAxis
                     dataKey="label"
                     tick={{ fill: '#64748b', fontSize: 11 }}
                     tickLine={false}
                     axisLine={false}
                   />
-                  <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
+                  {/* Sign before the symbol: the naive template renders -35000 as "$-35k". */}
+                  <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false}
+                    tickFormatter={v => (v < 0 ? '−$' : '$') + Math.abs(v / 1000).toFixed(0) + 'k'} />
                   <Tooltip
                     cursor={{ fill: 'rgba(148, 163, 184, 0.10)' }}
                     content={({ active, payload }) => {
                       if (!active || !payload?.length) return null
-                      const d = payload[0].payload as typeof mcData[0]
+                      const d = payload[0].payload as typeof mcVisible[0]
                       return (
                         <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
                           <p className="text-slate-400 text-[11px]">
@@ -1354,7 +1389,7 @@ export default function Dashboard() {
                     }}
                   />
                   <Bar dataKey="change" radius={4}>
-                    {mcData.map((d, i) => (
+                    {mcVisible.map((d, i) => (
                       <Cell key={i}
                         fill={d.change >= 0 ? '#10b981' : '#ef4444'}
                         // The in-progress month is drawn faded so a part-month total can't be
@@ -1371,7 +1406,7 @@ export default function Dashboard() {
                       content={props => {
                         const { index: i, x, y, width: w, height: h } = props as unknown as
                           { index: number; x: number; y: number; width: number; height: number }
-                        const d = mcData[i]
+                        const d = mcVisible[i]
                         if (!d || (i !== bestIdx && i !== worstIdx && !d.mtd)) return null
                         const up = d.change >= 0
                         // Recharts reports a NEGATIVE height for downward bars, so y is the
@@ -1381,18 +1416,27 @@ export default function Dashboard() {
                         // fares no better — it clips ~3px into the bar.
                         const top = Math.min(y, y + h), bottom = Math.max(y, y + h)
                         const ty = up ? top - 7 : bottom + 15
-                        const colour = d.mtd ? '#94a3b8' : up ? '#34d399' : '#f87171'
-                        // The last bar sits against the plot's right edge, so a centred
-                        // label overruns it — "MTD +$23k" rendered as "MTD +$23". Anchor
-                        // the final one from its right edge so it grows inward instead.
-                        const atEdge = i === mcData.length - 1
+                        const colour = d.mtd ? '#e2e8f0' : up ? '#34d399' : '#f87171'
+                        const text = (d.mtd ? 'MTD ' : '') +
+                          (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'
+                        // A backing plate, because an annotation is far wider than the bar it
+                        // belongs to and will cross whatever tall neighbour sits beside it —
+                        // "MTD +$23k" was landing on a full-height green bar and vanishing.
+                        // Sized from character count: SVG text cannot be measured before it
+                        // is laid out, and a slightly generous plate is harmless.
+                        const tw = text.length * 6.4
                         return (
-                          <text x={atEdge ? x + w : x + w / 2} y={ty}
-                            textAnchor={atEdge ? 'end' : 'middle'}
-                            fill={colour} fontSize={11} fontWeight={600}>
-                            {(d.mtd ? 'MTD ' : '') +
-                              (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'}
-                          </text>
+                          <g>
+                            <rect
+                              x={x + w / 2 - tw / 2 - 5} y={ty - 11}
+                              width={tw + 10} height={15} rx={3}
+                              fill="rgba(2, 6, 23, 0.82)"
+                            />
+                            <text x={x + w / 2} y={ty} textAnchor="middle"
+                              fill={colour} fontSize={11} fontWeight={600}>
+                              {text}
+                            </text>
+                          </g>
                         )
                       }}
                     />
