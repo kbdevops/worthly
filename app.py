@@ -3047,6 +3047,104 @@ def _calc_realised_gain(txns: list) -> float:
     return round(realised, 2)
 
 
+def _compute_closed_positions(user_id):
+    """Positions sold down to zero — invisible in the holdings list, but not gone.
+
+    _compute_active_holdings skips anything with no units left, which is right for a
+    "what do I own" view but means a fully exited position disappears completely. Selling
+    out of VAS removed a 60-trade, five-year holding with $50,056.86 of realised gain and
+    $28,999.22 of dividends from every screen, even though the money still counts in the
+    portfolio totals.
+
+    Average-cost basis, matching _calc_realised_gain, so the per-position realised figures
+    here sum to the realised_gain reported in /api/stats.
+    """
+    txns = load_transactions(user_id)
+    if not txns:
+        return []
+
+    conn = db()
+    income = dict(conn.execute(
+        "SELECT ticker, COALESCE(SUM(net_amount_aud), 0) FROM dividends WHERE user_id = ? GROUP BY ticker",
+        (user_id,)
+    ).fetchall())
+    franking = dict(conn.execute(
+        "SELECT ticker, COALESCE(SUM(franking_credit_aud), 0) FROM dividends WHERE user_id = ? GROUP BY ticker",
+        (user_id,)
+    ).fetchall())
+    conn.close()
+
+    pos = {}
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        key = t["ticker"]
+        p = pos.setdefault(key, {
+            "ticker": key, "exchange": t.get("exchange", ""),
+            "name": t.get("name") or key, "currency": t.get("currency") or "AUD",
+            "units": 0.0, "cost": 0.0, "invested": 0.0, "proceeds": 0.0,
+            "realised": 0.0, "buys": 0, "sells": 0,
+            "first_date": t["date"], "last_date": t["date"],
+        })
+        p["last_date"] = t["date"]
+        action = (t.get("action") or "").lower()
+        if action == "buy":
+            p["units"] += t["units"]
+            p["cost"] += t["value"]
+            p["invested"] += t["value"]
+            p["buys"] += 1
+        elif action == "split":
+            p["units"] += t["units"]
+        elif action == "sell":
+            if p["units"] > 0:
+                avg = p["cost"] / p["units"]
+                proceeds = -t["value"]
+                p["realised"] += proceeds - (t["units"] * avg)
+                p["proceeds"] += proceeds
+                p["cost"] -= t["units"] * avg
+                p["units"] -= t["units"]
+            p["sells"] += 1
+
+    out = []
+    for p in pos.values():
+        # Closed means nothing left AND it was actually sold — not merely never bought.
+        if p["units"] > 1e-5 or p["sells"] == 0:
+            continue
+        inc = round(float(income.get(p["ticker"], 0.0)), 2)
+        realised = round(p["realised"], 2)
+        out.append({
+            "ticker": p["ticker"],
+            "exchange": p["exchange"],
+            "name": p["name"],
+            "currency": p["currency"],
+            "invested": round(p["invested"], 2),
+            "proceeds": round(p["proceeds"], 2),
+            "realised_aud": realised,
+            "income_aud": inc,
+            "franking_aud": round(float(franking.get(p["ticker"], 0.0)), 2),
+            "total_return_aud": round(realised + inc, 2),
+            "return_pct": round(realised / p["invested"] * 100, 2) if p["invested"] > 0 else None,
+            "buys_count": p["buys"],
+            "sells_count": p["sells"],
+            "first_date": p["first_date"],
+            "closed_date": p["last_date"],
+            "held_days": (date.fromisoformat(p["last_date"][:10]) - date.fromisoformat(p["first_date"][:10])).days,
+        })
+    out.sort(key=lambda x: x["closed_date"], reverse=True)
+    return out
+
+
+@app.route("/api/portfolio/closed", methods=["GET"])
+@jwt_required()
+def get_closed_positions():
+    """Fully-exited positions, newest close first."""
+    rows = _compute_closed_positions(current_user_id())
+    return jsonify({
+        "positions": rows,
+        "total_realised": round(sum(r["realised_aud"] for r in rows), 2),
+        "total_income": round(sum(r["income_aud"] for r in rows), 2),
+        "total_return": round(sum(r["total_return_aud"] for r in rows), 2),
+    })
+
+
 def _xirr(flows, tol=1e-7, max_iter=300):
     """Annualised money-weighted rate from dated (date, amount) flows, or None.
 

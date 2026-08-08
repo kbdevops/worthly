@@ -148,6 +148,32 @@ export interface Snapshot {
   cash: number
 }
 
+export interface ClosedPosition {
+  ticker: string
+  exchange: string
+  name: string
+  currency: string
+  invested: number
+  proceeds: number
+  realised_aud: number
+  income_aud: number
+  franking_aud: number
+  total_return_aud: number
+  return_pct: number | null
+  buys_count: number
+  sells_count: number
+  first_date: string
+  closed_date: string
+  held_days: number
+}
+
+export interface ClosedPositionsResult {
+  positions: ClosedPosition[]
+  total_realised: number
+  total_income: number
+  total_return: number
+}
+
 export interface CGTGain {
   ticker: string
   name: string

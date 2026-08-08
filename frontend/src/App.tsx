@@ -23,8 +23,12 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'sync', label: 'Data Sync' },
 ]
 
+import PullToRefresh from './components/ui/PullToRefresh'
+import { useRefreshPrices } from './hooks/useApi'
+
 export default function App() {
   const { isAuthed } = useAuth()
+  const refreshPrices = useRefreshPrices()
   const [activeTab, setActiveTab] = useState<TabId>(() => {
     const saved = localStorage.getItem('activeTab') as TabId
     const valid: TabId[] = ['dashboard', 'holdings', 'tax', 'milestones', 'sync', 'dividends', 'compounder']
@@ -75,13 +79,15 @@ export default function App() {
         />
 
         <main className="flex-1 p-4 md:p-6 overflow-auto">
-          {activeTab === 'dashboard' && <Dashboard />}
-          {activeTab === 'holdings' && <Holdings />}
-          {activeTab === 'tax' && <Tax />}
-          {activeTab === 'milestones' && <Milestones />}
-          {activeTab === 'sync' && <Sync />}
-          {activeTab === 'dividends' && <Dividends />}
-          {activeTab === 'compounder' && <Compounder />}
+          <PullToRefresh onRefresh={() => refreshPrices.mutateAsync()}>
+            {activeTab === 'dashboard' && <Dashboard />}
+            {activeTab === 'holdings' && <Holdings />}
+            {activeTab === 'tax' && <Tax />}
+            {activeTab === 'milestones' && <Milestones />}
+            {activeTab === 'sync' && <Sync />}
+            {activeTab === 'dividends' && <Dividends />}
+            {activeTab === 'compounder' && <Compounder />}
+          </PullToRefresh>
         </main>
       </div>
     </div>

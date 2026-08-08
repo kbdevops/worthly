@@ -4,6 +4,7 @@ import type {
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
   CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
   CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
+  ClosedPositionsResult,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
 import { apiUrl } from '../lib/apiBase'
@@ -111,6 +112,25 @@ export const useSaveCountryOverrides = () => {
 
 export const usePortfolio = () =>
   useQuery({ queryKey: ['portfolio'], queryFn: () => get<Holding[]>('/api/portfolio'), refetchInterval: 60_000 })
+
+export const useClosedPositions = () =>
+  useQuery({
+    queryKey: ['closed-positions'],
+    queryFn: () => get<ClosedPositionsResult>('/api/portfolio/closed'),
+  })
+
+/** Force an immediate price refresh, then re-read everything that shows a price. */
+export const useRefreshPrices = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ ok: boolean; symbols_refreshed: number; symbols_total: number; market_active: boolean }>(
+      '/api/prices/refresh'),
+    onSuccess: () => {
+      for (const k of ['portfolio', 'stats', 'breakdown', 'extended-hours', 'networth', 'monthly-change'])
+        qc.invalidateQueries({ queryKey: [k] })
+    },
+  })
+}
 
 export const useTransactions = () =>
   useQuery({ queryKey: ['transactions'], queryFn: () => get<Transaction[]>('/api/transactions') })
