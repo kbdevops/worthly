@@ -1,6 +1,5 @@
-import { LayoutDashboard, Briefcase, Calculator, Award, RefreshCw, Coins, Database, TrendingUp } from 'lucide-react'
+import { LayoutDashboard, Briefcase, Calculator, Award, Coins, Database, TrendingUp } from 'lucide-react'
 import type { TabId } from '../../App'
-import { useSync } from '../../hooks/useApi'
 import { getStoredUser } from '../../lib/auth'
 import { cn } from '../../lib/utils'
 
@@ -28,7 +27,6 @@ interface Props {
 }
 
 export default function Sidebar({ tabs, activeTab, onTabChange, open }: Props) {
-  const sync = useSync()
   const user = getStoredUser()
   const tabMap = Object.fromEntries(tabs.map(t => [t.id, t]))
 
@@ -92,9 +90,13 @@ export default function Sidebar({ tabs, activeTab, onTabChange, open }: Props) {
         ))}
       </nav>
 
-      {/* Bottom: user + sync */}
-      <div className="px-4 py-4 border-t border-[var(--border)] space-y-3">
-        {user && (
+      {/* Bottom: user. The Sync Prices button that used to sit here was a second
+          RefreshCw button reading "Sync" a few hundred pixels from the header's, but
+          firing a different job (historical backfill, not live quotes) — confusing
+          rather than convenient. The backfill lives in the Data Sync tab, where its
+          per-symbol cache status is, and runs on the scheduler regardless. */}
+      {user && (
+        <div className="px-4 py-4 border-t border-[var(--border)]">
           <div className="flex items-center gap-2.5 px-1">
             <div
               className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0"
@@ -104,16 +106,8 @@ export default function Sidebar({ tabs, activeTab, onTabChange, open }: Props) {
             </div>
             <span className="text-xs text-slate-400 truncate">{user.email}</span>
           </div>
-        )}
-        <button
-          onClick={() => sync.mutate(false)}
-          disabled={sync.isPending}
-          className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 border border-[var(--border)] hover:border-slate-600 bg-white/[0.03] hover:bg-white/[0.06] transition-all disabled:opacity-40"
-        >
-          <RefreshCw size={12} className={sync.isPending ? 'spin' : ''} />
-          {sync.isPending ? 'Syncing…' : 'Sync Prices'}
-        </button>
-      </div>
+        </div>
+      )}
     </aside>
   )
 }
