@@ -1341,24 +1341,24 @@ export default function Dashboard() {
                     <LabelList
                       dataKey="change"
                       content={props => {
-                        // Recharts types this loosely; the bar geometry is always numeric here.
                         const { index: i, x, y, width: w, height: h } = props as unknown as
                           { index: number; x: number; y: number; width: number; height: number }
-                        const isBest = i === bestIdx, isWorst = i === worstIdx
                         const d = mcData[i]
-                        if (!d || (!isBest && !isWorst && !d.mtd)) return null
+                        if (!d || (i !== bestIdx && i !== worstIdx && !d.mtd)) return null
                         const up = d.change >= 0
-                        // Recharts hands back a NEGATIVE height for downward bars, so
-                        // y is the far edge rather than the top. Normalise before
-                        // offsetting, or the label lands inside the bar it describes —
-                        // red text on a red bar.
+                        // Recharts reports a NEGATIVE height for downward bars, so y is the
+                        // far edge rather than the top. Normalise before offsetting: without
+                        // this the label sits partway up the bar it describes, and for a loss
+                        // that means red text on a red bar. Its own "position=top/bottom"
+                        // fares no better — it clips ~3px into the bar.
                         const top = Math.min(y, y + h), bottom = Math.max(y, y + h)
                         const ty = up ? top - 7 : bottom + 15
-                        const colour = d.mtd ? '#64748b' : up ? '#34d399' : '#f87171'
+                        const colour = d.mtd ? '#94a3b8' : up ? '#34d399' : '#f87171'
                         return (
                           <text x={x + w / 2} y={ty} textAnchor="middle"
                             fill={colour} fontSize={11} fontWeight={600}>
-                            {d.mtd ? 'MTD' : (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'}
+                            {(d.mtd ? 'MTD ' : '') +
+                              (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'}
                           </text>
                         )
                       }}
