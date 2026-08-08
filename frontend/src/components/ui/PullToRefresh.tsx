@@ -13,16 +13,25 @@ import { RefreshCw, Check } from 'lucide-react'
  * finger to lift past the threshold. A wheel has no release and no end event, so it
  * fires the moment the threshold is crossed and then ignores the momentum tail.
  *
- * Only arms when the scroll container is genuinely at the top, so it can never
- * swallow a normal upward scroll. The indicator tracks the gesture with a damped
- * offset and reaches full opacity at the trigger threshold, so it's clear when
- * releasing will actually do something.
+ * Refreshing must be intentional. Both paths only arm when the gesture BEGINS with the
+ * container already at the top, so scrolling up from mid-page can never trigger one no
+ * matter how far it coasts past the top — getting back to the top and asking for fresh
+ * prices stay two separate acts. The indicator tracks the gesture with a damped offset
+ * and reaches full opacity at the threshold, so it's clear when releasing will do
+ * something, and stopping short unwinds it.
  */
 const THRESHOLD = 70      // px of pull needed to trigger
 const MAX_PULL = 110      // px the indicator will travel
 const DAMPING = 0.5       // finger travel -> indicator travel
-const WHEEL_DAMPING = 0.32 // wheel deltas are coarser than finger pixels
+// Wheel deltas are coarse and a trackpad flick keeps coasting long after your fingers
+// stop, so a refresh has to cost far more travel than a finger drag or it fires every
+// time you scroll back to the top. ~500 units of deliberate upward scrolling.
+const WHEEL_DAMPING = 0.14
 const WHEEL_IDLE_MS = 220  // no wheel events for this long = gesture abandoned
+// Stillness that separates one wheel gesture from the next. Scrolling up from mid-page
+// coasts through the top; treating that as a pull is the false positive to kill, so a
+// gesture may only arm if it BEGINS with the container already parked at the top.
+const WHEEL_GESTURE_GAP = 350
 
 export default function PullToRefresh({
   onRefresh,
@@ -113,21 +122,37 @@ export default function PullToRefresh({
   const wheelPull = useRef(0)
   const wheelIdle = useRef<number | undefined>(undefined)
   const wheelSpent = useRef(false)
+  const wheelArmed = useRef(false)
+  const lastWheelAt = useRef(0)
 
   const onWheel = useCallback((e: WheelEvent) => {
     scroller.current = findScroller(e.target)
     if (busy) return
 
+    const now = Date.now()
+    const fresh = now - lastWheelAt.current > WHEEL_GESTURE_GAP
+    lastWheelAt.current = now
+
+    if (fresh) {
+      // A new gesture earns the right to pull only by starting from rest at the top.
+      // One that begins mid-page never arms, however far past the top it coasts — so
+      // scrolling up to the top and refreshing become two separate, deliberate acts.
+      wheelArmed.current = atTop() && e.deltaY < 0
+      wheelPull.current = 0
+      wheelSpent.current = false
+    }
+
     // Scrolling down, or not at the top: cancel any accumulation and stay out of the way.
     if (e.deltaY >= 0 || !atTop()) {
+      wheelArmed.current = false
       wheelPull.current = 0
       wheelSpent.current = false
       if (pull !== 0) setPull(0)
       return
     }
 
-    // Momentum tail after a fire — ignore until the user actually stops scrolling.
-    if (wheelSpent.current) return
+    // Not this gesture's business, or the momentum tail after a fire.
+    if (!wheelArmed.current || wheelSpent.current) return
 
     wheelPull.current = Math.min(MAX_PULL, wheelPull.current + -e.deltaY * WHEEL_DAMPING)
     setPull(wheelPull.current)
@@ -136,6 +161,7 @@ export default function PullToRefresh({
     wheelIdle.current = window.setTimeout(() => {
       wheelPull.current = 0
       wheelSpent.current = false
+      wheelArmed.current = false
       setPull(0)
     }, WHEEL_IDLE_MS)
 
