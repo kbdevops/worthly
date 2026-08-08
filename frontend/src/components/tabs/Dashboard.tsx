@@ -804,6 +804,15 @@ export default function Dashboard() {
         // The final bar covers a month still in progress, so it is not comparable with
         // the completed ones and must never win "best" or "worst" on a part-month.
         mtd: mc.is_mtd?.[i] ?? false,
+        // Labelled by the CLOSING date, which is how a net-worth sheet recorded on the
+        // 1st files it: the row written on 1 May holds the change since 1 April, so it is
+        // the "May" figure. Reconciling against that sheet is then a straight read-across.
+        //
+        // Labelling by closing date is only viable because the in-progress bar is named
+        // separately: it also closes in the current month, so both would otherwise be
+        // "Aug" — one holding July's change, which is exactly the collision that had
+        // August reading -$9,473 while the month was up $23k.
+        label: (mc.is_mtd?.[i] ?? false) ? 'MTD' : monthLabel(mc.period_end?.[i] ?? m),
       }))
     : []
 
@@ -1311,21 +1320,21 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={mcData} margin={{ top: 26, right: 12, left: 0, bottom: 0 }}>
                   <XAxis
-                    dataKey="month"
+                    dataKey="label"
                     tick={{ fill: '#64748b', fontSize: 11 }}
                     tickLine={false}
                     axisLine={false}
-                    tickFormatter={v => monthLabel(v)}
                   />
                   <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
                   <Tooltip
+                    cursor={{ fill: 'rgba(148, 163, 184, 0.10)' }}
                     content={({ active, payload }) => {
                       if (!active || !payload?.length) return null
                       const d = payload[0].payload as typeof mcData[0]
                       return (
                         <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
                           <p className="text-slate-400 text-[11px]">
-                            {monthLabel(d.month)}{d.mtd ? ' · month-to-date' : ''}
+                            {d.mtd ? 'Month to date' : monthLabel(d.end)}
                           </p>
                           {/* The span, spelled out. A month name alone is ambiguous: a
                               spreadsheet written on the 1st files this under the closing
@@ -1373,8 +1382,13 @@ export default function Dashboard() {
                         const top = Math.min(y, y + h), bottom = Math.max(y, y + h)
                         const ty = up ? top - 7 : bottom + 15
                         const colour = d.mtd ? '#94a3b8' : up ? '#34d399' : '#f87171'
+                        // The last bar sits against the plot's right edge, so a centred
+                        // label overruns it — "MTD +$23k" rendered as "MTD +$23". Anchor
+                        // the final one from its right edge so it grows inward instead.
+                        const atEdge = i === mcData.length - 1
                         return (
-                          <text x={x + w / 2} y={ty} textAnchor="middle"
+                          <text x={atEdge ? x + w : x + w / 2} y={ty}
+                            textAnchor={atEdge ? 'end' : 'middle'}
                             fill={colour} fontSize={11} fontWeight={600}>
                             {(d.mtd ? 'MTD ' : '') +
                               (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'}
