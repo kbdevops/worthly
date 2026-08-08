@@ -59,6 +59,8 @@ export interface NetworthData {
 export interface MonthlyChange {
   /** First day of the month the change occurred IN — not the boundary that closes it. */
   months: string[]
+  /** Closing boundary of each bar, so the UI can state the span rather than imply it. */
+  period_end: string[]
   change: number[]
   change_pct: number[]
   sources: string[]

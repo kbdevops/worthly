@@ -213,12 +213,22 @@ const spanOf = (id: string) => WIDGET_SPAN[id] ?? 2
 // so nothing has to scroll or be clipped — the charts simply get more room.
 const FULL_WIDGET_H = 560
 
-/** "2026-08-01" -> "Aug 26". Parsed as parts, not Date(str), so a bare yyyy-mm-dd
- *  isn't read as UTC midnight and shifted back a day in eastern timezones. */
+// Fixed abbreviations rather than toLocaleDateString: en-AU renders "short" months
+// unevenly, spelling June and July in full beside Aug, which reads as broken on an axis.
+// Parsed as parts and never via Date(str) — a bare yyyy-mm-dd is treated as UTC midnight
+// and shifts back a day in eastern timezones.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** "2026-05-01" -> "1 May" */
+const dayMonth = (iso: string): string => {
+  const [, m, d] = iso.split('-').map(Number)
+  return m && d ? `${d} ${MONTHS[m - 1]}` : iso
+}
+
+/** "2026-08-01" -> "Aug 26" */
 const monthLabel = (iso: string): string => {
   const [y, m] = iso.split('-').map(Number)
-  if (!y || !m) return iso
-  return new Date(y, m - 1, 1).toLocaleDateString('en-AU', { month: 'short', year: '2-digit' })
+  return y && m ? `${MONTHS[m - 1]} ${String(y).slice(2)}` : iso
 }
 const DEFAULT_VISIBLE: Record<string, boolean> = {
   networth: true, 'alloc_country': true, monthly: true, performance: true, holdings: true,
@@ -787,6 +797,7 @@ export default function Dashboard() {
   const mcData = mc
     ? mc.months.map((m, i) => ({
         month: m,
+        end: mc.period_end?.[i] ?? '',
         change: mc.change[i],
         pct: mc.change_pct[i],
         source: mc.sources?.[i] ?? 'manual',
@@ -1313,9 +1324,17 @@ export default function Dashboard() {
                       const d = payload[0].payload as typeof mcData[0]
                       return (
                         <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
-                          <p className="text-slate-400 text-[11px] mb-1">
+                          <p className="text-slate-400 text-[11px]">
                             {monthLabel(d.month)}{d.mtd ? ' · month-to-date' : ''}
                           </p>
+                          {/* The span, spelled out. A month name alone is ambiguous: a
+                              spreadsheet written on the 1st files this under the closing
+                              date, the chart labels it by the month it happened in. */}
+                          {d.end && (
+                            <p className="text-slate-500 text-[10px] mb-1.5">
+                              {dayMonth(d.month)} → {d.mtd ? 'today' : dayMonth(d.end)}
+                            </p>
+                          )}
                           <p className="font-semibold text-sm" style={{ color: d.change >= 0 ? '#10b981' : '#ef4444' }}>
                             {fmtCurrencySigned(d.change)}
                           </p>

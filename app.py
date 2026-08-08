@@ -4669,12 +4669,21 @@ def get_monthly_change():
         anchors.append((today, nw_at(today, latest[2], latest[1]), latest[3]))
         mtd = True
 
-    months, changes, changes_pct, sources, is_mtd = [], [], [], [], []
+    months, period_end, changes, changes_pct, sources, is_mtd = [], [], [], [], [], []
     # A change between two boundaries happened during the month the earlier one opens,
     # so label it with that month. Labelling by the closing boundary — which is what this
     # did before — reported every month's performance one month late.
-    for (start_date, start_nw, start_src), (_, end_nw, _) in zip(anchors, anchors[1:]):
+    #
+    # period_end is returned so the UI can state the span outright instead of relying on
+    # the reader's idea of what a month name means. Both conventions are defensible: a
+    # spreadsheet recorded on the 1st naturally files this change under the month it was
+    # written down in (the closing date), while "May's return" normally means the return
+    # during May. Naming the two dates ends the argument, and it cannot be inferred from
+    # the labels alone — labelling by the closing date would give the month in progress
+    # and the month before it the same name.
+    for (start_date, start_nw, start_src), (end_date, end_nw, _) in zip(anchors, anchors[1:]):
         months.append(start_date)
+        period_end.append(end_date)
         sources.append(start_src)
         change = end_nw - start_nw
         changes.append(round(change, 2))
@@ -4683,8 +4692,8 @@ def get_monthly_change():
     if is_mtd:
         is_mtd[-1] = mtd
 
-    return jsonify({"months": months, "change": changes, "change_pct": changes_pct,
-                    "sources": sources, "is_mtd": is_mtd})
+    return jsonify({"months": months, "period_end": period_end, "change": changes,
+                    "change_pct": changes_pct, "sources": sources, "is_mtd": is_mtd})
 
 
 def _compute_monthly_nw_series(uid):
