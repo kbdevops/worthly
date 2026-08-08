@@ -809,83 +809,6 @@ export default function Holdings() {
         )}
       </div>
 
-      {/* Closed positions — sold to zero, so absent from the holdings table above.
-          Without this, exiting a position erases it from every screen: selling out of
-          VAS hid a 60-trade five-year holding worth $50,056.86 realised and $28,999.22
-          in dividends, even though that money still counts in the portfolio totals. */}
-      {closed && closed.positions.length > 0 && (
-        <div className={CARD} style={CARD_BG}>
-          <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
-            <div className="flex items-center gap-2">
-              <Archive size={16} className="text-slate-400" />
-              <p className="text-sm font-medium text-slate-200">
-                Closed Positions
-                <span className="ml-2 text-xs text-slate-500">
-                  {closed.positions.length} exited · realised {fmtCurrencySigned(closed.total_realised)}
-                  {closed.total_income > 0 && ` · income ${fmtCurrency(closed.total_income)}`}
-                </span>
-              </p>
-            </div>
-            <button onClick={() => setShowClosed(v => !v)} className="text-slate-500 hover:text-white">
-              {showClosed ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-            </button>
-          </div>
-          {showClosed && (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead style={{ background: 'var(--bg-elevated)' }}>
-                  <tr>
-                    <th className={TH2}>Holding</th>
-                    <th className={TH2}>Closed</th>
-                    <th className={TH2}>Held</th>
-                    <th className={TH2}>Invested</th>
-                    <th className={TH2}>Proceeds</th>
-                    <th className={TH2}>Realised</th>
-                    <th className={TH2}>Income</th>
-                    <th className={TH2}>Total</th>
-                    <th className={TH2}>Return</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {closed.positions.map(p => (
-                    <tr key={p.ticker} className="border-t border-[var(--border)] hover:bg-white/5">
-                      <td className={TD2}>
-                        <span className="font-semibold text-white">{p.ticker}</span>
-                        <span className="block text-[10px] text-slate-500">
-                          {p.exchange} · {p.buys_count} buys / {p.sells_count} sells
-                        </span>
-                      </td>
-                      <td className={TD2 + ' text-slate-400'}>{fmtDate(p.closed_date)}</td>
-                      <td className={TD2 + ' text-slate-500'}>
-                        {p.held_days >= 365 ? `${(p.held_days / 365).toFixed(1)}y` : `${p.held_days}d`}
-                      </td>
-                      <td className={TD2 + ' text-slate-300'}>{fmtCurrency(p.invested)}</td>
-                      <td className={TD2 + ' text-slate-300'}>{fmtCurrency(p.proceeds)}</td>
-                      <td className={TD2 + ' font-medium ' + (p.realised_aud >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {fmtCurrencySigned(p.realised_aud)}
-                      </td>
-                      <td className={TD2 + (p.income_aud > 0 ? ' text-amber-400' : ' text-slate-600')}>
-                        {p.income_aud > 0 ? fmtCurrency(p.income_aud) : '—'}
-                      </td>
-                      <td className={TD2 + ' font-semibold ' + (p.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {fmtCurrencySigned(p.total_return_aud)}
-                      </td>
-                      <td className={TD2 + ' font-medium ' + ((p.return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {p.return_pct != null ? fmtPct(p.return_pct) : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="px-5 py-3 text-[11px] text-slate-500">
-                Return % is realised gain over total invested, average-cost basis. Income is
-                lifetime dividends received while the position was held. These figures are
-                already included in the portfolio's realised gain and total return.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Holding Groups — Sharesight-style custom groupings with Value/Capital Gain/Income/Currency/Return + grand total */}
       <div className={CARD} style={CARD_BG}>
@@ -1103,6 +1026,92 @@ export default function Holdings() {
               {groupModal.id ? 'Save Changes' : 'Create Group'}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Closed positions — sold to zero, so absent from the holdings table above.
+          Without this, exiting a position erases it from every screen: selling out of
+          VAS hid a 60-trade five-year holding worth $50,056.86 realised and $28,999.22
+          in dividends, even though that money still counts in the portfolio totals. */}
+      {closed && closed.positions.length > 0 && (
+        <div className={CARD} style={CARD_BG}>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+            <div className="flex items-center gap-2">
+              <Archive size={16} className="text-slate-400" />
+              <p className="text-sm font-medium text-slate-200">
+                Closed Positions
+                <span className="ml-2 text-xs text-slate-500">
+                  {closed.positions.length} exited · realised {fmtCurrencySigned(closed.total_realised)}
+                  {closed.total_income > 0 && ` · income ${fmtCurrency(closed.total_income)}`}
+                </span>
+              </p>
+            </div>
+            <button onClick={() => setShowClosed(v => !v)} className="text-slate-500 hover:text-white">
+              {showClosed ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            </button>
+          </div>
+          {showClosed && (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead style={{ background: 'var(--bg-elevated)' }}>
+                  <tr>
+                    <th className={TH2}>Holding</th>
+                    <th className={TH2}>Closed</th>
+                    <th className={TH2}>Held</th>
+                    <th className={TH2}>Invested</th>
+                    <th className={TH2}>Proceeds</th>
+                    <th className={TH2}>Realised</th>
+                    <th className={TH2}>Income</th>
+                    <th className={TH2}>Franking</th>
+                    <th className={TH2}>Total</th>
+                    <th className={TH2}>Return</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closed.positions.map(p => (
+                    <tr key={p.ticker} className="border-t border-[var(--border)] hover:bg-white/5">
+                      <td className={TD2}>
+                        <span className="font-semibold text-white">{p.ticker}</span>
+                        <span className="block text-[10px] text-slate-500">
+                          {p.exchange} · {p.buys_count} buys / {p.sells_count} sells
+                        </span>
+                      </td>
+                      <td className={TD2 + ' text-slate-400'}>{fmtDate(p.closed_date)}</td>
+                      <td className={TD2 + ' text-slate-500'}>
+                        {p.held_days >= 365 ? `${(p.held_days / 365).toFixed(1)}y` : `${p.held_days}d`}
+                      </td>
+                      <td className={TD2 + ' text-slate-300'}>{fmtCurrency(p.invested)}</td>
+                      <td className={TD2 + ' text-slate-300'}>{fmtCurrency(p.proceeds)}</td>
+                      <td className={TD2 + ' font-medium ' + (p.realised_aud >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {fmtCurrencySigned(p.realised_aud)}
+                      </td>
+                      <td className={TD2 + (p.income_aud > 0 ? ' text-amber-400' : ' text-slate-600')}>
+                        {p.income_aud > 0 ? fmtCurrency(p.income_aud) : '—'}
+                      </td>
+                      {/* Shown but deliberately outside Total: a franking credit offsets tax,
+                          it is not cash the position paid out. */}
+                      <td className={TD2 + (p.franking_aud > 0 ? ' text-indigo-400' : ' text-slate-600')}>
+                        {p.franking_aud > 0 ? fmtCurrency(p.franking_aud) : '—'}
+                      </td>
+                      <td className={TD2 + ' font-semibold ' + (p.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {fmtCurrencySigned(p.total_return_aud)}
+                      </td>
+                      <td className={TD2 + ' font-medium ' + ((p.return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {p.return_pct != null ? fmtPct(p.return_pct) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="px-5 py-3 text-[11px] text-slate-500">
+                Return % is Total over Invested — realised gain plus income — on an
+                average-cost basis. Income is dividends received while the position was
+                held. Franking credits are listed separately and excluded from Total,
+                since they offset tax rather than being cash received. Realised gain and
+                income are already counted in the portfolio's overall totals.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

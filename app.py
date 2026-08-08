@@ -3121,7 +3121,13 @@ def _compute_closed_positions(user_id):
             "income_aud": inc,
             "franking_aud": round(float(franking.get(p["ticker"], 0.0)), 2),
             "total_return_aud": round(realised + inc, 2),
-            "return_pct": round(realised / p["invested"] * 100, 2) if p["invested"] > 0 else None,
+            # Must match total_return_aud, not just the realised leg. Quoting realised-only
+            # next to a Total column that includes income read as a bad result: VAS showed
+            # +20.14% beside $79,056.08, silently dropping $28,999.22 of dividends — the
+            # honest figure is 31.81%. Franking is excluded from both: it is a tax credit,
+            # not cash received, and is reported separately as franking_aud (as with
+            # active holdings, whose total_return_aud is also return + income).
+            "return_pct": round((realised + inc) / p["invested"] * 100, 2) if p["invested"] > 0 else None,
             "buys_count": p["buys"],
             "sells_count": p["sells"],
             "first_date": p["first_date"],
