@@ -4570,12 +4570,24 @@ def get_monthly_change():
     all_snapshots = conn.execute("SELECT date, super, cash, COALESCE(source,'manual') FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
 
-    # One point per calendar month, anchored to the START of the month, plus a
-    # month-to-date point for the month still in progress. See _pick_monthly_snapshots.
-    snapshots, _ = _pick_monthly_snapshots(all_snapshots)
+    # One boundary per calendar month, at that month's FIRST snapshot — including the
+    # month in progress, whose boundary is its 1st, not its latest reading.
+    #
+    # Deliberately NOT _pick_monthly_snapshots: that returns the LATEST snapshot for the
+    # current month, because it powers the Compounder where that point IS the month-to-date
+    # value. Used as a boundary it silently misattributes days — with a 6 Aug snapshot the
+    # bar labelled July measured 1 Jul to 6 Aug (36 days, five of them August), and the MTD
+    # bar shrank to the two days after it.
+    first_of_month: dict = {}
+    for s in sorted(all_snapshots, key=lambda r: r[0]):
+        ym = pd.Timestamp(s[0]).to_period("M")
+        if ym not in first_of_month:
+            first_of_month[ym] = s
+    snapshots = [first_of_month[k] for k in sorted(first_of_month)]
 
     if not snapshots:
-        return jsonify({"months": [], "change": [], "change_pct": [], "sources": []})
+        return jsonify({"months": [], "change": [], "change_pct": [],
+                        "sources": [], "is_mtd": []})
 
     # Build portfolio value at each snapshot date
     df = pd.DataFrame(txns)
