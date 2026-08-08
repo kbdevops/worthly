@@ -326,6 +326,9 @@ export interface CompounterMonthPoint {
   super: number
   source: string
   change_pct: number | null
+  /** True for the current in-progress calendar month — excluded from the backend's
+   *  rate-based stats (avg/best/worst month) since it hasn't run its full course. */
+  is_current_month: boolean
 }
 
 export interface CompounterFYRow {

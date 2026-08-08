@@ -761,6 +761,47 @@ def yf_symbol(ticker, exchange):
     suffix = EXCHANGE_SUFFIX.get((exchange or "").upper(), "")
     return f"{ticker.upper()}{suffix}"
 
+def _split_ratios_by_symbol(txns):
+    """Per-symbol [(split_timestamp, ratio)] for retro-adjusting historical unit counts.
+
+    Yahoo's historical closes are ALWAYS split-adjusted — auto_adjust=False removes only
+    the dividend adjustment, not the split one, and there is no way to fetch genuine
+    pre-split prices. So pairing a raw pre-split unit count with those prices undervalues
+    the position by the split ratio: IVV showed 1 unit x $44.00 on 2021-12-30 when the
+    holding was really worth the $659.87 actually paid, a 15x understatement.
+
+    The fix is to scale UNITS instead. For any valuation date, multiply the raw unit count
+    by every split ratio that happened AFTER that date, which puts units and prices on the
+    same post-split basis. `units` on a split row holds the ADDED shares, so the ratio is
+    (held_before + added) / held_before.
+    """
+    held, splits = {}, {}
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        action = (t.get("action") or "").lower()
+        u = held.get(sym, 0.0)
+        if action == "buy":
+            held[sym] = u + t["units"]
+        elif action == "sell":
+            held[sym] = max(0.0, u - t["units"])
+        elif action == "split":
+            if u > 1e-9:
+                ratio = (u + t["units"]) / u
+                if ratio > 0:
+                    splits.setdefault(sym, []).append((pd.Timestamp(t["date"]), ratio))
+            held[sym] = u + t["units"]
+    return splits
+
+
+def _split_adj_factor(sym_splits, as_of):
+    """Multiplier putting a raw unit count at `as_of` onto today's post-split basis."""
+    f = 1.0
+    for d, ratio in sym_splits or ():
+        if d > as_of:
+            f *= ratio
+    return f
+
+
 def get_currency_from_exchange(exchange):
     """Determine instrument currency based on exchange."""
     if (exchange or "").upper() in ["NASDAQ", "NYSE", "US"]:
@@ -1449,8 +1490,22 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
             if f_start > f_end:
                 continue
             try:
+                # auto_adjust=False is load-bearing. yfinance defaults to True, which
+                # rewrites historical closes DOWN to strip out dividends paid and splits
+                # since — great for measuring one stock's total return, wrong for asking
+                # "what was this holding worth on that date". It understated VAS at
+                # 2021-11-18 as $77.99 against an actual traded $95.16 (-18%), and IVV
+                # pre-split as $41.58 against $659.87 (-94%, the 15:1 split), so every
+                # historical net worth was too low — worst in the past, converging to
+                # correct at today's date, which is exactly the shape of the error.
+                #
+                # It also fixes splits properly: with raw prices, pre-split dates pair the
+                # pre-split unit count with the pre-split price, and post-split dates pair
+                # the adjusted count with the adjusted price. Both come out right.
                 hist = _fetch_with_retry(
-                    lambda: yf.Ticker(symbol).history(start=f_start, end=f_end + timedelta(days=1))
+                    lambda: yf.Ticker(symbol).history(
+                        start=f_start, end=f_end + timedelta(days=1), auto_adjust=False
+                    )
                 )
                 if hist.empty:
                     continue
@@ -2890,11 +2945,17 @@ def _build_daily_market_return_series(conn, user_id):
     cash_flow = cash_flow_changes.cumsum()
 
     portfolio_value = pd.Series(0.0, index=all_dates)
+    split_ratios = _split_ratios_by_symbol(txns)
     for sym in df["sym"].unique():
         prices = price_data[sym]
         if sym_currency[sym] == "USD":
             prices = prices / fx_rates
-        portfolio_value += units_df[sym] * prices
+        # Stored closes are split-adjusted; scale raw units by any split that happens
+        # after each date so units and prices share one basis.
+        factor = pd.Series(1.0, index=all_dates)
+        for sd, ratio in split_ratios.get(sym, ()):
+            factor.loc[all_dates < sd] *= ratio
+        portfolio_value += units_df[sym] * factor * prices
     return portfolio_value - cash_flow
 
 def _calc_realised_gain(txns: list) -> float:
@@ -4295,11 +4356,17 @@ def get_networth():
 
     units_df = units_changes.cumsum()
     portfolio_value = pd.Series(0.0, index=all_dates)
+    split_ratios = _split_ratios_by_symbol(txns)
     for sym in df["sym"].unique():
         prices = price_data[sym]
         if sym_currency[sym] == "USD":
             prices = prices / fx_rates
-        portfolio_value += units_df[sym] * prices
+        # Stored closes are split-adjusted; scale raw units by any split that happens
+        # after each date so units and prices share one basis.
+        factor = pd.Series(1.0, index=all_dates)
+        for sd, ratio in split_ratios.get(sym, ()):
+            factor.loc[all_dates < sd] *= ratio
+        portfolio_value += units_df[sym] * factor * prices
 
     # Cumulative cash flow (cost basis) for return calculation
     cash_flow_changes = pd.Series(0.0, index=all_dates)
@@ -4378,6 +4445,7 @@ def get_monthly_change():
 
     audusd_rates = price_data.get("AUDUSD=X", {})
     sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    split_ratios = _split_ratios_by_symbol(txns)
 
     months = []
     changes = []
@@ -4404,6 +4472,9 @@ def get_monthly_change():
                     units += row["units"]
                 elif action == "sell":
                     units = max(0, units - row["units"])
+            # Stored closes are split-adjusted, so raw pre-split units undervalue the
+            # holding by the split ratio. Put both on the same basis.
+            units *= _split_adj_factor(split_ratios.get(sym), s_ts)
 
             # Find closest price on or before snapshot date
             sym_prices = price_data.get(sym, {})
@@ -4438,7 +4509,7 @@ def get_monthly_change():
 def _compute_monthly_nw_series(uid):
     """Return month-by-month absolute NW data for a user.
 
-    Each element: {date, nw, portfolio, cash, super, source, change_pct}
+    Each element: {date, nw, portfolio, cash, super, source, change_pct, is_current_month}
     change_pct is None for the first data point.
     """
     txns = load_transactions(uid)
@@ -4453,7 +4524,15 @@ def _compute_monthly_nw_series(uid):
     for s in all_snapshots:
         ym = pd.Timestamp(s[0]).to_period("M")
         by_month[ym] = s
-    snapshots = [by_month[k] for k in sorted(by_month)]
+    month_keys = sorted(by_month)
+    snapshots = [by_month[k] for k in month_keys]
+    # The bucket for the CURRENT calendar month is whatever snapshot happens to exist so
+    # far this month — it hasn't run its full course. A user who snapshots roughly weekly
+    # will often add one just after a month rolls over (e.g. 30 Jul, then 1 Aug — two real
+    # days apart), and without this flag that gets averaged into month-over-month stats
+    # with the exact same weight as an actual ~30-day month, right alongside it.
+    current_ym = pd.Timestamp(date.today()).to_period("M")
+    current_month_flags = [k == current_ym for k in month_keys]
 
     if not txns or not snapshots:
         return []
@@ -4475,11 +4554,12 @@ def _compute_monthly_nw_series(uid):
 
     audusd_rates = price_data.get("AUDUSD=X", {})
     sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    split_ratios = _split_ratios_by_symbol(txns)
 
     result = []
     prev_nw = None
 
-    for s_date, s_super, s_cash, s_source in snapshots:
+    for (s_date, s_super, s_cash, s_source), is_current in zip(snapshots, current_month_flags):
         s_ts = pd.Timestamp(s_date)
         portfolio_val = 0.0
 
@@ -4497,6 +4577,9 @@ def _compute_monthly_nw_series(uid):
                     units += row["units"]
                 elif action == "sell":
                     units = max(0, units - row["units"])
+            # Stored closes are split-adjusted, so raw pre-split units undervalue the
+            # holding by the split ratio. Put both on the same basis.
+            units *= _split_adj_factor(split_ratios.get(sym), s_ts)
 
             sym_prices = price_data.get(sym, {})
             available_dates = [d for d in sym_prices if d <= s_ts]
@@ -4522,6 +4605,7 @@ def _compute_monthly_nw_series(uid):
             "super": round(s_super, 2),
             "source": s_source,
             "change_pct": change_pct,
+            "is_current_month": is_current,
         })
         prev_nw = total_nw
 
@@ -4542,7 +4626,12 @@ def get_compounder():
             "summary": {"peak_nw": 0, "avg_mom": 0, "months_positive": 0, "months_negative": 0},
         })
 
-    all_changes = [m["change_pct"] for m in monthly if m["change_pct"] is not None]
+    # Rate-based stats (avg/best/worst month, pos/neg counts) exclude the in-progress
+    # current month — it hasn't run its full course, so its change_pct isn't comparable
+    # to a completed month's. Level-based figures (nw_end, peak_nw, growth_dollar/pct)
+    # still use the true latest data below; only the rate averages skip it.
+    all_changes = [m["change_pct"] for m in monthly
+                   if m["change_pct"] is not None and not m["is_current_month"]]
     peak_nw = max(m["nw"] for m in monthly)
     months_positive = sum(1 for c in all_changes if c > 0)
     months_negative = sum(1 for c in all_changes if c < 0)
@@ -4564,7 +4653,8 @@ def get_compounder():
         last = months_in_fy[-1]
 
         prior_nw = fy_groups[sorted_fys[i - 1]][-1]["nw"] if i > 0 else None
-        fy_changes = [m["change_pct"] for m in months_in_fy if m["change_pct"] is not None]
+        fy_changes = [m["change_pct"] for m in months_in_fy
+                      if m["change_pct"] is not None and not m["is_current_month"]]
 
         fy_rows.append({
             "fy": f"FY{fy}",

@@ -34,4 +34,6 @@ frontend/node_modules/
 # Timestamped DB snapshots (prices.db.backup-YYYYmmdd-HHMMSS) — the leading *.db
 # rule doesn't catch these because the extension isn't last.
 *.db.backup-*
-*.db.bak
+# Trailing glob matters: a bare `*.db.bak` misses prices.db.bak-preadjust-20260808,
+# which would then be committed as untracked financial data.
+*.db.bak*

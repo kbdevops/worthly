@@ -491,10 +491,17 @@ export default function Compounder() {
                     <td className={`px-4 py-3 text-right font-mono text-xs font-semibold ${pctColor(row.growth_pct)}`}>
                       {fmtPct(row.growth_pct)}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono text-xs text-emerald-400">
-                      {row.best_month != null ? `+${row.best_month.toFixed(2)}%` : '—'}
+                    {/* Colour and sign follow the actual value, not the column's usual
+                        direction — a partial FY can end up with only one completed month
+                        on record, making best_month == worst_month, and that lone sample
+                        can be negative. Hardcoding '+' and green here previously showed a
+                        loss as a gain the moment that happened. */}
+                    <td className={`px-4 py-3 text-right font-mono text-xs ${pctColor(row.best_month)}`}>
+                      {row.best_month != null
+                        ? `${row.best_month >= 0 ? '+' : ''}${row.best_month.toFixed(2)}%`
+                        : '—'}
                     </td>
-                    <td className="px-4 py-3 text-right font-mono text-xs text-red-400">
+                    <td className={`px-4 py-3 text-right font-mono text-xs ${pctColor(row.worst_month)}`}>
                       {row.worst_month != null
                         ? `${row.worst_month >= 0 ? '+' : ''}${row.worst_month.toFixed(2)}%`
                         : '—'}
