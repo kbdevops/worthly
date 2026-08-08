@@ -326,9 +326,11 @@ export interface CompounterMonthPoint {
   super: number
   source: string
   change_pct: number | null
-  /** True for the current in-progress calendar month — excluded from the backend's
-   *  rate-based stats (avg/best/worst month) since it hasn't run its full course. */
+  /** True for the calendar month still in progress; its value is month-to-date. */
   is_current_month: boolean
+  /** Days since the previous point. The backend only counts a step in its rate stats
+   *  (avg/best/worst month) when this is roughly a month. */
+  period_days: number | null
 }
 
 export interface CompounterFYRow {

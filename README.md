@@ -65,6 +65,44 @@ Returns under a year are reported as plain cumulative growth rather than annuali
 ### Data Sync
 Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health - per-symbol errors, staleness warnings, last-run results - instead of a black box.
 
+#### How prices stay current
+
+Three layers, deliberately arranged so there's no yfinance traffic when nobody's using the app:
+
+| Layer | When | What it does |
+|---|---|---|
+| **Full sync** | 06:15 UTC (after ASX close) and 21:15 UTC (after US close) | Fetches full daily history, holding metadata, dividends |
+| **Scheduled intraday** | Every 5 min, extended hours only (`INTRADAY_REFRESH_MINUTES`) | Overwrites today's price so the cache never goes cold |
+| **On-demand refresh** | Whenever `/api/portfolio` is read and prices are stale (`LIVE_REFRESH_SECONDS`, default 60s) | Kicks a background refresh; this is what actually makes the app feel live |
+
+The on-demand layer is the important one. A scheduler can only ever be as fresh as its
+interval, so opening the app used to show prices up to 15 minutes old. Now the frontend's
+60-second poll of `/api/portfolio` triggers a refresh when the cache is stale, so simply
+having the page open keeps it current. It's fire-and-forget: a refresh of ~11 symbols takes
+about a second, but the request returns immediately with what's in the database and the next
+poll picks up the newer numbers. Requests are never blocked on a network fetch.
+
+**Trading windows** (UTC, weekdays only - approximate, and holidays aren't modelled; on a
+non-trading day yfinance simply returns nothing and the refresh is a no-op):
+
+- **ASX** 21:00-06:10 - pre-open auction through close
+- **US** 08:00-00:00 - pre-market from 04:00 ET through after-hours to 20:00 ET
+
+Refreshing gates on *extended* hours, not just the regular session. Gating on regular
+sessions alone meant US pre-market and after-hours moves never reached the database until
+the next full sync, even though the Pre/After Market card reads those quotes live.
+
+To force a refresh regardless of staleness or market hours:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:5050/api/prices/refresh
+```
+
+**On genuinely live streaming:** this is polling, not a stream. Sub-second updates would
+need a WebSocket feed pushed to the browser over SSE, which is a real piece of work in a
+single-worker Flask app (persistent connections, reconnect handling). Polling gets you to
+"a few seconds stale when you look at it", which is the right trade for a portfolio tracker.
+
 ### Brokerage import (Interactive Brokers)
 Connect an IBKR **Flex Web Service** token and query ID once, then pull trade executions straight in. Partial fills within the same minute are merged into a single trade, AUD conversion uses IBKR's own reported FX rate, and newly-imported tickers trigger a price sync automatically.
 
@@ -122,6 +160,8 @@ Mount a volume at `DATA_DIR` (defaults to the app directory if unset) - this is 
 | `DATA_DIR` | app directory | Where `prices.db` and CSV/Excel imports live |
 | `JWT_SECRET_KEY` | `dev-only-insecure-change-me` | Signs session tokens. **Set this to a random value in any real deployment.** |
 | `ALLOWED_HOSTS` | _(unset - any host)_ | Comma-separated hostnames this instance will answer to. Anything else gets a bare 404. See below. |
+| `LIVE_REFRESH_SECONDS` | `60` | Minimum gap between demand-driven price refreshes. Lower = fresher and more yfinance calls; `0` refreshes on every poll. |
+| `INTRADAY_REFRESH_MINUTES` | `5` | Scheduled intraday interval during extended hours. This is only a floor - freshness comes from the on-demand refresh. |
 
 If `DATA_DIR` is unset the app falls back to the repo directory and will happily create an empty `prices.db` there - if the UI shows no holdings after a restart, check you're pointing at the right directory.
 

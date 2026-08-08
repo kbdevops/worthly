@@ -761,6 +761,34 @@ def yf_symbol(ticker, exchange):
     suffix = EXCHANGE_SUFFIX.get((exchange or "").upper(), "")
     return f"{ticker.upper()}{suffix}"
 
+def _pick_monthly_snapshots(all_snapshots):
+    """One snapshot per calendar month, anchored to the month's START.
+
+    Returns (snapshots, is_current_month_flags), both date-ascending.
+
+    Snapshots are taken on the 1st, but mid-month ones also get added (corrections, a
+    manual top-up). This previously kept the LAST snapshot in each month, which meant a
+    month with extras reported the wrong date entirely — July 2026 has snapshots on the
+    1st, 7th, 16th, 27th and 30th, so the series showed 2026-07-30 and the step from
+    2026-06-01 spanned 59 days while the next step to 2026-08-01 spanned 2. Those two
+    then averaged into month-over-month stats as if each were a normal month.
+
+    So: completed months use their FIRST snapshot (the 1st), giving clean ~30-day steps.
+    The month still in progress uses its LATEST snapshot, which is the month-to-date
+    position and the number worth seeing now.
+    """
+    current_ym = pd.Timestamp(date.today()).to_period("M")
+    by_month: dict = {}
+    for s in sorted(all_snapshots, key=lambda r: r[0]):
+        ym = pd.Timestamp(s[0]).to_period("M")
+        if ym == current_ym:
+            by_month[ym] = s          # in-progress month: latest = month-to-date
+        elif ym not in by_month:
+            by_month[ym] = s          # completed month: first = the 1st
+    keys = sorted(by_month)
+    return [by_month[k] for k in keys], [k == current_ym for k in keys]
+
+
 def _split_ratios_by_symbol(txns):
     """Per-symbol [(split_timestamp, ratio)] for retro-adjusting historical unit counts.
 
@@ -2563,8 +2591,39 @@ def _compute_active_holdings(user_id):
 @app.route("/api/portfolio", methods=["GET"])
 @jwt_required()
 def get_portfolio():
-    """Return detailed analytics of current active holdings."""
+    """Return detailed analytics of current active holdings.
+
+    Kicks a background price refresh when the cache is stale — the frontend polls this
+    every 60s, so simply having the app open keeps prices near-live during trading
+    without the scheduler having to poll yfinance around the clock.
+    """
+    _maybe_refresh_prices_async()
     return jsonify(_compute_active_holdings(current_user_id()))
+
+
+@app.route("/api/prices/refresh", methods=["POST"])
+@jwt_required()
+def refresh_prices_now():
+    """Force an immediate intraday refresh, ignoring the staleness throttle.
+
+    Synchronous (~1s for 11 symbols) so the caller can re-read and see new numbers.
+    Backs a manual 'refresh' control, and works outside market hours too — the last
+    close is still the right answer then, it just won't have changed.
+    """
+    try:
+        results = _run_intraday_refresh()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    with _LIVE_REFRESH_LOCK:
+        _LIVE_REFRESH["at"] = time.time()
+    ok = sum(1 for r in results if r.get("ok"))
+    return jsonify({
+        "ok": True,
+        "symbols_refreshed": ok,
+        "symbols_total": len(results),
+        "market_active": _is_extended_hours(),
+        "results": results,
+    })
 
 RANGE_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
 
@@ -4413,13 +4472,9 @@ def get_monthly_change():
     all_snapshots = conn.execute("SELECT date, super, cash, COALESCE(source,'manual') FROM snapshots WHERE user_id = ? ORDER BY date", (uid,)).fetchall()
     conn.close()
 
-    # One point per calendar month — keep only the last snapshot of each month so
-    # mid-month corrections don't create duplicate bars.
-    by_month: dict = {}
-    for s in all_snapshots:
-        ym = pd.Timestamp(s[0]).to_period("M")
-        by_month[ym] = s
-    snapshots = [by_month[k] for k in sorted(by_month)]
+    # One point per calendar month, anchored to the START of the month, plus a
+    # month-to-date point for the month still in progress. See _pick_monthly_snapshots.
+    snapshots, _ = _pick_monthly_snapshots(all_snapshots)
 
     if not snapshots:
         return jsonify({"months": [], "change": [], "change_pct": [], "sources": []})
@@ -4520,19 +4575,7 @@ def _compute_monthly_nw_series(uid):
     ).fetchall()
     conn.close()
 
-    by_month: dict = {}
-    for s in all_snapshots:
-        ym = pd.Timestamp(s[0]).to_period("M")
-        by_month[ym] = s
-    month_keys = sorted(by_month)
-    snapshots = [by_month[k] for k in month_keys]
-    # The bucket for the CURRENT calendar month is whatever snapshot happens to exist so
-    # far this month — it hasn't run its full course. A user who snapshots roughly weekly
-    # will often add one just after a month rolls over (e.g. 30 Jul, then 1 Aug — two real
-    # days apart), and without this flag that gets averaged into month-over-month stats
-    # with the exact same weight as an actual ~30-day month, right alongside it.
-    current_ym = pd.Timestamp(date.today()).to_period("M")
-    current_month_flags = [k == current_ym for k in month_keys]
+    snapshots, current_month_flags = _pick_monthly_snapshots(all_snapshots)
 
     if not txns or not snapshots:
         return []
@@ -4558,6 +4601,7 @@ def _compute_monthly_nw_series(uid):
 
     result = []
     prev_nw = None
+    prev_ts = None
 
     for (s_date, s_super, s_cash, s_source), is_current in zip(snapshots, current_month_flags):
         s_ts = pd.Timestamp(s_date)
@@ -4594,8 +4638,10 @@ def _compute_monthly_nw_series(uid):
 
         total_nw = portfolio_val + s_cash + s_super
         change_pct = None
+        period_days = None
         if prev_nw is not None and prev_nw > 0:
             change_pct = round((total_nw - prev_nw) / prev_nw * 100, 2)
+            period_days = (pd.Timestamp(s_date) - prev_ts).days
 
         result.append({
             "date": s_date,
@@ -4606,8 +4652,12 @@ def _compute_monthly_nw_series(uid):
             "source": s_source,
             "change_pct": change_pct,
             "is_current_month": is_current,
+            # Days since the previous point. A change is only comparable to other months
+            # if this is roughly a month; see get_compounder's rate-stat filter.
+            "period_days": period_days,
         })
         prev_nw = total_nw
+        prev_ts = pd.Timestamp(s_date)
 
     return result
 
@@ -4626,12 +4676,17 @@ def get_compounder():
             "summary": {"peak_nw": 0, "avg_mom": 0, "months_positive": 0, "months_negative": 0},
         })
 
-    # Rate-based stats (avg/best/worst month, pos/neg counts) exclude the in-progress
-    # current month — it hasn't run its full course, so its change_pct isn't comparable
-    # to a completed month's. Level-based figures (nw_end, peak_nw, growth_dollar/pct)
-    # still use the true latest data below; only the rate averages skip it.
-    all_changes = [m["change_pct"] for m in monthly
-                   if m["change_pct"] is not None and not m["is_current_month"]]
+    # Rate-based stats (avg/best/worst month, pos/neg counts) only count steps that are
+    # actually about a month long. Filtering on `is_current_month` instead was wrong: with
+    # points anchored to the 1st, the in-progress month's step is usually a clean month
+    # (1 Jul -> 1 Aug) and excluding it threw away a valid sample. It becomes genuinely
+    # partial only once a mid-month snapshot lands, stretching the step past ~35 days.
+    # Level-based figures (nw_end, peak_nw, growth_dollar/pct) always use the latest data.
+    def _full_month(m):
+        d = m.get("period_days")
+        return m["change_pct"] is not None and d is not None and 20 <= d <= 40
+
+    all_changes = [m["change_pct"] for m in monthly if _full_month(m)]
     peak_nw = max(m["nw"] for m in monthly)
     months_positive = sum(1 for c in all_changes if c > 0)
     months_negative = sum(1 for c in all_changes if c < 0)
@@ -4653,8 +4708,7 @@ def get_compounder():
         last = months_in_fy[-1]
 
         prior_nw = fy_groups[sorted_fys[i - 1]][-1]["nw"] if i > 0 else None
-        fy_changes = [m["change_pct"] for m in months_in_fy
-                      if m["change_pct"] is not None and not m["is_current_month"]]
+        fy_changes = [m["change_pct"] for m in months_in_fy if _full_month(m)]
 
         fy_rows.append({
             "fy": f"FY{fy}",
@@ -4701,7 +4755,7 @@ def _scheduled_sync():
         print(f"[scheduler] Sync failed: {e}")
 
 def _is_market_open() -> bool:
-    """True if ASX or US market is currently open (UTC clock, weekdays only)."""
+    """True if ASX or US market is in its REGULAR session (UTC clock, weekdays only)."""
     now = datetime.utcnow()
     if now.weekday() >= 5:          # Saturday or Sunday
         return False
@@ -4711,8 +4765,67 @@ def _is_market_open() -> bool:
     return asx_open or us_open
 
 
+def _is_extended_hours() -> bool:
+    """True during regular OR extended trading (US pre-market and after-hours).
+
+    The refresh used to gate on _is_market_open, which covers regular sessions only. That
+    left US pre-market (from 04:00 ET) and after-hours (to 20:00 ET) never refreshing, so
+    a move there didn't land until the next scheduled sync — even though the Pre/After
+    Market card reads those quotes live. Windows are approximate and ignore holidays;
+    a non-trading day just means yfinance returns nothing and the refresh is a no-op.
+    """
+    now = datetime.utcnow()
+    if now.weekday() >= 5:
+        return False
+    h = now.hour + now.minute / 60
+    # ASX pre-open auction 07:00 AEST through close 16:10 AEST = 21:00–06:10 UTC.
+    asx = h >= 21.0 or h < 6.17
+    # US pre-market 04:00 ET through after-hours 20:00 ET = 08:00–00:00 UTC (EDT).
+    us = 8.0 <= h < 24.0
+    return asx or us
+
+
+# Demand-driven price refresh. The scheduler alone can only ever be as fresh as its
+# interval, so opening the app used to show prices up to 15 minutes old — or a day old
+# outside the regular session. A read now kicks a background refresh when the cache is
+# stale, which means no yfinance traffic at all when nobody is looking, and near-live
+# numbers when someone is. Fire-and-forget on purpose: a full refresh of 11 symbols takes
+# ~1s, but the request returns the current DB values immediately rather than waiting, and
+# the frontend's 60s poll picks up the newer figures.
+_LIVE_REFRESH = {"at": 0.0, "running": False}
+_LIVE_REFRESH_LOCK = threading.Lock()
+LIVE_REFRESH_SECONDS = int(os.environ.get("LIVE_REFRESH_SECONDS", "60"))
+
+
+def _maybe_refresh_prices_async():
+    """Kick a background intraday refresh if prices are stale and a market is active."""
+    if not _is_extended_hours():
+        return
+    now = time.time()
+    with _LIVE_REFRESH_LOCK:
+        if _LIVE_REFRESH["running"]:
+            return
+        if now - _LIVE_REFRESH["at"] < LIVE_REFRESH_SECONDS:
+            return
+        _LIVE_REFRESH["at"] = now
+        _LIVE_REFRESH["running"] = True
+
+    def _work():
+        try:
+            _run_intraday_refresh()
+        except Exception as e:
+            print(f"[live] on-demand refresh failed (non-fatal): {e}")
+        finally:
+            with _LIVE_REFRESH_LOCK:
+                _LIVE_REFRESH["running"] = False
+
+    threading.Thread(target=_work, daemon=True, name="live-price-refresh").start()
+
+
 def _scheduled_intraday_refresh():
-    if not _is_market_open():
+    # Extended hours, not just the regular session — otherwise US pre-market and
+    # after-hours moves never reach the DB until the next full sync.
+    if not _is_extended_hours():
         return
     try:
         results = _run_intraday_refresh()
@@ -4754,11 +4867,18 @@ def _scheduled_monthly_snapshot():
 _scheduler = BackgroundScheduler()
 _scheduler.add_job(_scheduled_sync, "cron", hour=6, minute=15, id="asx_close")   # after ASX close
 _scheduler.add_job(_scheduled_sync, "cron", hour=21, minute=15, id="us_close")   # after NYSE/NASDAQ close
-_scheduler.add_job(_scheduled_intraday_refresh, "interval", minutes=15, id="intraday_refresh")  # keeps today's price/Today's P&L feeling live between the two full syncs
+# Floor that keeps data warm even with nobody using the app. Real freshness comes from
+# the demand-driven refresh in /api/portfolio; this only has to stop the cache going
+# properly cold, so a modest interval is enough. Tune with INTRADAY_REFRESH_MINUTES.
+_scheduler.add_job(_scheduled_intraday_refresh, "interval",
+                   minutes=int(os.environ.get("INTRADAY_REFRESH_MINUTES", "5")),
+                   id="intraday_refresh")
 _scheduler.add_job(_scheduled_monthly_snapshot, "cron", day=1, hour=13, minute=0,
                     timezone="Australia/Melbourne", id="monthly_snapshot")  # 1pm Melbourne time, 1st of month, DST-aware
 _scheduler.start()
-print("[scheduler] Auto-sync scheduled: 06:15 UTC (ASX), 21:15 UTC (NYSE/NASDAQ), intraday refresh every 15min")
+print(f"[scheduler] Auto-sync 06:15 UTC (ASX) + 21:15 UTC (US); intraday every "
+      f"{os.environ.get('INTRADAY_REFRESH_MINUTES', '5')}min during extended hours; "
+      f"on-demand refresh throttled to {LIVE_REFRESH_SECONDS}s")
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=5050)
