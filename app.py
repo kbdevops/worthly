@@ -2460,6 +2460,11 @@ def _compute_active_holdings(user_id):
                 "units": 0.0,
                 "cost_aud": 0.0,
                 "cost_local": 0.0,
+                # Every dollar ever put into the ticker, never reduced by a sell.
+                # cost_aud shrinks as parcels go out the door, which makes it the
+                # right denominator for unrealised-only return and the wrong one for
+                # lifetime return — see total_return_pct below.
+                "gross_cost_aud": 0.0,
                 "buys_count": 0,
                 "sells_count": 0,
                 "realised_aud": 0.0,
@@ -2472,6 +2477,7 @@ def _compute_active_holdings(user_id):
             h["units"] += qty
             h["cost_aud"] += t["value"]
             h["cost_local"] += qty * t["price"]
+            h["gross_cost_aud"] += t["value"]
             h["buys_count"] += 1
         elif t["action"].lower() == "split":
             # Stock split: adjust units without changing cost basis
@@ -2497,12 +2503,14 @@ def _compute_active_holdings(user_id):
             h["sells_count"] += 1
 
     # Lifetime income per holding, reported in dollars only. Deliberately NOT
-    # turned into a percentage: this is income earned across every unit ever held,
-    # while cost_aud below covers only the units still held. Dividing one by the
-    # other overstates badly on trimmed positions (VAS earned ~$29k of income on a
-    # position that peaked near 2,600 units but is down to 430 — the ratio reads
-    # >100% and means nothing). Franking is tracked separately because it's a tax
-    # credit, not cash received.
+    # turned into a percentage against cost_aud: this is income earned across every
+    # unit ever held, while cost_aud covers only the units still held. Dividing one
+    # by the other overstates badly on trimmed positions (VAS earned ~$29k of income
+    # on a position that peaked near 2,600 units but was down to 430 — the ratio
+    # reads >100% and means nothing). total_return_pct below does express it as a
+    # percentage, but over gross_cost_aud, which is the matching denominator: every
+    # unit ever bought, against income from every unit ever held.
+    # Franking stays out of both because it's a tax credit, not cash received.
     div_conn = db()
     income_by_symbol, franking_by_symbol = {}, {}
     for sym_, net_, fr_ in div_conn.execute(
@@ -2542,12 +2550,30 @@ def _compute_active_holdings(user_id):
         return_aud = value_aud - h["cost_aud"]
         return_pct = (return_aud / h["cost_aud"] * 100) if h["cost_aud"] > 0 else 0.0
 
-        # Total return in dollars = unrealised capital gain on the units still held,
-        # plus all income the holding has paid out. return_pct stays capital-only so
-        # it keeps matching the figure the rest of the app already reports.
+        # ONE definition of lifetime total return, used everywhere it's reported:
+        # unrealised on units still held + realised on parcels already sold + income
+        # + franking. Summed over active and closed positions this reconciles exactly
+        # to total_return_all in /api/stats — it previously didn't, and the Holdings
+        # tab's Total column came up $50,226 short of the dashboard headline because
+        # it carried neither the realised leg nor franking.
+        # return_pct stays capital-only (and honestly labelled "Capital %") so the
+        # unrealised-on-units-held view is still available beside it.
         income_aud = round(income_by_symbol.get(sym, 0.0), 2)
         franking_aud = round(franking_by_symbol.get(sym, 0.0), 2)
-        total_return_aud = return_aud + income_aud
+        total_return_aud = return_aud + h["realised_aud"] + income_aud + franking_aud
+
+        # The same figure as a percentage, over gross cost — every dollar ever put in.
+        # return_pct answers "how are the units I still hold doing"; this answers
+        # "was this position worth owning", and they diverge sharply on anything
+        # trimmed. AMZN reads +12.5% on units held but +6.5% on the whole position,
+        # because two earlier parcels went out at a thinner gain — and it's the
+        # second number that lines up with Sharesight.
+        # Not annualised, deliberately: Sharesight annualises anything held over a
+        # year, which would leave these tiles showing a %/yr that reconciles with no
+        # dollar figure anywhere else in the app.
+        total_return_pct = (
+            total_return_aud / h["gross_cost_aud"] * 100 if h["gross_cost_aud"] > 0 else 0.0
+        )
 
         meta = fetch_holding_meta(h["ticker"], h["exchange"])
 
@@ -2562,6 +2588,7 @@ def _compute_active_holdings(user_id):
             "currency": h["currency"],
             "units": round(h["units"], 4),
             "cost_aud": round(h["cost_aud"], 2),
+            "gross_cost_aud": round(h["gross_cost_aud"], 2),
             "avg_price": round(avg_price_local, 4),
             "avg_price_aud": round(avg_price_aud, 4),
             "current_price": round(current_price, 4),
@@ -2573,6 +2600,7 @@ def _compute_active_holdings(user_id):
             "franking_aud": franking_aud,
             "realised_aud": round(h["realised_aud"], 2),
             "total_return_aud": round(total_return_aud, 2),
+            "total_return_pct": round(total_return_pct, 2),
             "daily_change": round(daily_change, 2),
             "daily_change_pct": round(daily_change_pct, 2),
             "buys_count": h["buys_count"],
@@ -2633,8 +2661,9 @@ def get_range_performance():
     """Per-holding performance scoped to a time window, so the Holding Performance
     treemap can follow the same 1M/3M/6M/1Y/All selector as the net worth chart.
 
-    'All' keeps the existing meaning — total return against what you actually paid,
-    matching the Holdings tab. A bounded window can't use cost basis (you may not
+    'All' means lifetime total return against everything ever committed to the
+    ticker — unrealised plus realised plus income, over gross cost (see
+    total_return_pct). A bounded window can't use cost basis at all (you may not
     have held the position for the whole window), so it reports the price move over
     that window instead, converted to AUD at each end so FX is included the same
     way it is everywhere else in the app.
@@ -2644,7 +2673,7 @@ def get_range_performance():
 
     if rng not in RANGE_DAYS:
         return jsonify([
-            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["return_pct"]}
+            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["total_return_pct"]}
             for h in holdings
         ])
 
@@ -2867,16 +2896,23 @@ def get_portfolio_sparklines():
 @app.route("/api/holding-groups", methods=["GET"])
 @jwt_required()
 def get_holding_groups():
-    """Return every group with computed aggregates — value, capital gain (unrealized),
-    income (net dividends received), currency, and blended return % — plus a grand
-    total row summing across every grouped holding. Mirrors the aggregates in a
-    Sharesight custom-group report."""
+    """Return every group with computed aggregates — value, capital gain (unrealised),
+    income (net dividends received), currency, capital % and lifetime total return —
+    plus a grand total row summing across every grouped holding. Mirrors the
+    aggregates in a Sharesight custom-group report."""
     uid = current_user_id()
     conn = db()
     rows = conn.execute("SELECT id, name, symbols FROM holding_groups WHERE user_id = ? ORDER BY id", (uid,)).fetchall()
     conn.close()
 
     holdings_by_symbol = {h["symbol"]: h for h in _compute_active_holdings(uid)}
+    # A group can name a symbol that's since been sold out entirely. Those have no
+    # active holding, but they still carry realised gain, income and franking that
+    # belong in the group's total — without this they'd silently contribute nothing
+    # but their dividends.
+    closed_by_symbol = {
+        yf_symbol(p["ticker"], p["exchange"]): p for p in _compute_closed_positions(uid)
+    }
 
     div_conn = db()
     div_rows = div_conn.execute("SELECT symbol, net_amount_aud FROM dividends WHERE user_id = ?", (uid,)).fetchall()
@@ -2887,25 +2923,50 @@ def get_holding_groups():
 
     def _aggregate(symbols):
         value = capital_gain = cost_basis = income = 0.0
+        realised = franking = gross_cost = 0.0
+        open_count = 0
         currencies = set()
         for sym in symbols:
             h = holdings_by_symbol.get(sym)
             if h:
+                open_count += 1
                 value += h["value_aud"]
                 capital_gain += h["return_aud"]
                 cost_basis += h["cost_aud"]
+                realised += h["realised_aud"]
+                franking += h["franking_aud"]
+                gross_cost += h["gross_cost_aud"]
                 currencies.add(h["currency"])
+            else:
+                cp = closed_by_symbol.get(sym)
+                if cp:
+                    realised += cp["realised_aud"]
+                    franking += cp["franking_aud"]
+                    gross_cost += cp["invested"]
+                    currencies.add(cp["currency"])
             income += income_by_symbol.get(sym, 0.0)
-        # Capital-only, matching the per-holding return_pct. Income is reported
-        # alongside in dollars but deliberately kept out of this ratio: it spans
-        # every unit ever held, while cost_basis covers only units still held, so
-        # folding it in inflates the figure on any group holding a trimmed position.
+        # Capital-only, matching the per-holding return_pct, and labelled "Capital %"
+        # in the UI. Income is deliberately kept out of THIS ratio: it spans every
+        # unit ever held, while cost_basis covers only units still held, so folding
+        # it in here inflates the figure on any group holding a trimmed position.
         return_pct = (capital_gain / cost_basis * 100) if cost_basis > 0 else 0.0
+        # The lifetime figure, same four legs as everywhere else in the app, over
+        # gross cost — which is the denominator that makes income safe to include.
+        total_return_aud = capital_gain + realised + income + franking
+        total_return_pct = (total_return_aud / gross_cost * 100) if gross_cost > 0 else 0.0
         currency = currencies.pop() if len(currencies) == 1 else ("Mixed" if len(currencies) > 1 else "AUD")
         return {
             "value": round(value, 2), "capital_gain": round(capital_gain, 2),
             "income": round(income, 2), "currency": currency, "return_pct": round(return_pct, 2),
             "cost_basis": round(cost_basis, 2),
+            "realised": round(realised, 2), "franking": round(franking, 2),
+            "gross_cost": round(gross_cost, 2),
+            # Symbols still held. A group keeps a symbol after it's sold out — the
+            # position's realised gain and income stay part of the group's history —
+            # so "3 holdings" can mean three names of which one is closed.
+            "open_count": open_count,
+            "total_return_aud": round(total_return_aud, 2),
+            "total_return_pct": round(total_return_pct, 2),
         }
 
     groups = []
@@ -3109,6 +3170,7 @@ def _compute_closed_positions(user_id):
         if p["units"] > 1e-5 or p["sells"] == 0:
             continue
         inc = round(float(income.get(p["ticker"], 0.0)), 2)
+        frk = round(float(franking.get(p["ticker"], 0.0)), 2)
         realised = round(p["realised"], 2)
         out.append({
             "ticker": p["ticker"],
@@ -3119,15 +3181,16 @@ def _compute_closed_positions(user_id):
             "proceeds": round(p["proceeds"], 2),
             "realised_aud": realised,
             "income_aud": inc,
-            "franking_aud": round(float(franking.get(p["ticker"], 0.0)), 2),
-            "total_return_aud": round(realised + inc, 2),
+            "franking_aud": frk,
+            "total_return_aud": round(realised + inc + frk, 2),
             # Must match total_return_aud, not just the realised leg. Quoting realised-only
             # next to a Total column that includes income read as a bad result: VAS showed
             # +20.14% beside $79,056.08, silently dropping $28,999.22 of dividends — the
-            # honest figure is 31.81%. Franking is excluded from both: it is a tax credit,
-            # not cash received, and is reported separately as franking_aud (as with
-            # active holdings, whose total_return_aud is also return + income).
-            "return_pct": round((realised + inc) / p["invested"] * 100, 2) if p["invested"] > 0 else None,
+            # honest figure is 31.81%. Franking is now inside both, matching active
+            # holdings and the dashboard headline: one definition of total return across
+            # the app, so per-position figures sum to it. It stays broken out as
+            # franking_aud so the tax-credit portion is still visible.
+            "return_pct": round((realised + inc + frk) / p["invested"] * 100, 2) if p["invested"] > 0 else None,
             "buys_count": p["buys"],
             "sells_count": p["sells"],
             "first_date": p["first_date"],
@@ -3390,7 +3453,11 @@ def get_stats():
     income_fy = round(sum(r["net_amount_aud"] for r in div_rows
                           if fy_start.isoformat() <= r["date"][:10] <= fy_end.isoformat()), 2)
     fy_start = fy_start.isoformat()
-    total_return_all = round(total_return + realised_gain + income_total, 2)
+    # Franking counts toward the total. It isn't cash the portfolio received — it's an
+    # ATO offset — but for an Australian resident it's refundable, so leaving it out
+    # understates what a fully-franked position was actually worth holding. Sharesight
+    # keeps it outside the return by default; this app deliberately doesn't.
+    total_return_all = round(total_return + realised_gain + income_total + franking_total, 2)
     mwr = _calc_mwr(txns, div_rows, total_value)
 
     return jsonify({

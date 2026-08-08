@@ -268,8 +268,18 @@ function HoldingsTable({
                       </span>
                     </div>
                   </td>
+                  {/* Realised rides under Capital the way franking rides under Income:
+                      both are legs of Total that have no column of their own, and without
+                      them on screen the row stops adding up — VAS read $48,612 across its
+                      visible cells against a Total of $88,075, the $39,463 difference being
+                      realised gain on parcels sold years ago. */}
                   <td className={cell + ` text-right font-medium ${h.return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {h.return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.return_aud)}
+                    {h.realised_aud !== 0 && (
+                      <div className="text-[10px] font-normal text-slate-500 leading-tight">
+                        {h.realised_aud >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(h.realised_aud))} realised
+                      </div>
+                    )}
                   </td>
                   <td className={cell + ` text-right font-medium ${h.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {fmtPct(h.return_pct)}
@@ -296,6 +306,55 @@ function HoldingsTable({
               </tr>
             )}
           </tbody>
+          {/* Foots every column it sits under, sub-lines included, so the breakdown
+              reads without repeating a single label — which is why this is a footer
+              and not a summary strip above the table. Open positions only: closed
+              ones have their own table and their own totals further down the page,
+              and the two together are what the dashboard headline reports. */}
+          {sorted.length > 0 && (() => {
+            const sum = (f: (h: Holding) => number) => holdings.reduce((s, h) => s + f(h), 0)
+            const capital  = sum(h => h.return_aud)
+            const realised = sum(h => h.realised_aud)
+            const income   = sum(h => h.income_aud)
+            const franking = sum(h => h.franking_aud)
+            const cost     = sum(h => h.cost_aud)
+            const grand    = sum(h => h.total_return_aud)
+            const tone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
+            const sub = 'text-[10px] font-normal text-slate-500 leading-tight'
+            return (
+              <tfoot>
+                <tr className="border-t-2 border-[var(--border)]" style={{ background: 'var(--bg-elevated)' }}>
+                  <td className={cell + ' font-semibold text-white'}>
+                    Total
+                    <span className={'block ' + sub}>
+                      {holdings.length} open position{holdings.length !== 1 ? 's' : ''}
+                    </span>
+                  </td>
+                  <td className={cell} /><td className={cell} /><td className={cell} />
+                  <td className={cell + ' text-right font-semibold text-white'}>{fmtCurrency(total)}</td>
+                  <td className={cell + ' text-right text-slate-500'}>100%</td>
+                  <td className={cell + ' text-right font-semibold ' + tone(capital)}>
+                    {capital >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(capital))}
+                    {realised !== 0 && (
+                      <div className={sub}>
+                        {realised >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(realised))} realised
+                      </div>
+                    )}
+                  </td>
+                  <td className={cell + ' text-right font-semibold ' + tone(capital)}>
+                    {fmtPct(cost > 0 ? (capital / cost) * 100 : 0)}
+                  </td>
+                  <td className={cell + ' text-right font-semibold text-amber-400'}>
+                    {income > 0 ? fmtCurrency(income) : '—'}
+                    {franking > 0 && <div className={sub}>+{fmtCurrency(franking)} franking</div>}
+                  </td>
+                  <td className={cell + ' text-right font-semibold ' + tone(grand)}>
+                    {grand >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(grand))}
+                  </td>
+                </tr>
+              </tfoot>
+            )
+          })()}
         </table>
       </div>
     </div>
@@ -397,7 +456,10 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
             { label: 'Value', value: fmtCurrency(holding.value_aud) },
             { label: 'Units', value: String(holding.units) },
             { label: 'Avg Cost', value: fmtCurrency(holding.avg_price_aud, 4) },
-            { label: 'Return', value: `${fmtCurrency(holding.return_aud)} (${fmtPct(holding.return_pct)})`, color: holding.return_aud >= 0 ? '#10b981' : '#ef4444' },
+            // "Capital", not "Return": this is the unrealised move on units still held,
+            // the same figure as the table's Capital column. Total return lives in the
+            // table's Total column and carries realised, income and franking as well.
+            { label: 'Capital', value: `${fmtCurrency(holding.return_aud)} (${fmtPct(holding.return_pct)})`, color: holding.return_aud >= 0 ? '#10b981' : '#ef4444' },
           ].map(s => (
             <div key={s.label} className="px-4 py-3" style={{ background: 'var(--bg-card)' }}>
               <p className="text-xs text-slate-400 mb-0.5">{s.label}</p>
@@ -837,6 +899,8 @@ export default function Holdings() {
                   <th className={TH2}>Income</th>
                   <th className={TH2}>Currency</th>
                   <th className={TH2}>Capital %</th>
+                  <th className={TH2}>Total</th>
+                  <th className={TH2}>Total %</th>
                   <th className={TH2}></th>
                 </tr>
               </thead>
@@ -847,7 +911,10 @@ export default function Holdings() {
                       <button onClick={() => openEditGroup(g)} className="text-white font-medium hover:text-indigo-400 text-left">
                         {g.name}
                       </button>
-                      <span className="block text-xs text-slate-500">{g.symbols.length} holding{g.symbols.length !== 1 ? 's' : ''}</span>
+                      <span className="block text-xs text-slate-500">
+                        {g.symbols.length} holding{g.symbols.length !== 1 ? 's' : ''}
+                        {g.open_count < g.symbols.length && ` · ${g.symbols.length - g.open_count} closed`}
+                      </span>
                     </td>
                     <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.value)}</td>
                     <td className={TD2}>
@@ -857,6 +924,16 @@ export default function Holdings() {
                     <td className={TD2 + ' text-slate-400'}>{g.currency}</td>
                     <td className={TD2}>
                       <span className={g.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtPct(g.return_pct)}</span>
+                    </td>
+                    <td className={TD2 + ' font-semibold'}>
+                      <span className={g.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {fmtCurrencySigned(g.total_return_aud)}
+                      </span>
+                    </td>
+                    <td className={TD2 + ' font-semibold'}>
+                      <span className={g.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {fmtPct(g.total_return_pct)}
+                      </span>
                     </td>
                     <td className={TD2}>
                       <button onClick={() => deleteGroup.mutate(g.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={14} /></button>
@@ -880,6 +957,16 @@ export default function Holdings() {
                       {fmtPct(groupsData.grand_total.return_pct)}
                     </span>
                   </td>
+                  <td className={TD2 + ' font-semibold'}>
+                    <span className={groupsData.grand_total.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {fmtCurrencySigned(groupsData.grand_total.total_return_aud)}
+                    </span>
+                  </td>
+                  <td className={TD2 + ' font-semibold'}>
+                    <span className={groupsData.grand_total.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {fmtPct(groupsData.grand_total.total_return_pct)}
+                    </span>
+                  </td>
                   <td className={TD2}></td>
                 </tr>
               </tfoot>
@@ -894,7 +981,7 @@ export default function Holdings() {
 
       {/* Stocks header + Add Transaction */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-slate-400">Stocks & ETFs</h2>
+        <h2 className="text-sm font-medium text-slate-400">Portfolio</h2>
         <button
           onClick={() => setShowAddTxn(true)}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
@@ -1088,8 +1175,9 @@ export default function Holdings() {
                       <td className={TD2 + (p.income_aud > 0 ? ' text-amber-400' : ' text-slate-600')}>
                         {p.income_aud > 0 ? fmtCurrency(p.income_aud) : '—'}
                       </td>
-                      {/* Shown but deliberately outside Total: a franking credit offsets tax,
-                          it is not cash the position paid out. */}
+                      {/* Broken out of Total rather than excluded from it — the credit
+                          offsets tax rather than being cash the position paid out, so
+                          it's worth seeing on its own. */}
                       <td className={TD2 + (p.franking_aud > 0 ? ' text-indigo-400' : ' text-slate-600')}>
                         {p.franking_aud > 0 ? fmtCurrency(p.franking_aud) : '—'}
                       </td>

@@ -84,6 +84,8 @@ export interface Holding {
   name: string
   units: number
   cost_aud: number
+  /** Every dollar ever put into the ticker — unlike cost_aud, not reduced by sells. */
+  gross_cost_aud: number
   avg_price: number
   avg_price_aud: number
   current_price: number
@@ -96,8 +98,16 @@ export interface Holding {
   income_aud: number
   /** Australian franking credits attached to that income (a tax credit, not cash). */
   franking_aud: number
-  /** return_aud + income_aud. */
+  /** Gain banked on parcels of this holding already sold, average-cost basis. */
+  realised_aud: number
+  /** return_aud + realised_aud + income_aud + franking_aud — the app-wide definition
+   *  of total return. Summed across active and closed positions it reconciles to
+   *  total_return_all in /api/stats. */
   total_return_aud: number
+  /** total_return_aud / gross_cost_aud. Lifetime return on the whole position, not
+   *  just the units still held — so it differs from return_pct on anything ever
+   *  trimmed. Not annualised. */
+  total_return_pct: number
   daily_change: number
   daily_change_pct: number
   weight: number
@@ -327,8 +337,20 @@ export interface HoldingGroup {
   capital_gain: number
   income: number
   currency: string
+  /** Capital only, over the cost of units still held — the "Capital %" column. */
   return_pct: number
   cost_basis: number
+  realised: number
+  franking: number
+  /** Every dollar ever put into the group's symbols, sold parcels included. */
+  gross_cost: number
+  /** How many of `symbols` are still held. Sold-out symbols stay in the group so
+   *  their realised gain and income remain part of its history. */
+  open_count: number
+  /** capital_gain + realised + income + franking — the app-wide definition. */
+  total_return_aud: number
+  /** total_return_aud over gross_cost. */
+  total_return_pct: number
 }
 
 export interface Dividend {

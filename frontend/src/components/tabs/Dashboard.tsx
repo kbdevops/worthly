@@ -342,14 +342,25 @@ function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
  * "Total Return" previously named the unrealised figure alone, which understated
  * lifetime profit by everything banked on a sale plus every dividend — $75,720 of it
  * on the reference portfolio. The rows sum to the headline exactly.
+ *
+ * Franking is a row of its own rather than an annotation on Income, because it is
+ * counted in the headline (see total_return_all) and every row here has to sum to
+ * that. Kept separate from Income rather than merged into it because the two are
+ * not the same kind of money — one is cash banked, the other an ATO offset you only
+ * realise at tax time — and a single "Income" line hiding both would misreport what
+ * actually landed in the account.
  */
-function ReturnLedger({ total, unrealised, realised, income }: {
-  total: number; unrealised: number; realised: number; income: number
+function ReturnLedger({ total, unrealised, realised, income, franking }: {
+  total: number; unrealised: number; realised: number; income: number; franking: number
 }) {
   const rows = [
     { label: 'Unrealised', value: unrealised },
     { label: 'Realised',   value: realised },
+    // Income is net: after US withholding, before any franking credit.
     { label: 'Income',     value: income },
+    ...(franking > 0
+      ? [{ label: 'Franking credits', value: franking, note: 'tax offset, not cash' }]
+      : []),
   ]
   const sign = (v: number) => (v >= 0 ? '+' : '−')
   return (
@@ -361,12 +372,16 @@ function ReturnLedger({ total, unrealised, realised, income }: {
       </p>
       <div className="mt-3">
         {rows.map(r => (
-          <div key={r.label}
-            className="flex justify-between items-baseline text-xs py-1.5 border-t border-[var(--border)] tabular-nums">
-            <span className="text-slate-400">{r.label}</span>
-            <span className="font-semibold" style={{ color: r.value >= 0 ? '#10b981' : '#ef4444' }}>
-              {sign(r.value)}{fmtCurrency(r.value)}
-            </span>
+          <div key={r.label} className="py-1.5 border-t border-[var(--border)]">
+            <div className="flex justify-between items-baseline text-xs tabular-nums">
+              <span className="text-slate-400">{r.label}</span>
+              <span className="font-semibold" style={{ color: r.value >= 0 ? '#10b981' : '#ef4444' }}>
+                {sign(r.value)}{fmtCurrency(r.value)}
+              </span>
+            </div>
+            {r.note && (
+              <p className="text-[10px] text-slate-500 text-right tabular-nums mt-0.5">{r.note}</p>
+            )}
           </div>
         ))}
       </div>
@@ -948,7 +963,7 @@ export default function Dashboard() {
       }
       case 'total_all': {
         const t = stats?.total_return_all ?? 0
-        return { label: 'Total Return (all)', value: fmtCurrencySigned(t), sub: 'unrealised + realised + income', color: t >= 0 ? '#10b981' : '#ef4444' }
+        return { label: 'Total Return (all)', value: fmtCurrencySigned(t), sub: 'unrealised + realised + income + franking', color: t >= 0 ? '#10b981' : '#ef4444' }
       }
       case 'cagr': {
         // Money-weighted (XIRR) over the real dated cash flows. The old CAGR here
@@ -1451,6 +1466,9 @@ export default function Dashboard() {
         // Returns follow the same range selector as the net worth chart. Falls back
         // to the portfolio's all-time figures until the range query resolves, so the
         // treemap never blanks out while switching ranges.
+        // 'All' is total_return_pct, not return_pct: the tile is labelled total
+        // return, so it has to carry realised gains and income, not just the
+        // unrealised move on units still held.
         const perfByTicker = new Map((rangePerf ?? []).map(r => [r.ticker, r]))
         const treemapData = portfolio
           ? portfolio
@@ -1458,7 +1476,7 @@ export default function Dashboard() {
               .map(h => ({
                 name: h.ticker as string,
                 size: h.value_aud as number,
-                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.return_pct as number),
+                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.total_return_pct as number),
                 logo_url: h.logo_url as string,
               }))
           : []
@@ -1693,6 +1711,7 @@ export default function Dashboard() {
             unrealised={stats?.total_return ?? 0}
             realised={stats?.realised_gain ?? 0}
             income={stats?.income_total ?? 0}
+            franking={stats?.franking_total ?? 0}
           />
         </div>
       </div>
