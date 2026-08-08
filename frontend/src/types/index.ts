@@ -57,10 +57,13 @@ export interface NetworthData {
 }
 
 export interface MonthlyChange {
+  /** First day of the month the change occurred IN — not the boundary that closes it. */
   months: string[]
   change: number[]
   change_pct: number[]
   sources: string[]
+  /** True for the trailing month still in progress; its bar is a part-month total. */
+  is_mtd: boolean[]
 }
 
 export interface AllocationCountry {

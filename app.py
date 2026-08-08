@@ -4600,15 +4600,9 @@ def get_monthly_change():
     sym_currency = df.groupby("sym")["currency"].first().to_dict()
     split_ratios = _split_ratios_by_symbol(txns)
 
-    months = []
-    changes = []
-    changes_pct = []
-    sources = []
-    prev_nw = None
-
-    for s_date, s_super, s_cash, s_source in snapshots:
-        s_ts = pd.Timestamp(s_date)
-        # Calculate portfolio value at this snapshot date
+    def nw_at(as_of, s_cash, s_super):
+        """Net worth on a date: portfolio valued at that date's prices, plus cash/super."""
+        s_ts = pd.Timestamp(as_of)
         portfolio_val = 0.0
         for sym in df["sym"].unique():
             # Get units up to this date
@@ -4640,23 +4634,39 @@ def get_monthly_change():
                     rate = audusd_rates[max(aud_dates)] if aud_dates else 0.65
                     price = price / rate
                 portfolio_val += units * price
+        return portfolio_val + s_cash + s_super
 
-        total_nw = portfolio_val + s_cash + s_super
-        months.append(s_date)
-        sources.append(s_source)
+    # Value the portfolio at each month boundary first, then turn consecutive
+    # boundaries into bars. Anchors are the 1st of each month (see _pick_monthly_snapshots).
+    anchors = [(s_date, nw_at(s_date, s_cash, s_super), s_source)
+               for s_date, s_super, s_cash, s_source in snapshots]
 
-        if prev_nw is not None and prev_nw > 0:
-            change = total_nw - prev_nw
-            pct = (change / prev_nw) * 100
-            changes.append(round(change, 2))
-            changes_pct.append(round(pct, 2))
-        else:
-            changes.append(0.0)
-            changes_pct.append(0.0)
+    # The month in progress has no closing boundary yet, so add one at today using the
+    # most recent cash/super on file and today's prices. Without this the chart simply
+    # stopped at the 1st and showed nothing at all for the current month.
+    today = date.today().isoformat()
+    mtd = False
+    if anchors and today > anchors[-1][0]:
+        latest = max(all_snapshots, key=lambda r: r[0])   # newest of ANY date, not just anchors
+        anchors.append((today, nw_at(today, latest[2], latest[1]), latest[3]))
+        mtd = True
 
-        prev_nw = total_nw
+    months, changes, changes_pct, sources, is_mtd = [], [], [], [], []
+    # A change between two boundaries happened during the month the earlier one opens,
+    # so label it with that month. Labelling by the closing boundary — which is what this
+    # did before — reported every month's performance one month late.
+    for (start_date, start_nw, start_src), (_, end_nw, _) in zip(anchors, anchors[1:]):
+        months.append(start_date)
+        sources.append(start_src)
+        change = end_nw - start_nw
+        changes.append(round(change, 2))
+        changes_pct.append(round((change / start_nw) * 100, 2) if start_nw > 0 else 0.0)
+        is_mtd.append(False)
+    if is_mtd:
+        is_mtd[-1] = mtd
 
-    return jsonify({"months": months, "change": changes, "change_pct": changes_pct, "sources": sources})
+    return jsonify({"months": months, "change": changes, "change_pct": changes_pct,
+                    "sources": sources, "is_mtd": is_mtd})
 
 
 def _compute_monthly_nw_series(uid):

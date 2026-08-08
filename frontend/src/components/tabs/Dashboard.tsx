@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
-  Line, BarChart, Bar, Cell,
+  Line, BarChart, Bar, Cell, LabelList,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Treemap,
   ComposedChart, Area, CartesianGrid,
 } from 'recharts'
@@ -203,7 +203,8 @@ const WIDGET_SPAN: Record<string, number> = {
   networth: 3,
   performance: 3,
   holdings: 6,
-  monthly: 2,
+  // Full width: 60+ monthly bars are unreadable squeezed into a third of the row.
+  monthly: 6,
 }
 const spanOf = (id: string) => WIDGET_SPAN[id] ?? 2
 
@@ -211,6 +212,14 @@ const spanOf = (id: string) => WIDGET_SPAN[id] ?? 2
 // the page. Sized to the tallest natural content (Portfolio Holdings' 11-row list)
 // so nothing has to scroll or be clipped — the charts simply get more room.
 const FULL_WIDGET_H = 560
+
+/** "2026-08-01" -> "Aug 26". Parsed as parts, not Date(str), so a bare yyyy-mm-dd
+ *  isn't read as UTC midnight and shifted back a day in eastern timezones. */
+const monthLabel = (iso: string): string => {
+  const [y, m] = iso.split('-').map(Number)
+  if (!y || !m) return iso
+  return new Date(y, m - 1, 1).toLocaleDateString('en-AU', { month: 'short', year: '2-digit' })
+}
 const DEFAULT_VISIBLE: Record<string, boolean> = {
   networth: true, 'alloc_country': true, monthly: true, performance: true, holdings: true,
 }
@@ -776,8 +785,27 @@ export default function Dashboard() {
   const nwData = filterByRange(nwRaw, range)
 
   const mcData = mc
-    ? mc.months.map((m, i) => ({ month: m, change: mc.change[i], pct: mc.change_pct[i], source: mc.sources?.[i] ?? 'manual' }))
+    ? mc.months.map((m, i) => ({
+        month: m,
+        change: mc.change[i],
+        pct: mc.change_pct[i],
+        source: mc.sources?.[i] ?? 'manual',
+        // The final bar covers a month still in progress, so it is not comparable with
+        // the completed ones and must never win "best" or "worst" on a part-month.
+        mtd: mc.is_mtd?.[i] ?? false,
+      }))
     : []
+
+  // Indices of the biggest gain and biggest loss among completed months only.
+  const { bestIdx, worstIdx } = useMemo(() => {
+    let b = -1, w = -1
+    mcData.forEach((d, i) => {
+      if (d.mtd) return
+      if (b < 0 || d.change > mcData[b].change) b = i
+      if (w < 0 || d.change < mcData[w].change) w = i
+    })
+    return { bestIdx: b, worstIdx: mcData[w]?.change < 0 ? w : -1 }
+  }, [mcData])
 
   const holdingsData = portfolio
     ? [...portfolio]
@@ -1254,44 +1282,91 @@ export default function Dashboard() {
 
       case 'monthly':
         return (
-          <div className={CARD} style={CARD_BG}>
+          <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
             <div className="flex items-center justify-between mb-4">
               <p className="text-sm font-medium text-slate-300">Monthly Change</p>
-              <span className="flex items-center gap-1.5 text-[10px] text-slate-600">
-                <span className="inline-block w-2 h-2 rounded-full bg-indigo-500/60" />auto-snapshot
-              </span>
+              <div className="flex items-center gap-3 text-[10px] text-slate-600">
+                <span>{mcData.length} months · best and worst annotated</span>
+                {mcData.some(d => d.mtd) && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#10b981', opacity: 0.45 }} />
+                    month-to-date
+                  </span>
+                )}
+              </div>
             </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={mcData}>
-                <XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
-                <Tooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null
-                    const d = payload[0].payload as typeof mcData[0]
-                    return (
-                      <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
-                        <p className="text-slate-400 text-[11px] mb-1">{d.month}</p>
-                        <p className="font-semibold text-sm" style={{ color: d.change >= 0 ? '#10b981' : '#ef4444' }}>
-                          {fmtCurrencySigned(d.change)}
-                        </p>
-                        <p className="text-slate-500 text-[10px]">{d.pct >= 0 ? '+' : ''}{d.pct.toFixed(1)}%</p>
-                        {d.source === 'auto' && <p className="text-indigo-400 text-[10px] mt-1">⚡ auto-snapshot</p>}
-                      </div>
-                    )
-                  }}
-                />
-                <Bar dataKey="change" radius={4}>
-                  {mcData.map((d, i) => (
-                    <Cell key={i}
-                      fill={d.change >= 0 ? '#10b981' : '#ef4444'}
-                      stroke={d.source === 'auto' ? '#818cf8' : 'transparent'}
-                      strokeWidth={d.source === 'auto' ? 1.5 : 0}
+            {/* min-h-0 so the flex child can actually shrink and let the chart fill the card */}
+            <div className="flex-1 min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={mcData} margin={{ top: 26, right: 12, left: 0, bottom: 0 }}>
+                  <XAxis
+                    dataKey="month"
+                    tick={{ fill: '#64748b', fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    tickFormatter={v => monthLabel(v)}
+                  />
+                  <YAxis tick={{ fill: '#64748b', fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'} />
+                  <Tooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null
+                      const d = payload[0].payload as typeof mcData[0]
+                      return (
+                        <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
+                          <p className="text-slate-400 text-[11px] mb-1">
+                            {monthLabel(d.month)}{d.mtd ? ' · month-to-date' : ''}
+                          </p>
+                          <p className="font-semibold text-sm" style={{ color: d.change >= 0 ? '#10b981' : '#ef4444' }}>
+                            {fmtCurrencySigned(d.change)}
+                          </p>
+                          <p className="text-slate-500 text-[10px]">{d.pct >= 0 ? '+' : ''}{d.pct.toFixed(1)}%</p>
+                          {d.source === 'auto' && <p className="text-indigo-400 text-[10px] mt-1">⚡ auto-snapshot</p>}
+                        </div>
+                      )
+                    }}
+                  />
+                  <Bar dataKey="change" radius={4}>
+                    {mcData.map((d, i) => (
+                      <Cell key={i}
+                        fill={d.change >= 0 ? '#10b981' : '#ef4444'}
+                        // The in-progress month is drawn faded so a part-month total can't be
+                        // mistaken for a finished one sitting next to 65 completed bars.
+                        fillOpacity={d.mtd ? 0.45 : 1}
+                        stroke={d.mtd ? (d.change >= 0 ? '#10b981' : '#ef4444')
+                              : d.source === 'auto' ? '#818cf8' : 'transparent'}
+                        strokeWidth={d.mtd ? 1.5 : d.source === 'auto' ? 1.5 : 0}
+                        strokeDasharray={d.mtd ? '3 2' : undefined}
+                      />
+                    ))}
+                    <LabelList
+                      dataKey="change"
+                      content={props => {
+                        // Recharts types this loosely; the bar geometry is always numeric here.
+                        const { index: i, x, y, width: w, height: h } = props as unknown as
+                          { index: number; x: number; y: number; width: number; height: number }
+                        const isBest = i === bestIdx, isWorst = i === worstIdx
+                        const d = mcData[i]
+                        if (!d || (!isBest && !isWorst && !d.mtd)) return null
+                        const up = d.change >= 0
+                        // Recharts hands back a NEGATIVE height for downward bars, so
+                        // y is the far edge rather than the top. Normalise before
+                        // offsetting, or the label lands inside the bar it describes —
+                        // red text on a red bar.
+                        const top = Math.min(y, y + h), bottom = Math.max(y, y + h)
+                        const ty = up ? top - 7 : bottom + 15
+                        const colour = d.mtd ? '#64748b' : up ? '#34d399' : '#f87171'
+                        return (
+                          <text x={x + w / 2} y={ty} textAnchor="middle"
+                            fill={colour} fontSize={11} fontWeight={600}>
+                            {d.mtd ? 'MTD' : (up ? '+' : '−') + '$' + Math.round(Math.abs(d.change) / 1000) + 'k'}
+                          </text>
+                        )
+                      }}
                     />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         )
 
