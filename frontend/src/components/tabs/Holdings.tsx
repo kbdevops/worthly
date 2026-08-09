@@ -156,6 +156,8 @@ function Sparkline({ series }: { series?: number[] }) {
 type HoldingSort = 'ticker' | 'daily_change_pct' | 'units' | 'value_aud' | 'return_aud' | 'return_pct'
   | 'income_aud' | 'total_return_aud' | 'total_return_pct'
   | 'capital_gain_aud' | 'capital_gain_pct' | 'currency_gain_aud' | 'currency_gain_pct' | 'income_pct'
+  | 'held_capital_aud' | 'held_capital_pct' | 'held_currency_aud' | 'held_currency_pct'
+  | 'held_income_aud' | 'held_income_pct' | 'holding_return_aud' | 'holding_return_pct'
 
 /** Dollars or percentages, for the Sharesight-style AU$ / % switch. One state drives
  *  both the Portfolio table and Holding Groups so they never disagree on screen. */
@@ -211,10 +213,10 @@ function HoldingsTable({
     // Capital / Income / Currency / Return, mirroring Sharesight. All four are
     // lifetime figures over gross cost and they ADD to Return, which is only true
     // because Capital here excludes FX — the currency leg is its own column now.
-    { key: unit === 'aud' ? 'capital_gain_aud'  : 'capital_gain_pct',  label: 'Capital Gain', align: 'right' },
-    { key: unit === 'aud' ? 'income_aud'        : 'income_pct',        label: 'Income',   align: 'right' },
-    { key: unit === 'aud' ? 'currency_gain_aud' : 'currency_gain_pct', label: 'Currency', align: 'right' },
-    { key: unit === 'aud' ? 'total_return_aud'  : 'total_return_pct',  label: 'Return',   align: 'right' },
+    { key: unit === 'aud' ? 'held_capital_aud'  : 'held_capital_pct',  label: 'Capital Gain', align: 'right' },
+    { key: unit === 'aud' ? 'held_income_aud'   : 'held_income_pct',        label: 'Income',   align: 'right' },
+    { key: unit === 'aud' ? 'held_currency_aud' : 'held_currency_pct', label: 'Currency', align: 'right' },
+    { key: unit === 'aud' ? 'holding_return_aud': 'holding_return_pct',  label: 'Return',   align: 'right' },
   ]
 
   const cell = 'px-3 py-2.5 text-sm whitespace-nowrap tabular-nums'
@@ -300,29 +302,29 @@ function HoldingsTable({
                       them on screen the row stops adding up — VAS read $48,612 across its
                       visible cells against a Return of $88,075, the $39,463 difference
                       being realised gain on parcels sold years ago. */}
-                  <td className={cell + ' text-right font-medium ' + tone(h.capital_gain_aud)}>
-                    {money(h.capital_gain_aud, h.capital_gain_pct)}
+                  <td className={cell + ' text-right font-medium ' + tone(h.held_capital_aud)}>
+                    {money(h.held_capital_aud, h.held_capital_pct)}
                     {h.realised_aud !== 0 && (
                       <div className={subline}>
                         {h.realised_aud >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(h.realised_aud))} realised
                       </div>
                     )}
                   </td>
-                  <td className={cell + ' text-right font-medium ' + (h.income_aud > 0 ? 'text-amber-400' : 'text-slate-600')}>
-                    {h.income_aud > 0
-                      ? (unit === 'aud' ? fmtCurrency(h.income_aud) : fmtPct(h.income_pct))
+                  <td className={cell + ' text-right font-medium ' + (h.held_income_aud > 0 ? 'text-amber-400' : 'text-slate-600')}>
+                    {h.held_income_aud > 0
+                      ? (unit === 'aud' ? fmtCurrency(h.held_income_aud) : fmtPct(h.held_income_pct))
                       : '—'}
-                    {h.franking_aud > 0 && (
+                    {h.held_franking_aud > 0 && (
                       <div className={subline}>
-                        +{unit === 'aud' ? fmtCurrency(h.franking_aud) : fmtPct(h.franking_pct_of_cost)} franking
+                        +{unit === 'aud' ? fmtCurrency(h.held_franking_aud) : fmtPct(h.held_franking_pct)} franking
                       </div>
                     )}
                   </td>
-                  <td className={cell + ' text-right font-medium ' + (h.currency_gain_aud === 0 ? 'text-slate-600' : tone(h.currency_gain_aud))}>
-                    {h.currency_gain_aud === 0 ? '—' : money(h.currency_gain_aud, h.currency_gain_pct)}
+                  <td className={cell + ' text-right font-medium ' + (h.held_currency_aud === 0 ? 'text-slate-600' : tone(h.held_currency_aud))}>
+                    {h.held_currency_aud === 0 ? '—' : money(h.held_currency_aud, h.held_currency_pct)}
                   </td>
-                  <td className={cell + ' text-right font-semibold ' + tone(h.total_return_aud)}>
-                    {money(h.total_return_aud, h.total_return_pct)}
+                  <td className={cell + ' text-right font-semibold ' + tone(h.holding_return_aud)}>
+                    {money(h.holding_return_aud, h.holding_return_pct)}
                   </td>
                 </tr>
               )
@@ -342,13 +344,13 @@ function HoldingsTable({
               and the two together are what the dashboard headline reports. */}
           {sorted.length > 0 && (() => {
             const sum = (f: (h: Holding) => number) => holdings.reduce((s, h) => s + f(h), 0)
-            const capital  = sum(h => h.capital_gain_aud)
-            const currency = sum(h => h.currency_gain_aud)
+            const capital  = sum(h => h.held_capital_aud)
+            const currency = sum(h => h.held_currency_aud)
             const realised = sum(h => h.realised_aud)
-            const income   = sum(h => h.income_aud)
-            const franking = sum(h => h.franking_aud)
-            const gross    = sum(h => h.gross_cost_aud)
-            const grand    = sum(h => h.total_return_aud)
+            const income   = sum(h => h.held_income_aud)
+            const franking = sum(h => h.held_franking_aud)
+            const gross    = sum(h => h.cost_aud)
+            const grand    = sum(h => h.holding_return_aud)
             const sub = subline
             // Percentages are recomputed over the summed gross cost rather than
             // averaged across rows — averaging percentages would weight a $20k
@@ -990,19 +992,19 @@ export default function Holdings() {
                     </td>
                     <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.value)}</td>
                     <td className={TD2}>
-                      <span className={gTone(g.capital_only_aud)}>{gVal(g.capital_only_aud, g.capital_only_pct)}</span>
+                      <span className={gTone(g.held_capital_aud)}>{gVal(g.held_capital_aud, g.held_capital_pct)}</span>
                     </td>
                     <td className={TD2 + ' text-amber-400'}>
-                      {unit === 'aud' ? fmtCurrency(g.income) : fmtPct(g.income_pct)}
+                      {unit === 'aud' ? fmtCurrency(g.held_income_aud) : fmtPct(g.held_income_pct)}
                     </td>
-                    <td className={TD2 + (g.currency_gain_aud === 0 ? ' text-slate-600' : '')}>
-                      {g.currency_gain_aud === 0
+                    <td className={TD2 + (g.held_currency_aud === 0 ? ' text-slate-600' : '')}>
+                      {g.held_currency_aud === 0
                         ? '—'
-                        : <span className={gTone(g.currency_gain_aud)}>{gVal(g.currency_gain_aud, g.currency_gain_pct)}</span>}
+                        : <span className={gTone(g.held_currency_aud)}>{gVal(g.held_currency_aud, g.held_currency_pct)}</span>}
                     </td>
                     <td className={TD2 + ' font-semibold'}>
-                      <span className={gTone(g.total_return_aud)}>
-                        {gVal(g.total_return_aud, g.total_return_pct)}
+                      <span className={gTone(g.holding_return_aud)}>
+                        {gVal(g.holding_return_aud, g.holding_return_pct)}
                       </span>
                     </td>
                     <td className={TD2}>
@@ -1016,23 +1018,23 @@ export default function Holdings() {
                   <td className={TD2 + ' font-semibold text-white'}>Grand Total</td>
                   <td className={TD2 + ' font-semibold text-white'}>{fmtCurrency(groupsData.grand_total.value)}</td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={gTone(groupsData.grand_total.capital_only_aud)}>
-                      {gVal(groupsData.grand_total.capital_only_aud, groupsData.grand_total.capital_only_pct)}
+                    <span className={gTone(groupsData.grand_total.held_capital_aud)}>
+                      {gVal(groupsData.grand_total.held_capital_aud, groupsData.grand_total.held_capital_pct)}
                     </span>
                   </td>
                   <td className={TD2 + ' font-semibold text-amber-400'}>
                     {unit === 'aud'
-                      ? fmtCurrency(groupsData.grand_total.income)
-                      : fmtPct(groupsData.grand_total.income_pct)}
+                      ? fmtCurrency(groupsData.grand_total.held_income_aud)
+                      : fmtPct(groupsData.grand_total.held_income_pct)}
                   </td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={gTone(groupsData.grand_total.currency_gain_aud)}>
-                      {gVal(groupsData.grand_total.currency_gain_aud, groupsData.grand_total.currency_gain_pct)}
+                    <span className={gTone(groupsData.grand_total.held_currency_aud)}>
+                      {gVal(groupsData.grand_total.held_currency_aud, groupsData.grand_total.held_currency_pct)}
                     </span>
                   </td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={gTone(groupsData.grand_total.total_return_aud)}>
-                      {gVal(groupsData.grand_total.total_return_aud, groupsData.grand_total.total_return_pct)}
+                    <span className={gTone(groupsData.grand_total.holding_return_aud)}>
+                      {gVal(groupsData.grand_total.holding_return_aud, groupsData.grand_total.holding_return_pct)}
                     </span>
                   </td>
                   <td className={TD2}></td>

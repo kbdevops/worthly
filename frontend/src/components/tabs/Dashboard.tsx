@@ -1466,10 +1466,10 @@ export default function Dashboard() {
         // Returns follow the same range selector as the net worth chart. Falls back
         // to the portfolio's all-time figures until the range query resolves, so the
         // treemap never blanks out while switching ranges.
-        // 'All' is return_pct — the move on units still held. The tile's AREA is
-        // current value, so its number has to be about current holdings too; a
-        // lifetime figure spanning capital already withdrawn puts two timeframes
-        // in one rectangle. Lifetime total return is the Holdings tab's Total column.
+        // 'All' is holding_return_pct — identical to the Portfolio table's Return
+        // column, so the tile and the table finally quote one number. The tile's AREA
+        // is current value, so its figure covers current holdings only; the lifetime
+        // one, which counts sold parcels, is the dashboard headline.
         const perfByTicker = new Map((rangePerf ?? []).map(r => [r.ticker, r]))
         const treemapData = portfolio
           ? portfolio
@@ -1477,7 +1477,7 @@ export default function Dashboard() {
               .map(h => ({
                 name: h.ticker as string,
                 size: h.value_aud as number,
-                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.return_pct as number),
+                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.holding_return_pct as number),
                 logo_url: h.logo_url as string,
               }))
           : []

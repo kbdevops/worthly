@@ -119,6 +119,20 @@ export interface Holding {
   currency_gain_pct: number
   income_pct: number
   franking_pct_of_cost: number
+  /* Holdings basis — the units you still own, over what those units cost. Parcels
+   * already sold are excluded entirely; income and franking are pro-rated by the
+   * share of gross cost still invested. These four add to holding_return_aud. This
+   * is what the Portfolio table shows: a list of holdings should describe holdings. */
+  held_capital_aud: number
+  held_capital_pct: number
+  held_currency_aud: number
+  held_currency_pct: number
+  held_income_aud: number
+  held_income_pct: number
+  held_franking_aud: number
+  held_franking_pct: number
+  holding_return_aud: number
+  holding_return_pct: number
   daily_change: number
   daily_change_pct: number
   weight: number
@@ -371,6 +385,16 @@ export interface HoldingGroup {
   currency_gain_pct: number
   income_pct: number
   franking_aud: number
+  /* Holdings basis, matching the Portfolio table. A fully-exited symbol contributes
+   * nothing here — it is no longer a holding. */
+  held_capital_aud: number
+  held_capital_pct: number
+  held_currency_aud: number
+  held_currency_pct: number
+  held_income_aud: number
+  held_income_pct: number
+  holding_return_aud: number
+  holding_return_pct: number
 }
 
 export interface Dividend {

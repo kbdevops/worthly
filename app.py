@@ -2628,11 +2628,28 @@ def _compute_active_holdings(user_id):
         unreal_price = value_at_buy_fx - h["cost_aud"]
         unreal_fx = value_aud - value_at_buy_fx
 
-        # Lifetime, over everything ever invested. These four are ADDITIVE by
-        # construction — capital + currency + income + franking == total_return_aud —
-        # which is what lets the table show them as columns that foot to Return.
-        # An AUD holding lands on currency == 0 exactly: exch_rate is 1.0 on every
-        # trade, so cost_local_gross == cost_aud and fx_avg is exactly 1.
+        # ── What the table reports: the position you actually hold ──────────────
+        # Parcels already sold are NOT in these. A row in a list of holdings should
+        # describe those holdings; AMZN reading 6.53% because two parcels left at a
+        # thinner gain months ago is a portfolio-level fact wearing a holding's row.
+        # Capital here is therefore the local price move on the units still held
+        # (AMZN: US$227.18 → US$274.44 = 20.81%, the figure a US broker quotes), and
+        # Currency is what the rate did to those same units.
+        #
+        # Income is pro-rated by the share of gross cost still invested — the whole
+        # dividend history divided by the units left is the VAS trap (its $28,999 over
+        # 430 remaining units reads 126.85%). Note the pro-rated dollars over cost_aud
+        # give exactly the same percentage as the full dollars over gross_cost_aud,
+        # since cost per unit is constant under average-cost. Only the $ figure moves.
+        held_share = (h["cost_aud"] / h["gross_cost_aud"]) if h["gross_cost_aud"] > 0 else 0.0
+        income_held_aud = income_aud * held_share
+        franking_held_aud = franking_aud * held_share
+        holding_return_aud = unreal_price + unreal_fx + income_held_aud + franking_held_aud
+        pct_of_cost = (lambda v: v / h["cost_aud"] * 100) if h["cost_aud"] > 0 else (lambda v: 0.0)
+
+        # ── Lifetime, over everything ever invested ─────────────────────────────
+        # Kept for the dashboard headline and anything reconciling to it: this is the
+        # only basis on which realised gain and the full dividend history are counted.
         capital_gain_aud = unreal_price + h["realised_price_aud"]
         currency_gain_aud = unreal_fx + h["realised_fx_aud"]
         pct_of_gross = (lambda v: v / h["gross_cost_aud"] * 100) if h["gross_cost_aud"] > 0 else (lambda v: 0.0)
@@ -2663,8 +2680,19 @@ def _compute_active_holdings(user_id):
             "realised_aud": round(h["realised_aud"], 2),
             "total_return_aud": round(total_return_aud, 2),
             "total_return_pct": round(total_return_pct, 2),
-            # Sharesight-style decomposition. All four percentages share the
-            # gross_cost_aud denominator so they add up to total_return_pct.
+            # ── Holdings basis: the units you still own. What the tables show. ──
+            # These four add to holding_return_aud, all over cost_aud.
+            "held_capital_aud": round(unreal_price, 2),
+            "held_capital_pct": round(pct_of_cost(unreal_price), 2),
+            "held_currency_aud": round(unreal_fx, 2),
+            "held_currency_pct": round(pct_of_cost(unreal_fx), 2),
+            "held_income_aud": round(income_held_aud, 2),
+            "held_income_pct": round(pct_of_cost(income_held_aud), 2),
+            "held_franking_aud": round(franking_held_aud, 2),
+            "held_franking_pct": round(pct_of_cost(franking_held_aud), 2),
+            "holding_return_aud": round(holding_return_aud, 2),
+            "holding_return_pct": round(pct_of_cost(holding_return_aud), 2),
+            # ── Lifetime basis: everything ever bought. Feeds the headline. ──
             "capital_gain_aud": round(capital_gain_aud, 2),
             "capital_gain_pct": round(pct_of_gross(capital_gain_aud), 2),
             "currency_gain_aud": round(currency_gain_aud, 2),
@@ -2731,15 +2759,15 @@ def get_range_performance():
     """Per-holding performance scoped to a time window, so the Holding Performance
     treemap can follow the same 1M/3M/6M/1Y/All selector as the net worth chart.
 
-    'All' means the move on the units you still hold, since you bought them — the
-    same figure as the Holdings tab's Capital %. It is deliberately NOT the lifetime
-    total return: the treemap sizes each tile by CURRENT value, so a percentage
-    covering capital you no longer have invested puts two different timeframes in
-    one rectangle. It also has to agree with its own range selector — 1M/3M/6M/1Y
-    all report a move on current holdings, so 'All' must too, or the dropdown
-    silently changes what it measures at the last option.
-    Lifetime total return lives in the Holdings tab's Total column, the group
-    totals, the closed-positions table and the dashboard headline.
+    'All' is holding_return_pct — the same number as the Portfolio table's Return
+    column: price, currency and a pro-rated share of dividends on the units you
+    still hold. Parcels already sold are excluded, because the treemap sizes each
+    tile by CURRENT value and a percentage covering capital you no longer have
+    invested puts two different timeframes in one rectangle. It also has to agree
+    with its own range selector — 1M/3M/6M/1Y all report a move on current
+    holdings, so 'All' must too.
+    Lifetime total return, which does count sold parcels, lives in the dashboard
+    headline and the closed-positions table.
     A bounded window can't use cost basis at all (you may not have held the position
     for the whole window), so it reports the price move over that window instead,
     converted to AUD at each end so FX is included the same way it is everywhere
@@ -2750,7 +2778,7 @@ def get_range_performance():
 
     if rng not in RANGE_DAYS:
         return jsonify([
-            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["return_pct"]}
+            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["holding_return_pct"]}
             for h in holdings
         ])
 
@@ -3002,6 +3030,7 @@ def get_holding_groups():
         value = capital_gain = cost_basis = income = 0.0
         realised = franking = gross_cost = 0.0
         capital_only = currency_gain = 0.0
+        held_capital = held_currency = held_income = held_franking = 0.0
         open_count = 0
         currencies = set()
         for sym in symbols:
@@ -3016,6 +3045,10 @@ def get_holding_groups():
                 gross_cost += h["gross_cost_aud"]
                 capital_only += h["capital_gain_aud"]
                 currency_gain += h["currency_gain_aud"]
+                held_capital += h["held_capital_aud"]
+                held_currency += h["held_currency_aud"]
+                held_income += h["held_income_aud"]
+                held_franking += h["held_franking_aud"]
                 currencies.add(h["currency"])
             else:
                 cp = closed_by_symbol.get(sym)
@@ -3025,6 +3058,9 @@ def get_holding_groups():
                     gross_cost += cp["invested"]
                     capital_only += cp["capital_gain_aud"]
                     currency_gain += cp["currency_gain_aud"]
+                    # Nothing added to the held_* legs: a fully-exited position is not
+                    # a holding, so it contributes nothing to a holdings-basis figure.
+                    # Its history stays in the lifetime legs and the "1 closed" label.
                     currencies.add(cp["currency"])
             income += income_by_symbol.get(sym, 0.0)
         # Capital-only, matching the per-holding return_pct, and labelled "Capital %"
@@ -3049,6 +3085,18 @@ def get_holding_groups():
             "currency_gain_pct": round(currency_gain / gross_cost * 100, 2) if gross_cost > 0 else 0.0,
             "income_pct": round(income / gross_cost * 100, 2) if gross_cost > 0 else 0.0,
             "franking_aud": round(franking, 2),
+            # Holdings basis — units still owned, over the cost of those units. What
+            # the tables show, so groups and the Portfolio list agree row for row.
+            "held_capital_aud": round(held_capital, 2),
+            "held_capital_pct": round(held_capital / cost_basis * 100, 2) if cost_basis > 0 else 0.0,
+            "held_currency_aud": round(held_currency, 2),
+            "held_currency_pct": round(held_currency / cost_basis * 100, 2) if cost_basis > 0 else 0.0,
+            "held_income_aud": round(held_income, 2),
+            "held_income_pct": round(held_income / cost_basis * 100, 2) if cost_basis > 0 else 0.0,
+            "holding_return_aud": round(held_capital + held_currency + held_income + held_franking, 2),
+            "holding_return_pct": round(
+                (held_capital + held_currency + held_income + held_franking) / cost_basis * 100, 2
+            ) if cost_basis > 0 else 0.0,
             "cost_basis": round(cost_basis, 2),
             "realised": round(realised, 2), "franking": round(franking, 2),
             "gross_cost": round(gross_cost, 2),
