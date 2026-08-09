@@ -155,16 +155,34 @@ function Sparkline({ series }: { series?: number[] }) {
 
 type HoldingSort = 'ticker' | 'daily_change_pct' | 'units' | 'value_aud' | 'return_aud' | 'return_pct'
   | 'income_aud' | 'total_return_aud' | 'total_return_pct'
+  | 'capital_gain_aud' | 'capital_gain_pct' | 'currency_gain_aud' | 'currency_gain_pct' | 'income_pct'
+
+/** Dollars or percentages, for the Sharesight-style AU$ / % switch. One state drives
+ *  both the Portfolio table and Holding Groups so they never disagree on screen. */
+type Unit = 'aud' | 'pct'
+
+function UnitToggle({ unit, onChange }: { unit: Unit; onChange: (u: Unit) => void }) {
+  const base = 'px-2.5 py-1 text-[11px] font-medium transition-colors'
+  const on = 'bg-[var(--accent)] text-white'
+  const off = 'text-slate-400 hover:text-white'
+  return (
+    <div className="inline-flex rounded-md overflow-hidden border border-[var(--border)]">
+      <button className={base + ' ' + (unit === 'aud' ? on : off)} onClick={() => onChange('aud')}>AU$</button>
+      <button className={base + ' ' + (unit === 'pct' ? on : off)} onClick={() => onChange('pct')}>%</button>
+    </div>
+  )
+}
 
 /** Dense, sortable view of every holding — replaces one card per holding, which
  *  repeated the same four labels N times and made two holdings impossible to
  *  compare without scrolling. Cards are still used below the md breakpoint. */
 function HoldingsTable({
-  holdings, sparklines, onSelect,
+  holdings, sparklines, onSelect, unit,
 }: {
   holdings: Holding[]
   sparklines: Record<string, number[]>
   onSelect: (h: Holding) => void
+  unit: Unit
 }) {
   const [sortKey, setSortKey] = useState<HoldingSort>('value_aud')
   const [sortDir, setSortDir] = useState<1 | -1>(-1)
@@ -190,17 +208,22 @@ function HoldingsTable({
     { key: 'units',            label: 'Units',    align: 'right' },
     { key: 'value_aud',        label: 'Value',    align: 'right' },
     {                          label: 'Weight',   align: 'right' },
-    { key: 'return_aud',       label: 'Capital',  align: 'right' },
-    { key: 'return_pct',       label: 'Capital %', align: 'right' },
-    { key: 'income_aud',       label: 'Income',   align: 'right' },
-    { key: 'total_return_aud', label: 'Total',    align: 'right' },
-    // Over gross cost, so it differs from Capital % on anything ever trimmed —
-    // AMZN reads 12.51% / 6.53%. Both columns are wanted precisely because they
-    // disagree there.
-    { key: 'total_return_pct', label: 'Total %',  align: 'right' },
+    // Capital / Income / Currency / Return, mirroring Sharesight. All four are
+    // lifetime figures over gross cost and they ADD to Return, which is only true
+    // because Capital here excludes FX — the currency leg is its own column now.
+    { key: unit === 'aud' ? 'capital_gain_aud'  : 'capital_gain_pct',  label: 'Capital Gain', align: 'right' },
+    { key: unit === 'aud' ? 'income_aud'        : 'income_pct',        label: 'Income',   align: 'right' },
+    { key: unit === 'aud' ? 'currency_gain_aud' : 'currency_gain_pct', label: 'Currency', align: 'right' },
+    { key: unit === 'aud' ? 'total_return_aud'  : 'total_return_pct',  label: 'Return',   align: 'right' },
   ]
 
   const cell = 'px-3 py-2.5 text-sm whitespace-nowrap tabular-nums'
+  const subline = 'text-[10px] font-normal text-slate-500 leading-tight'
+  const tone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
+  /** One cell's value in whichever unit the AU$ / % switch is on. fmtCurrency strips
+   *  the sign (Math.abs), so the +/− is prefixed here as the rest of the file does. */
+  const money = (aud: number, pct: number) =>
+    unit === 'aud' ? `${aud >= 0 ? '+' : '−'}${fmtCurrency(aud)}` : fmtPct(pct)
 
   return (
     <div className={CARD} style={CARD_BG}>
@@ -273,34 +296,33 @@ function HoldingsTable({
                     </div>
                   </td>
                   {/* Realised rides under Capital the way franking rides under Income:
-                      both are legs of Total that have no column of their own, and without
+                      both are legs of Return with no column of their own, and without
                       them on screen the row stops adding up — VAS read $48,612 across its
-                      visible cells against a Total of $88,075, the $39,463 difference being
-                      realised gain on parcels sold years ago. */}
-                  <td className={cell + ` text-right font-medium ${h.return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {h.return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.return_aud)}
+                      visible cells against a Return of $88,075, the $39,463 difference
+                      being realised gain on parcels sold years ago. */}
+                  <td className={cell + ' text-right font-medium ' + tone(h.capital_gain_aud)}>
+                    {money(h.capital_gain_aud, h.capital_gain_pct)}
                     {h.realised_aud !== 0 && (
-                      <div className="text-[10px] font-normal text-slate-500 leading-tight">
+                      <div className={subline}>
                         {h.realised_aud >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(h.realised_aud))} realised
                       </div>
                     )}
                   </td>
-                  <td className={cell + ` text-right font-medium ${h.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtPct(h.return_pct)}
-                  </td>
                   <td className={cell + ' text-right font-medium ' + (h.income_aud > 0 ? 'text-amber-400' : 'text-slate-600')}>
-                    {h.income_aud > 0 ? fmtCurrency(h.income_aud) : '—'}
+                    {h.income_aud > 0
+                      ? (unit === 'aud' ? fmtCurrency(h.income_aud) : fmtPct(h.income_pct))
+                      : '—'}
                     {h.franking_aud > 0 && (
-                      <div className="text-[10px] font-normal text-slate-500 leading-tight">
-                        +{fmtCurrency(h.franking_aud)} franking
+                      <div className={subline}>
+                        +{unit === 'aud' ? fmtCurrency(h.franking_aud) : fmtPct(h.franking_pct_of_cost)} franking
                       </div>
                     )}
                   </td>
-                  <td className={cell + ` text-right font-semibold ${h.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {h.total_return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.total_return_aud)}
+                  <td className={cell + ' text-right font-medium ' + (h.currency_gain_aud === 0 ? 'text-slate-600' : tone(h.currency_gain_aud))}>
+                    {h.currency_gain_aud === 0 ? '—' : money(h.currency_gain_aud, h.currency_gain_pct)}
                   </td>
-                  <td className={cell + ` text-right font-semibold ${h.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {fmtPct(h.total_return_pct)}
+                  <td className={cell + ' text-right font-semibold ' + tone(h.total_return_aud)}>
+                    {money(h.total_return_aud, h.total_return_pct)}
                   </td>
                 </tr>
               )
@@ -320,15 +342,18 @@ function HoldingsTable({
               and the two together are what the dashboard headline reports. */}
           {sorted.length > 0 && (() => {
             const sum = (f: (h: Holding) => number) => holdings.reduce((s, h) => s + f(h), 0)
-            const capital  = sum(h => h.return_aud)
+            const capital  = sum(h => h.capital_gain_aud)
+            const currency = sum(h => h.currency_gain_aud)
             const realised = sum(h => h.realised_aud)
             const income   = sum(h => h.income_aud)
             const franking = sum(h => h.franking_aud)
-            const cost     = sum(h => h.cost_aud)
             const gross    = sum(h => h.gross_cost_aud)
             const grand    = sum(h => h.total_return_aud)
-            const tone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
-            const sub = 'text-[10px] font-normal text-slate-500 leading-tight'
+            const sub = subline
+            // Percentages are recomputed over the summed gross cost rather than
+            // averaged across rows — averaging percentages would weight a $20k
+            // position the same as a $170k one.
+            const pc = (v: number) => (gross > 0 ? (v / gross) * 100 : 0)
             return (
               <tfoot>
                 <tr className="border-t-2 border-[var(--border)]" style={{ background: 'var(--bg-elevated)' }}>
@@ -342,25 +367,26 @@ function HoldingsTable({
                   <td className={cell + ' text-right font-semibold text-white'}>{fmtCurrency(total)}</td>
                   <td className={cell + ' text-right text-slate-500'}>100%</td>
                   <td className={cell + ' text-right font-semibold ' + tone(capital)}>
-                    {capital >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(capital))}
+                    {money(capital, pc(capital))}
                     {realised !== 0 && (
                       <div className={sub}>
                         {realised >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(realised))} realised
                       </div>
                     )}
                   </td>
-                  <td className={cell + ' text-right font-semibold ' + tone(capital)}>
-                    {fmtPct(cost > 0 ? (capital / cost) * 100 : 0)}
-                  </td>
                   <td className={cell + ' text-right font-semibold text-amber-400'}>
-                    {income > 0 ? fmtCurrency(income) : '—'}
-                    {franking > 0 && <div className={sub}>+{fmtCurrency(franking)} franking</div>}
+                    {income > 0 ? (unit === 'aud' ? fmtCurrency(income) : fmtPct(pc(income))) : '—'}
+                    {franking > 0 && (
+                      <div className={sub}>
+                        +{unit === 'aud' ? fmtCurrency(franking) : fmtPct(pc(franking))} franking
+                      </div>
+                    )}
+                  </td>
+                  <td className={cell + ' text-right font-semibold ' + (currency === 0 ? 'text-slate-600' : tone(currency))}>
+                    {currency === 0 ? '—' : money(currency, pc(currency))}
                   </td>
                   <td className={cell + ' text-right font-semibold ' + tone(grand)}>
-                    {grand >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(grand))}
-                  </td>
-                  <td className={cell + ' text-right font-semibold ' + tone(grand)}>
-                    {fmtPct(gross > 0 ? (grand / gross) * 100 : 0)}
+                    {money(grand, pc(grand))}
                   </td>
                 </tr>
               </tfoot>
@@ -712,6 +738,13 @@ export default function Holdings() {
 
   const activeHoldings = portfolio.filter(h => h.units > 0)
 
+  // One switch for both tables — two independent toggles would let the page show
+  // dollars in one and percentages in the other, which is exactly the kind of
+  // silent mismatch this tab has been cleaned up to stop doing.
+  const [unit, setUnit] = useState<Unit>('aud')
+  const gTone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
+  const gVal = (aud: number, pct: number) => (unit === 'aud' ? fmtCurrencySigned(aud) : fmtPct(pct))
+
   /** Rows for the group editor's checkbox list.
    *
    *  Active holdings, PLUS any symbol already in the group that is no longer one —
@@ -916,7 +949,8 @@ export default function Holdings() {
             <Layers size={16} className="text-slate-400" />
             <p className="text-sm font-medium text-slate-200">Holding Groups</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <UnitToggle unit={unit} onChange={setUnit} />
             <button onClick={openAddGroup} className="flex items-center gap-1.5 text-sm text-indigo-400 hover:text-indigo-300 px-2">
               <Plus size={14} /> New Group
             </button>
@@ -934,10 +968,11 @@ export default function Holdings() {
                   <th className={TH2}>Value</th>
                   <th className={TH2}>Capital Gain</th>
                   <th className={TH2}>Income</th>
+                  {/* Was the currency NAME (AUD/USD/Mixed) — now the currency GAIN, to
+                      match Sharesight and the Portfolio table. The name is on each
+                      holding's own row and told you nothing at group level anyway. */}
                   <th className={TH2}>Currency</th>
-                  <th className={TH2}>Capital %</th>
-                  <th className={TH2}>Total</th>
-                  <th className={TH2}>Total %</th>
+                  <th className={TH2}>Return</th>
                   <th className={TH2}></th>
                 </tr>
               </thead>
@@ -955,21 +990,19 @@ export default function Holdings() {
                     </td>
                     <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.value)}</td>
                     <td className={TD2}>
-                      <span className={g.capital_gain >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtCurrencySigned(g.capital_gain)}</span>
+                      <span className={gTone(g.capital_only_aud)}>{gVal(g.capital_only_aud, g.capital_only_pct)}</span>
                     </td>
-                    <td className={TD2 + ' text-slate-200'}>{fmtCurrency(g.income)}</td>
-                    <td className={TD2 + ' text-slate-400'}>{g.currency}</td>
-                    <td className={TD2}>
-                      <span className={g.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmtPct(g.return_pct)}</span>
+                    <td className={TD2 + ' text-amber-400'}>
+                      {unit === 'aud' ? fmtCurrency(g.income) : fmtPct(g.income_pct)}
                     </td>
-                    <td className={TD2 + ' font-semibold'}>
-                      <span className={g.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                        {fmtCurrencySigned(g.total_return_aud)}
-                      </span>
+                    <td className={TD2 + (g.currency_gain_aud === 0 ? ' text-slate-600' : '')}>
+                      {g.currency_gain_aud === 0
+                        ? '—'
+                        : <span className={gTone(g.currency_gain_aud)}>{gVal(g.currency_gain_aud, g.currency_gain_pct)}</span>}
                     </td>
                     <td className={TD2 + ' font-semibold'}>
-                      <span className={g.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                        {fmtPct(g.total_return_pct)}
+                      <span className={gTone(g.total_return_aud)}>
+                        {gVal(g.total_return_aud, g.total_return_pct)}
                       </span>
                     </td>
                     <td className={TD2}>
@@ -983,25 +1016,23 @@ export default function Holdings() {
                   <td className={TD2 + ' font-semibold text-white'}>Grand Total</td>
                   <td className={TD2 + ' font-semibold text-white'}>{fmtCurrency(groupsData.grand_total.value)}</td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={groupsData.grand_total.capital_gain >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      {fmtCurrencySigned(groupsData.grand_total.capital_gain)}
+                    <span className={gTone(groupsData.grand_total.capital_only_aud)}>
+                      {gVal(groupsData.grand_total.capital_only_aud, groupsData.grand_total.capital_only_pct)}
                     </span>
                   </td>
-                  <td className={TD2 + ' font-semibold text-white'}>{fmtCurrency(groupsData.grand_total.income)}</td>
-                  <td className={TD2 + ' text-slate-400'}>{groupsData.grand_total.currency}</td>
-                  <td className={TD2 + ' font-semibold'}>
-                    <span className={groupsData.grand_total.return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      {fmtPct(groupsData.grand_total.return_pct)}
-                    </span>
+                  <td className={TD2 + ' font-semibold text-amber-400'}>
+                    {unit === 'aud'
+                      ? fmtCurrency(groupsData.grand_total.income)
+                      : fmtPct(groupsData.grand_total.income_pct)}
                   </td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={groupsData.grand_total.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      {fmtCurrencySigned(groupsData.grand_total.total_return_aud)}
+                    <span className={gTone(groupsData.grand_total.currency_gain_aud)}>
+                      {gVal(groupsData.grand_total.currency_gain_aud, groupsData.grand_total.currency_gain_pct)}
                     </span>
                   </td>
                   <td className={TD2 + ' font-semibold'}>
-                    <span className={groupsData.grand_total.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                      {fmtPct(groupsData.grand_total.total_return_pct)}
+                    <span className={gTone(groupsData.grand_total.total_return_aud)}>
+                      {gVal(groupsData.grand_total.total_return_aud, groupsData.grand_total.total_return_pct)}
                     </span>
                   </td>
                   <td className={TD2}></td>
@@ -1018,7 +1049,10 @@ export default function Holdings() {
 
       {/* Stocks header + Add Transaction */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium text-slate-400">Portfolio</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-medium text-slate-400">Portfolio</h2>
+          <UnitToggle unit={unit} onChange={setUnit} />
+        </div>
         <button
           onClick={() => setShowAddTxn(true)}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
@@ -1032,6 +1066,7 @@ export default function Holdings() {
           screens, where a wide table genuinely doesn't work. */}
       <div className="hidden md:block">
         <HoldingsTable
+          unit={unit}
           holdings={activeHoldings}
           sparklines={sparklines}
           onSelect={setSelectedHolding}

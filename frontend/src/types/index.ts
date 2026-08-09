@@ -108,6 +108,17 @@ export interface Holding {
    *  just the units still held — so it differs from return_pct on anything ever
    *  trimmed. Not annualised. */
   total_return_pct: number
+  /* Sharesight-style split of total_return_aud. capital + currency + income +
+   * franking == total_return_aud, and the four percentages likewise sum to
+   * total_return_pct — they all divide by gross_cost_aud. Note capital_gain_aud
+   * EXCLUDES currency, unlike return_aud which is the combined AUD move. */
+  capital_gain_aud: number
+  capital_gain_pct: number
+  /** Gain or loss purely from the exchange rate moving. Exactly 0 on AUD holdings. */
+  currency_gain_aud: number
+  currency_gain_pct: number
+  income_pct: number
+  franking_pct_of_cost: number
   daily_change: number
   daily_change_pct: number
   weight: number
@@ -351,6 +362,15 @@ export interface HoldingGroup {
   total_return_aud: number
   /** total_return_aud over gross_cost. */
   total_return_pct: number
+  /* Sharesight-style split, additive to total_return over gross_cost. capital_only
+   * excludes currency; the older capital_gain field above keeps its original meaning
+   * (unrealised, currency included). */
+  capital_only_aud: number
+  capital_only_pct: number
+  currency_gain_aud: number
+  currency_gain_pct: number
+  income_pct: number
+  franking_aud: number
 }
 
 export interface Dividend {

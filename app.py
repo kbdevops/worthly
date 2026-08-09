@@ -2476,9 +2476,18 @@ def _compute_active_holdings(user_id):
                 # right denominator for unrealised-only return and the wrong one for
                 # lifetime return — see total_return_pct below.
                 "gross_cost_aud": 0.0,
+                # Cost in the trade's own currency, brokerage included — so it is
+                # exactly cost_aud × the rate of the day, and cost_local_gross/cost_aud
+                # gives the cost-weighted average FX the position was built at. The
+                # existing cost_local excludes brokerage (it feeds avg_price display),
+                # which would put a spurious FX component on AUD holdings.
+                "cost_local_gross": 0.0,
                 "buys_count": 0,
                 "sells_count": 0,
                 "realised_aud": 0.0,
+                # Realised gain split into what the price did and what the rate did.
+                "realised_price_aud": 0.0,
+                "realised_fx_aud": 0.0,
             }
 
         h = holdings[sym]
@@ -2489,6 +2498,7 @@ def _compute_active_holdings(user_id):
             h["cost_aud"] += t["value"]
             h["cost_local"] += qty * t["price"]
             h["gross_cost_aud"] += t["value"]
+            h["cost_local_gross"] += t["value"] * (t.get("exch_rate") or 1.0)
             h["buys_count"] += 1
         elif t["action"].lower() == "split":
             # Stock split: adjust units without changing cost basis
@@ -2498,19 +2508,40 @@ def _compute_active_holdings(user_id):
             if h["units"] > 0:
                 avg_cost_before = h["cost_aud"] / h["units"]
                 avg_cost_local_before = h["cost_local"] / h["units"]
+                avg_local_gross_before = h["cost_local_gross"] / h["units"]
                 # Realised gain on this sale, average-cost basis: proceeds less the
                 # cost the units carried. `value` is AUD-and-signed (negative for a
                 # sell, brokerage already folded in — see add_transaction), so the
                 # proceeds are -value. Accumulated here rather than derived later
                 # because this is the only place the pre-sale average cost exists.
                 h["realised_aud"] += (-t["value"]) - (qty * avg_cost_before)
+
+                # Split that realised gain the same way the unrealised one is split
+                # below: value the proceeds at the rate the position was BUILT at, and
+                # whatever is left over is the rate having moved since.
+                #   price = proceeds at the old rate − what those units cost
+                #   fx    = proceeds at today's rate − proceeds at the old rate
+                # The two always sum back to the realised gain.
+                proceeds_aud = -t["value"]
+                qty_cost_aud = qty * avg_cost_before
+                fx_avg = (h["cost_local_gross"] / h["cost_aud"]) if h["cost_aud"] > 0 else 1.0
+                if fx_avg > 0:
+                    proceeds_local = proceeds_aud * (t.get("exch_rate") or 1.0)
+                    proceeds_at_buy_fx = proceeds_local / fx_avg
+                else:
+                    proceeds_at_buy_fx = proceeds_aud
+                h["realised_price_aud"] += proceeds_at_buy_fx - qty_cost_aud
+                h["realised_fx_aud"] += proceeds_aud - proceeds_at_buy_fx
+
                 h["units"] -= qty
                 h["cost_aud"] -= qty * avg_cost_before
                 h["cost_local"] -= qty * avg_cost_local_before
+                h["cost_local_gross"] -= qty * avg_local_gross_before
             else:
                 h["units"] = 0
                 h["cost_aud"] = 0
                 h["cost_local"] = 0
+                h["cost_local_gross"] = 0
             h["sells_count"] += 1
 
     # Lifetime income per holding, reported in dollars only. Deliberately NOT
@@ -2586,6 +2617,26 @@ def _compute_active_holdings(user_id):
             total_return_aud / h["gross_cost_aud"] * 100 if h["gross_cost_aud"] > 0 else 0.0
         )
 
+        # Split the unrealised gain into price and rate, the same way the realised leg
+        # was split during the replay. fx_avg is the cost-weighted rate the position
+        # was built at; value the units at that rate and the remainder is FX.
+        fx_avg_now = (h["cost_local_gross"] / h["cost_aud"]) if h["cost_aud"] > 0 else 1.0
+        if fx_avg_now > 0:
+            value_at_buy_fx = h["units"] * current_price / fx_avg_now
+        else:
+            value_at_buy_fx = value_aud
+        unreal_price = value_at_buy_fx - h["cost_aud"]
+        unreal_fx = value_aud - value_at_buy_fx
+
+        # Lifetime, over everything ever invested. These four are ADDITIVE by
+        # construction — capital + currency + income + franking == total_return_aud —
+        # which is what lets the table show them as columns that foot to Return.
+        # An AUD holding lands on currency == 0 exactly: exch_rate is 1.0 on every
+        # trade, so cost_local_gross == cost_aud and fx_avg is exactly 1.
+        capital_gain_aud = unreal_price + h["realised_price_aud"]
+        currency_gain_aud = unreal_fx + h["realised_fx_aud"]
+        pct_of_gross = (lambda v: v / h["gross_cost_aud"] * 100) if h["gross_cost_aud"] > 0 else (lambda v: 0.0)
+
         meta = fetch_holding_meta(h["ticker"], h["exchange"])
 
         active_holdings.append({
@@ -2612,6 +2663,14 @@ def _compute_active_holdings(user_id):
             "realised_aud": round(h["realised_aud"], 2),
             "total_return_aud": round(total_return_aud, 2),
             "total_return_pct": round(total_return_pct, 2),
+            # Sharesight-style decomposition. All four percentages share the
+            # gross_cost_aud denominator so they add up to total_return_pct.
+            "capital_gain_aud": round(capital_gain_aud, 2),
+            "capital_gain_pct": round(pct_of_gross(capital_gain_aud), 2),
+            "currency_gain_aud": round(currency_gain_aud, 2),
+            "currency_gain_pct": round(pct_of_gross(currency_gain_aud), 2),
+            "income_pct": round(pct_of_gross(income_aud), 2),
+            "franking_pct_of_cost": round(pct_of_gross(franking_aud), 2),
             "daily_change": round(daily_change, 2),
             "daily_change_pct": round(daily_change_pct, 2),
             "buys_count": h["buys_count"],
@@ -2942,6 +3001,7 @@ def get_holding_groups():
     def _aggregate(symbols):
         value = capital_gain = cost_basis = income = 0.0
         realised = franking = gross_cost = 0.0
+        capital_only = currency_gain = 0.0
         open_count = 0
         currencies = set()
         for sym in symbols:
@@ -2954,6 +3014,8 @@ def get_holding_groups():
                 realised += h["realised_aud"]
                 franking += h["franking_aud"]
                 gross_cost += h["gross_cost_aud"]
+                capital_only += h["capital_gain_aud"]
+                currency_gain += h["currency_gain_aud"]
                 currencies.add(h["currency"])
             else:
                 cp = closed_by_symbol.get(sym)
@@ -2961,6 +3023,8 @@ def get_holding_groups():
                     realised += cp["realised_aud"]
                     franking += cp["franking_aud"]
                     gross_cost += cp["invested"]
+                    capital_only += cp["capital_gain_aud"]
+                    currency_gain += cp["currency_gain_aud"]
                     currencies.add(cp["currency"])
             income += income_by_symbol.get(sym, 0.0)
         # Capital-only, matching the per-holding return_pct, and labelled "Capital %"
@@ -2976,6 +3040,15 @@ def get_holding_groups():
         return {
             "value": round(value, 2), "capital_gain": round(capital_gain, 2),
             "income": round(income, 2), "currency": currency, "return_pct": round(return_pct, 2),
+            # Sharesight-style decomposition, additive to total_return over gross cost.
+            # capital_only excludes FX; capital_gain above keeps its original meaning
+            # (unrealised, FX included) so nothing already reading it changes.
+            "capital_only_aud": round(capital_only, 2),
+            "capital_only_pct": round(capital_only / gross_cost * 100, 2) if gross_cost > 0 else 0.0,
+            "currency_gain_aud": round(currency_gain, 2),
+            "currency_gain_pct": round(currency_gain / gross_cost * 100, 2) if gross_cost > 0 else 0.0,
+            "income_pct": round(income / gross_cost * 100, 2) if gross_cost > 0 else 0.0,
+            "franking_aud": round(franking, 2),
             "cost_basis": round(cost_basis, 2),
             "realised": round(realised, 2), "franking": round(franking, 2),
             "gross_cost": round(gross_cost, 2),
@@ -3161,6 +3234,9 @@ def _compute_closed_positions(user_id):
             "name": t.get("name") or key, "currency": t.get("currency") or "AUD",
             "units": 0.0, "cost": 0.0, "invested": 0.0, "proceeds": 0.0,
             "realised": 0.0, "buys": 0, "sells": 0,
+            # Same price/rate split as _compute_active_holdings, so a group holding a
+            # closed position still foots capital + currency + income + franking.
+            "cost_local": 0.0, "realised_price": 0.0, "realised_fx": 0.0,
             "first_date": t["date"], "last_date": t["date"],
         })
         p["last_date"] = t["date"]
@@ -3169,16 +3245,23 @@ def _compute_closed_positions(user_id):
             p["units"] += t["units"]
             p["cost"] += t["value"]
             p["invested"] += t["value"]
+            p["cost_local"] += t["value"] * (t.get("exch_rate") or 1.0)
             p["buys"] += 1
         elif action == "split":
             p["units"] += t["units"]
         elif action == "sell":
             if p["units"] > 0:
                 avg = p["cost"] / p["units"]
+                avg_local = p["cost_local"] / p["units"]
                 proceeds = -t["value"]
                 p["realised"] += proceeds - (t["units"] * avg)
+                fx_avg = (p["cost_local"] / p["cost"]) if p["cost"] > 0 else 1.0
+                at_buy_fx = (proceeds * (t.get("exch_rate") or 1.0) / fx_avg) if fx_avg > 0 else proceeds
+                p["realised_price"] += at_buy_fx - (t["units"] * avg)
+                p["realised_fx"] += proceeds - at_buy_fx
                 p["proceeds"] += proceeds
                 p["cost"] -= t["units"] * avg
+                p["cost_local"] -= t["units"] * avg_local
                 p["units"] -= t["units"]
             p["sells"] += 1
 
@@ -3198,6 +3281,8 @@ def _compute_closed_positions(user_id):
             "invested": round(p["invested"], 2),
             "proceeds": round(p["proceeds"], 2),
             "realised_aud": realised,
+            "capital_gain_aud": round(p["realised_price"], 2),
+            "currency_gain_aud": round(p["realised_fx"], 2),
             "income_aud": inc,
             "franking_aud": frk,
             "total_return_aud": round(realised + inc + frk, 2),
