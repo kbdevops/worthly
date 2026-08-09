@@ -1466,9 +1466,10 @@ export default function Dashboard() {
         // Returns follow the same range selector as the net worth chart. Falls back
         // to the portfolio's all-time figures until the range query resolves, so the
         // treemap never blanks out while switching ranges.
-        // 'All' is total_return_pct, not return_pct: the tile is labelled total
-        // return, so it has to carry realised gains and income, not just the
-        // unrealised move on units still held.
+        // 'All' is return_pct — the move on units still held. The tile's AREA is
+        // current value, so its number has to be about current holdings too; a
+        // lifetime figure spanning capital already withdrawn puts two timeframes
+        // in one rectangle. Lifetime total return is the Holdings tab's Total column.
         const perfByTicker = new Map((rangePerf ?? []).map(r => [r.ticker, r]))
         const treemapData = portfolio
           ? portfolio
@@ -1476,7 +1477,7 @@ export default function Dashboard() {
               .map(h => ({
                 name: h.ticker as string,
                 size: h.value_aud as number,
-                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.total_return_pct as number),
+                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.return_pct as number),
                 logo_url: h.logo_url as string,
               }))
           : []
@@ -1486,7 +1487,7 @@ export default function Dashboard() {
               <div className="flex items-baseline gap-2">
                 <p className="text-sm font-medium text-slate-300">Holding Performance</p>
                 <span className="text-[11px] text-slate-500">
-                  {range === 'All' ? 'total return' : `${range} price move`}
+                  {range === 'All' ? 'since purchase' : `${range} price move`}
                 </span>
               </div>
               <div className="flex items-center gap-3 text-[10px] text-slate-500">

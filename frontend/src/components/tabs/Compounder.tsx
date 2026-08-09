@@ -166,24 +166,26 @@ const MIN_ANNUALISE_YEARS = 0.99
 
 function fyBoundsForRow(row: CompounterFYRow, monthly: { date: string; nw: number }[]) {
   const fyEndYear = parseInt(row.fy.replace('FY', ''))
-  const firstIdx = monthly.findIndex(m => {
+  // The July points ARE the boundaries: 1 Jul 2025 opens FY2026 and 1 Jul 2026 closes
+  // it. Anchoring to them keeps this in step with the FY Annual Snapshots table, which
+  // measures "Prior NW" → "NW End" across exactly that window.
+  //
+  // This used to open on the prior June instead, to avoid an 11-month span — the right
+  // patch at the time, because the table it had to agree with also closed a month early.
+  // Both now run July to July, so the span is a clean 12 months from the correct end.
+  const julyIdx = (year: number) => monthly.findIndex(m => {
     const d = new Date(m.date + 'T00:00:00')
-    const yr = d.getFullYear(), mo = d.getMonth() + 1
-    return (mo >= 7 && yr === fyEndYear - 1) || (mo < 7 && yr === fyEndYear)
+    return d.getMonth() + 1 === 7 && d.getFullYear() === year
   })
-  const lastIdx = monthly.reduce((best, m, i) => {
-    const d = new Date(m.date + 'T00:00:00')
-    const yr = d.getFullYear(), mo = d.getMonth() + 1
-    const inFY = (mo >= 7 && yr === fyEndYear - 1) || (mo < 7 && yr === fyEndYear)
-    return inFY ? i : best
-  }, -1)
-  // Baseline is the close *before* the FY opens (the prior June), not the July
-  // snapshot inside it — otherwise the span is 11 months and silently drops
-  // June→July growth. This matches the FY Annual Snapshots table, which measures
-  // "Prior NW" → "NW End". Falls back to the first month when history starts
-  // mid-FY, which then honestly reports as a partial year.
-  const openIdx = firstIdx > 0 ? firstIdx - 1 : (firstIdx >= 0 ? firstIdx : 0)
-  return { firstIdx: openIdx, lastIdx: lastIdx >= 0 ? lastIdx : monthly.length - 1 }
+  const openIdx = julyIdx(fyEndYear - 1)
+  const closeIdx = julyIdx(fyEndYear)
+  return {
+    // History beginning mid-FY has no opening boundary — fall back to the first point,
+    // which then honestly reports as a partial year.
+    firstIdx: openIdx >= 0 ? openIdx : 0,
+    // No closing boundary means the year is still running: close on the latest point.
+    lastIdx: closeIdx >= 0 ? closeIdx : monthly.length - 1,
+  }
 }
 
 function CAGRCalculator({

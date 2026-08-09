@@ -786,6 +786,17 @@ def _pick_monthly_snapshots(all_snapshots):
         elif ym not in by_month:
             by_month[ym] = s          # completed month: first = the 1st
     keys = sorted(by_month)
+    # No snapshot yet this month leaves the series ending last month, which the current
+    # FY then closes on — it reported 0.0% over 0 months with an NW End weeks out of
+    # date, and the longer since the last snapshot the wider the gap to the dashboard.
+    # Carry the most recent cash and super forward to today instead: they're the latest
+    # readings that exist, and the same pair /api/breakdown feeds the dashboard from.
+    # Flagged current, so _compute_monthly_nw_series values the portfolio leg live and
+    # the point becomes a true month-to-date rather than a stale one.
+    if keys and keys[-1] != current_ym:
+        _, latest_super, latest_cash, _ = max(all_snapshots, key=lambda r: r[0])
+        by_month[current_ym] = (date.today().isoformat(), latest_super, latest_cash, "carried")
+        keys = sorted(by_month)
     return [by_month[k] for k in keys], [k == current_ym for k in keys]
 
 
@@ -2661,19 +2672,26 @@ def get_range_performance():
     """Per-holding performance scoped to a time window, so the Holding Performance
     treemap can follow the same 1M/3M/6M/1Y/All selector as the net worth chart.
 
-    'All' means lifetime total return against everything ever committed to the
-    ticker — unrealised plus realised plus income, over gross cost (see
-    total_return_pct). A bounded window can't use cost basis at all (you may not
-    have held the position for the whole window), so it reports the price move over
-    that window instead, converted to AUD at each end so FX is included the same
-    way it is everywhere else in the app.
+    'All' means the move on the units you still hold, since you bought them — the
+    same figure as the Holdings tab's Capital %. It is deliberately NOT the lifetime
+    total return: the treemap sizes each tile by CURRENT value, so a percentage
+    covering capital you no longer have invested puts two different timeframes in
+    one rectangle. It also has to agree with its own range selector — 1M/3M/6M/1Y
+    all report a move on current holdings, so 'All' must too, or the dropdown
+    silently changes what it measures at the last option.
+    Lifetime total return lives in the Holdings tab's Total column, the group
+    totals, the closed-positions table and the dashboard headline.
+    A bounded window can't use cost basis at all (you may not have held the position
+    for the whole window), so it reports the price move over that window instead,
+    converted to AUD at each end so FX is included the same way it is everywhere
+    else in the app.
     """
     rng = request.args.get("range", "All")
     holdings = _compute_active_holdings(current_user_id())
 
     if rng not in RANGE_DAYS:
         return jsonify([
-            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["total_return_pct"]}
+            {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["return_pct"]}
             for h in holdings
         ])
 
@@ -4807,12 +4825,31 @@ def _compute_monthly_nw_series(uid):
 
     for (s_date, s_super, s_cash, s_source), is_current in zip(snapshots, current_month_flags):
         s_ts = pd.Timestamp(s_date)
+        # The in-progress month is meant to read as month-to-date (see
+        # _pick_monthly_snapshots), but only its cash and super legs ever did — the
+        # portfolio was valued at the snapshot's own date, so it froze on whatever day
+        # the last snapshot happened to fall. With snapshots taken on the 1st that left
+        # the current FY up to a month behind the market: on 8 Aug it closed the year at
+        # 1 Aug's prices and reported −0.94% while the dashboard showed +1.31%, $22,703
+        # apart, because a week of gains simply wasn't in it.
+        #
+        # Valuing the live point at today puts it on the same basis as /api/breakdown,
+        # which is what the dashboard shows. Cash and super still come from the latest
+        # snapshot — that's the most recent reading there is, and it's the same source
+        # the dashboard uses.
+        val_ts = pd.Timestamp(date.today()) if is_current else s_ts
+        # Cash too: /api/breakdown reads it live from cash_accounts rather than from a
+        # snapshot, so the live point has to do the same or it drifts by whatever has
+        # moved through the accounts since the last snapshot — $6,758 of it here.
+        # Super does come from the latest snapshot in breakdown, so that one carries.
+        if is_current:
+            s_cash = get_total_cash(uid)
         portfolio_val = 0.0
 
         for sym in df["sym"].unique():
             units = 0.0
             for _, row in df.iterrows():
-                if row["date"] > s_ts:
+                if row["date"] > val_ts:
                     break
                 if row["sym"] != sym:
                     continue
@@ -4825,15 +4862,15 @@ def _compute_monthly_nw_series(uid):
                     units = max(0, units - row["units"])
             # Stored closes are split-adjusted, so raw pre-split units undervalue the
             # holding by the split ratio. Put both on the same basis.
-            units *= _split_adj_factor(split_ratios.get(sym), s_ts)
+            units *= _split_adj_factor(split_ratios.get(sym), val_ts)
 
             sym_prices = price_data.get(sym, {})
-            available_dates = [d for d in sym_prices if d <= s_ts]
+            available_dates = [d for d in sym_prices if d <= val_ts]
             if available_dates:
                 closest = max(available_dates)
                 price = sym_prices[closest]
                 if sym_currency.get(sym, "AUD") == "USD":
-                    aud_dates = [d for d in audusd_rates if d <= s_ts]
+                    aud_dates = [d for d in audusd_rates if d <= val_ts]
                     rate = audusd_rates[max(aud_dates)] if aud_dates else 0.65
                     price = price / rate
                 portfolio_val += units * price
@@ -4898,18 +4935,34 @@ def get_compounder():
         ts = pd.Timestamp(date_str)
         return ts.year + 1 if ts.month >= 7 else ts.year
 
-    from collections import defaultdict
-    fy_groups = defaultdict(list)
-    for m in monthly:
-        fy_groups[fy_year(m["date"])].append(m)
+    # An FY runs 1 July to 30 June, so a row's opening and closing figures are anchored
+    # to the July points on either side of it rather than to a calendar bucket of the
+    # points. Two separate things made the old grouping report June to June:
+    #
+    #   - a point holds the net worth AT its date, so FY2026 closes on the 1 Jul 2026
+    #     point, not on the 1 Jun 2026 one that ended a Jul-2025..Jun-2026 bucket;
+    #   - a point's change_pct describes the month that ENDED there, so the 1 Jul 2025
+    #     point carries June 2025's move — FY2025's final month, which was sitting at
+    #     the head of FY2026's bucket and skewing its best/worst/average.
+    #
+    # Treating the July points as boundaries and taking each FY as the half-open window
+    # between them — every point after its opening boundary, up to and including its
+    # closing one — fixes both at once.
+    july_idx = {}
+    for i, m in enumerate(monthly):
+        if pd.Timestamp(m["date"]).month == 7:
+            july_idx[pd.Timestamp(m["date"]).year + 1] = i   # July 2025 opens FY2026
 
     fy_rows = []
-    sorted_fys = sorted(fy_groups.keys())
-    for i, fy in enumerate(sorted_fys):
-        months_in_fy = fy_groups[fy]
-        last = months_in_fy[-1]
+    for fy in sorted({fy_year(m["date"]) for m in monthly}):
+        open_i = july_idx.get(fy)                            # None if data starts mid-FY
+        # No closing boundary yet means the year is still running, so it closes on the
+        # latest point and nw_end reads as the year-to-date figure.
+        close_i = july_idx.get(fy + 1, len(monthly) - 1)
+        months_in_fy = monthly[(open_i + 1) if open_i is not None else 0 : close_i + 1]
+        last = monthly[close_i]
 
-        prior_nw = fy_groups[sorted_fys[i - 1]][-1]["nw"] if i > 0 else None
+        prior_nw = monthly[open_i]["nw"] if open_i is not None else None
         fy_changes = [m["change_pct"] for m in months_in_fy if _full_month(m)]
 
         fy_rows.append({
