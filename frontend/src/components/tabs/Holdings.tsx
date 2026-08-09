@@ -712,6 +712,32 @@ export default function Holdings() {
 
   const activeHoldings = portfolio.filter(h => h.units > 0)
 
+  /** Rows for the group editor's checkbox list.
+   *
+   *  Active holdings, PLUS any symbol already in the group that is no longer one —
+   *  a position you've sold out of entirely. Those used to be unlistable: the group
+   *  still named them, but the picker only rendered active holdings, so there was no
+   *  checkbox to untick and the symbol was stuck in the group permanently. VAS after
+   *  a full exit was exactly that.
+   *
+   *  Matched by prefix rather than by rebuilding the exchange→suffix map (.AX/.L/.TO),
+   *  so a new exchange can't silently fail to resolve here. */
+  const groupPickerRows = useMemo(() => {
+    const rows = activeHoldings.map(h => ({
+      symbol: h.symbol, ticker: h.ticker, exchange: h.exchange, sold: false,
+    }))
+    const listed = new Set(rows.map(r => r.symbol))
+    for (const sym of groupModal?.symbols ?? []) {
+      if (listed.has(sym)) continue
+      const cp = (closed?.positions ?? []).find(
+        p => sym === p.ticker || sym.startsWith(p.ticker + '.'))
+      rows.push({
+        symbol: sym, ticker: cp?.ticker ?? sym, exchange: cp?.exchange ?? '', sold: true,
+      })
+    }
+    return rows
+  }, [activeHoldings, groupModal?.symbols, closed])
+
   const openAddGroup = () => setGroupModal({ id: null, name: '', symbols: [] })
   const openEditGroup = (g: { id: number; name: string; symbols: string[] }) =>
     setGroupModal({ id: g.id, name: g.name, symbols: g.symbols })
@@ -1098,19 +1124,24 @@ export default function Holdings() {
             <div>
               <label className="block text-xs text-slate-400 mb-1.5">Holdings</label>
               <div className="max-h-56 overflow-y-auto rounded-lg border border-[var(--border)]" style={{ background: 'var(--bg-elevated)' }}>
-                {activeHoldings.map(h => (
-                  <label key={h.symbol} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-white/5 border-b border-[var(--border)] last:border-b-0">
+                {groupPickerRows.map(r => (
+                  <label key={r.symbol} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-white/5 border-b border-[var(--border)] last:border-b-0">
                     <input
                       type="checkbox"
-                      checked={groupModal.symbols.includes(h.symbol)}
-                      onChange={() => toggleGroupSymbol(h.symbol)}
+                      checked={groupModal.symbols.includes(r.symbol)}
+                      onChange={() => toggleGroupSymbol(r.symbol)}
                       className="accent-[var(--accent)]"
                     />
-                    <span className="text-sm text-slate-300">{h.ticker}</span>
-                    <span className="text-xs text-slate-500">{h.exchange}</span>
+                    <span className="text-sm text-slate-300">{r.ticker}</span>
+                    <span className="text-xs text-slate-500">{r.exchange}</span>
+                    {r.sold && (
+                      <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400">
+                        sold out
+                      </span>
+                    )}
                   </label>
                 ))}
-                {activeHoldings.length === 0 && (
+                {groupPickerRows.length === 0 && (
                   <p className="px-3 py-4 text-xs text-slate-500 text-center">No active holdings to group yet.</p>
                 )}
               </div>
