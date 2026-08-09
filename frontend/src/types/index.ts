@@ -12,6 +12,10 @@ export interface Stats {
   total_cost: number
   total_return: number
   total_return_pct: number
+  /** Holdings basis: price + currency + pro-rated dividends and franking on the units
+   *  still held. Matches the Portfolio table's Total row and the treemap. */
+  holding_return: number
+  holding_return_pct: number
   total_principal: number
   best_performer: string
   best_performer_pct: number

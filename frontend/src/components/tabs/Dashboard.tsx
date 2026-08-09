@@ -138,7 +138,7 @@ const STAT_OPTIONS: { key: StatKey; label: string }[] = [
   // 'cagr' now renders the money-weighted return. The key is deliberately unchanged
   // so saved layouts keep working — only the maths and the label moved.
   { key: 'cagr',        label: 'Return p.a.' },
-  { key: 'return_pct',  label: 'Unrealised (%)' },
+  { key: 'return_pct',  label: 'Return (%)' },
   { key: 'income_fy',   label: 'Income This FY' },
   { key: 'ext_hours',   label: 'Pre / After Market' },
   { key: 'daily_ath',   label: 'Best Day Ever' },
@@ -936,8 +936,11 @@ export default function Dashboard() {
   }
 
   // ── Stat values ──────────────────────────────────────────────────────────
-  const totalReturn = stats?.total_return ?? 0
-  const returnPct = stats?.total_return_pct ?? 0
+  // Holdings basis, so these match the Portfolio table's Total row and the treemap.
+  // total_return / total_return_pct are price+currency only and sat 1.71pp below the
+  // table on the same screen, which is exactly the sort of mismatch this tab lost.
+  const totalReturn = stats?.holding_return ?? 0
+  const returnPct = stats?.holding_return_pct ?? 0
 
   function resolveStatCard(key: StatKey): { label: string; value: string; sub?: string; color?: string } {
     switch (key) {
@@ -947,8 +950,8 @@ export default function Dashboard() {
       case 'cash':         return { label: 'Cash',              value: fmtCurrency(bd?.cash ?? 0) }
       // Renamed from "Total Return" — it is market value less the cost of units still
       // held, i.e. unrealised only. The lifetime figure is 'total_all'.
-      case 'total_return': return { label: 'Unrealised Gain',   value: fmtCurrencySigned(totalReturn), sub: 'on current holdings', color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
-      case 'return_pct':   return { label: 'Unrealised (%)',    value: fmtPct(returnPct), sub: 'on cost of holdings', color: returnPct >= 0 ? '#10b981' : '#ef4444' }
+      case 'total_return': return { label: 'Return',            value: fmtCurrencySigned(totalReturn), sub: 'on current holdings', color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
+      case 'return_pct':   return { label: 'Return (%)',        value: fmtPct(returnPct), sub: 'on cost of holdings', color: returnPct >= 0 ? '#10b981' : '#ef4444' }
       // sub carries the position's weight, not its own percentage again — the value
       // already prints the percentage, previously repeated at a second precision.
       case 'best':         return { label: 'Best Performer',    value: stats?.best_performer ?? '—', sub: 'largest gain on cost', color: '#10b981' }

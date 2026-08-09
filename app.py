@@ -3537,6 +3537,14 @@ def get_stats():
     total_return = total_value - total_cost
     total_return_pct = (total_return / total_cost * 100) if total_cost > 0 else 0.0
 
+    # The holdings-basis return, matching the Portfolio table's Total row and the
+    # treemap exactly: price and currency on the units still held, plus the share of
+    # dividends and franking belonging to the capital still invested. total_return
+    # above is price+currency only, which is why the card reading it sat 1.71pp below
+    # the table on the same screen.
+    holding_return = sum(h["holding_return_aud"] for h in holdings)
+    holding_return_pct = (holding_return / total_cost * 100) if total_cost > 0 else 0.0
+
     # Today's P&L — sum of each holding's own daily_change (already price-only, not
     # affected by units bought/sold today, same fix as Daily ATH needed)
     day_pl = sum(h["daily_change"] for h in holdings)
@@ -3616,6 +3624,8 @@ def get_stats():
         "total_principal": round(total_cost, 2),
         "total_return": round(total_return, 2),
         "total_return_pct": round(total_return_pct, 2),
+        "holding_return": round(holding_return, 2),
+        "holding_return_pct": round(holding_return_pct, 2),
         "realised_gain": realised_gain,
         "income_total": income_total,
         "franking_total": franking_total,
