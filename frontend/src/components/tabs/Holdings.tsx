@@ -154,7 +154,7 @@ function Sparkline({ series }: { series?: number[] }) {
 }
 
 type HoldingSort = 'ticker' | 'daily_change_pct' | 'units' | 'value_aud' | 'return_aud' | 'return_pct'
-  | 'income_aud' | 'total_return_aud'
+  | 'income_aud' | 'total_return_aud' | 'total_return_pct'
 
 /** Dense, sortable view of every holding — replaces one card per holding, which
  *  repeated the same four labels N times and made two holdings impossible to
@@ -194,6 +194,10 @@ function HoldingsTable({
     { key: 'return_pct',       label: 'Capital %', align: 'right' },
     { key: 'income_aud',       label: 'Income',   align: 'right' },
     { key: 'total_return_aud', label: 'Total',    align: 'right' },
+    // Over gross cost, so it differs from Capital % on anything ever trimmed —
+    // AMZN reads 12.51% / 6.53%. Both columns are wanted precisely because they
+    // disagree there.
+    { key: 'total_return_pct', label: 'Total %',  align: 'right' },
   ]
 
   const cell = 'px-3 py-2.5 text-sm whitespace-nowrap tabular-nums'
@@ -295,6 +299,9 @@ function HoldingsTable({
                   <td className={cell + ` text-right font-semibold ${h.total_return_aud >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {h.total_return_aud >= 0 ? '+' : '−'}{fmtCurrency(h.total_return_aud)}
                   </td>
+                  <td className={cell + ` text-right font-semibold ${h.total_return_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {fmtPct(h.total_return_pct)}
+                  </td>
                 </tr>
               )
             })}
@@ -318,6 +325,7 @@ function HoldingsTable({
             const income   = sum(h => h.income_aud)
             const franking = sum(h => h.franking_aud)
             const cost     = sum(h => h.cost_aud)
+            const gross    = sum(h => h.gross_cost_aud)
             const grand    = sum(h => h.total_return_aud)
             const tone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
             const sub = 'text-[10px] font-normal text-slate-500 leading-tight'
@@ -350,6 +358,9 @@ function HoldingsTable({
                   </td>
                   <td className={cell + ' text-right font-semibold ' + tone(grand)}>
                     {grand >= 0 ? '+' : '−'}{fmtCurrency(Math.abs(grand))}
+                  </td>
+                  <td className={cell + ' text-right font-semibold ' + tone(grand)}>
+                    {fmtPct(gross > 0 ? (grand / gross) * 100 : 0)}
                   </td>
                 </tr>
               </tfoot>
