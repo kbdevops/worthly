@@ -1900,11 +1900,24 @@ def _run_intraday_refresh():
             intraday.index = intraday.index.tz_localize(None)
             latest = intraday.iloc[-1]
             latest_date = latest.name.strftime("%Y-%m-%d")
+            if pd.isna(latest["Close"]):
+                return {"symbol": symbol, "ok": True, "message": "No usable intraday close"}
             latest_close = float(latest["Close"])
             conn = db()
             conn.execute(
                 "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
                 (symbol, latest_date, latest_close),
+            )
+            # Stamp last_synced. This path writes a genuinely newer price, so leaving
+            # sync_log untouched made "last updated" freeze while the data underneath
+            # moved — pull-to-refresh visibly did nothing, and only a full sync ever
+            # advanced the clock. cached_from/cached_to are deliberately NOT touched:
+            # they describe the daily-history window, and an intraday tick shouldn't
+            # claim the day's close has been finalised.
+            conn.execute(
+                "UPDATE sync_log SET last_synced = ?, last_attempt = ?, last_error = NULL "
+                "WHERE symbol = ?",
+                (datetime.now().isoformat(), datetime.now().isoformat(), symbol),
             )
             conn.commit()
             conn.close()

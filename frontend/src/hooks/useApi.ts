@@ -137,7 +137,10 @@ export const useRefreshPrices = () => {
     mutationFn: () => post<{ ok: boolean; symbols_refreshed: number; symbols_total: number; market_active: boolean }>(
       '/api/prices/refresh'),
     onSuccess: () => {
-      for (const k of ['portfolio', 'stats', 'breakdown', 'extended-hours', 'networth', 'monthly-change'])
+      // sync-status included so the "last updated" label refetches — without it
+      // the refresh landed new prices while the clock on screen stayed frozen.
+      for (const k of ['portfolio', 'stats', 'breakdown', 'extended-hours', 'networth',
+                       'monthly-change', 'sync-status', 'performance', 'range-performance'])
         qc.invalidateQueries({ queryKey: [k] })
     },
   })

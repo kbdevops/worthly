@@ -2003,33 +2003,26 @@ export default function Dashboard() {
         </div>
         {syncStatuses && syncStatuses.length > 0 && (() => {
           const holdings = portfolio?.map(h => h.symbol) ?? []
-          // Reads actual_to — the newest price actually stored — not last_synced,
-          // which is only when we last spoke to Yahoo. Those diverge constantly: a
-          // sync that finds nothing new still stamps last_synced, and a background
-          // refresh writes prices without stamping it at all. The label said
-          // "95h ago" while the table held prices from that morning.
-          const relevant = syncStatuses.filter(s => holdings.includes(s.symbol) && s.actual_to)
+          // "Last updated" means when we last successfully fetched, which is the
+          // question being asked — an as-of DATE never moves when you press refresh,
+          // so the control looked broken even when it worked. The real defect was
+          // that the intraday refresh path wrote prices without stamping sync_log;
+          // with that fixed this clock actually moves. The newest price DATE is the
+          // tooltip, since that is the secondary fact.
+          const relevant = syncStatuses.filter(s => holdings.includes(s.symbol) && s.last_synced)
           if (!relevant.length) return null
+          const latest = relevant.reduce((a, b) => (a.last_synced > b.last_synced ? a : b))
+          const mins = Math.floor((Date.now() - new Date(latest.last_synced).getTime()) / 60000)
+          const label = mins < 1 ? 'just now'
+            : mins < 60 ? `${mins}m ago`
+            : mins < 1440 ? `${Math.floor(mins / 60)}h ago`
+            : `${Math.floor(mins / 1440)}d ago`
+          const stale = mins > 120
           const asOf = relevant.reduce((a, b) => (a.actual_to > b.actual_to ? a : b)).actual_to
-
-          // Markets shut on weekends, so "yesterday" is not a useful yardstick — the
-          // honest one is the most recent weekday. Anything older than that means a
-          // genuinely missed close; Friday's price on a Sunday is simply correct.
-          const lastTradingDay = (() => {
-            const d = new Date()
-            while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1)
-            return d.toISOString().slice(0, 10)
-          })()
-          const today = new Date().toISOString().slice(0, 10)
-          const label = asOf === today
-            ? 'today'
-            : new Date(asOf + 'T00:00:00').toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })
-          const stale = asOf < lastTradingDay
-          const syncedAt = relevant.reduce((a, b) => (a.last_synced > b.last_synced ? a : b)).last_synced
           return (
             <p className="text-[11px] mt-2 text-right" style={{ color: stale ? '#f59e0b' : '#475569' }}
-               title={syncedAt ? `Last checked ${new Date(syncedAt).toLocaleString('en-AU')}` : undefined}>
-              {stale ? '⚠ ' : ''}Prices as of {label}
+               title={`Newest price ${asOf} · checked ${new Date(latest.last_synced).toLocaleString('en-AU')}`}>
+              {stale ? '⚠ ' : ''}Updated {label}
             </p>
           )
         })()}
