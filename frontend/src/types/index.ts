@@ -481,3 +481,21 @@ export interface Milestone {
   currency?: 'AUD' | 'USD'
   achieved_date: string | null
 }
+/** Cumulative time-weighted return vs a benchmark, both rebased to 0% at the window
+ *  start. TWR rather than money-weighted because only TWR can share an axis with an
+ *  index — an index has no contributions, so contribution timing must be stripped out.
+ *  Price-only on both sides (dividends excluded from each), so the comparison is like
+ *  for like. */
+export interface PerformanceData {
+  dates: string[]
+  portfolio: number[]
+  benchmark: number[]
+  benchmark_symbol: string
+  benchmark_available: boolean
+  portfolio_return: number
+  benchmark_return: number | null
+  range: string
+  /** 'holding' = return on cost, matches the Holdings tab (Max only).
+   *  'twr' = time-weighted over the window, immune to contributions. */
+  basis: 'holding' | 'twr'
+}

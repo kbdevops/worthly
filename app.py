@@ -433,6 +433,14 @@ def db():
     except:
         pass
 
+    # Per-widget width overrides. Server-side for the same reason order and visibility
+    # are: a layout that only exists in localStorage isn't the user's layout, it's that
+    # browser's layout.
+    try:
+        conn.execute("ALTER TABLE dashboard_layout ADD COLUMN widget_spans TEXT")
+    except:
+        pass
+
     # Migrate transactions to track where a row came from (manual entry vs IBKR import)
     # and a stable per-broker-execution key so re-syncing IBKR updates existing rows
     # instead of duplicating them. external_id is NULL for every manual row — SQLite
@@ -721,18 +729,20 @@ def change_password():
 def get_dashboard_layout():
     conn = db()
     row = conn.execute(
-        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets FROM dashboard_layout WHERE user_id = ?",
+        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans "
+        "FROM dashboard_layout WHERE user_id = ?",
         (current_user_id(),),
     ).fetchone()
     conn.close()
     if not row:
         return jsonify({"widget_order": None, "widget_visible": None,
-                        "stat_keys": None, "alloc_widgets": None})
+                        "stat_keys": None, "alloc_widgets": None, "widget_spans": None})
     return jsonify({
         "widget_order": json.loads(row[0]) if row[0] else None,
         "widget_visible": json.loads(row[1]) if row[1] else None,
         "stat_keys": json.loads(row[2]) if row[2] else None,
         "alloc_widgets": json.loads(row[3]) if row[3] else None,
+        "widget_spans": json.loads(row[4]) if row[4] else None,
     })
 
 @app.route("/api/dashboard-layout", methods=["POST"])
@@ -741,13 +751,14 @@ def save_dashboard_layout():
     data = request.json or {}
     conn = db()
     conn.execute(
-        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
         "widget_order=excluded.widget_order, widget_visible=excluded.widget_visible, "
         "stat_keys=excluded.stat_keys, alloc_widgets=excluded.alloc_widgets, "
-        "updated_at=excluded.updated_at",
+        "widget_spans=excluded.widget_spans, updated_at=excluded.updated_at",
         (current_user_id(), json.dumps(data.get("widget_order")), json.dumps(data.get("widget_visible")),
          json.dumps(data.get("stat_keys")), json.dumps(data.get("alloc_widgets")),
+         json.dumps(data.get("widget_spans")),
          datetime.now().isoformat()),
     )
     conn.commit()
@@ -1889,11 +1900,24 @@ def _run_intraday_refresh():
             intraday.index = intraday.index.tz_localize(None)
             latest = intraday.iloc[-1]
             latest_date = latest.name.strftime("%Y-%m-%d")
+            if pd.isna(latest["Close"]):
+                return {"symbol": symbol, "ok": True, "message": "No usable intraday close"}
             latest_close = float(latest["Close"])
             conn = db()
             conn.execute(
                 "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
                 (symbol, latest_date, latest_close),
+            )
+            # Stamp last_synced. This path writes a genuinely newer price, so leaving
+            # sync_log untouched made "last updated" freeze while the data underneath
+            # moved — pull-to-refresh visibly did nothing, and only a full sync ever
+            # advanced the clock. cached_from/cached_to are deliberately NOT touched:
+            # they describe the daily-history window, and an intraday tick shouldn't
+            # claim the day's close has been finalised.
+            conn.execute(
+                "UPDATE sync_log SET last_synced = ?, last_attempt = ?, last_error = NULL "
+                "WHERE symbol = ?",
+                (datetime.now().isoformat(), datetime.now().isoformat(), symbol),
             )
             conn.commit()
             conn.close()
@@ -2761,7 +2785,116 @@ def refresh_prices_now():
         "results": results,
     })
 
-RANGE_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+RANGE_DAYS = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+DEFAULT_BENCHMARK = "IVV.AX"
+
+
+def range_cutoff(rng):
+    """Start date for a range key, or None for the whole history.
+
+    One vocabulary for every widget that has a range dial — Today/1W/1M/3M/6M/YTD/
+    FY/1Y/Max — so the same window can't end up called "All" on one chart and "Max"
+    on another, which is exactly what it was called before this existed.
+
+    YTD and FY aren't fixed day counts, so they resolve against the calendar. FY is
+    the Australian financial year: 1 July to 30 June, the window the user's tax
+    actually runs on, and the same boundary /api/stats uses for income_fy.
+    """
+    today = date.today()
+    if rng == "Today":
+        return today
+    if rng == "YTD":
+        return date(today.year, 1, 1)
+    if rng == "FY":
+        return date(today.year - (1 if today.month < 7 else 0), 7, 1)
+    if rng in RANGE_DAYS:
+        return today - timedelta(days=RANGE_DAYS[rng])
+    return None   # Max
+
+
+@app.route("/api/performance", methods=["GET"])
+@jwt_required()
+def get_performance():
+    """Cumulative time-weighted return vs a benchmark, both rebased to 0% at the
+    start of the window so the two lines answer "what would $1 have done over this
+    period" rather than carrying history from before it.
+
+    Params: range = 1W|1M|3M|6M|YTD|1Y|Max, benchmark = a yfinance symbol.
+    """
+    rng = request.args.get("range", "Max")
+    symbol = (request.args.get("benchmark") or DEFAULT_BENCHMARK).strip().upper()
+    uid = current_user_id()
+    conn = db()
+    try:
+        # Max answers "what is my return" and must equal the Holdings tab, so it uses
+        # return-on-cost. A bounded window asks a different question — "how did I do
+        # over this period" — and return-on-cost cannot answer it: the denominator
+        # moves when you buy. $357,818 of new capital in twelve months dragged a real
+        # +17.87% down to a displayed +2.96%, which is an artefact of the cost base
+        # growing, not a year of flat performance. Windows therefore use the
+        # time-weighted return, which is immune to contributions by construction.
+        windowed = rng in RANGE_DAYS or rng in ("YTD", "FY", "Today")
+        twr = (_build_twr_series(conn, uid) if windowed
+               else _build_holding_return_series(conn, uid))
+        if twr is None or twr.empty:
+            return jsonify({"dates": [], "portfolio": [], "benchmark": [],
+                            "benchmark_symbol": symbol, "benchmark_available": False,
+                            "portfolio_return": 0.0, "benchmark_return": 0.0})
+
+        start = range_cutoff(rng)
+        cutoff = pd.Timestamp(start) if start else twr.index[0]
+        window = twr[twr.index >= cutoff]
+        if len(window) < 2:
+            window = twr
+
+        bench = _benchmark_series(conn, symbol, twr.index)
+    finally:
+        conn.close()
+
+    # A benchmark the user just typed has no prices yet. Kick a background fetch so it
+    # fills in and the next poll draws the line, rather than making them find the Sync
+    # tab to make a picker work. Fire-and-forget: this request still answers now.
+    if bench is None and symbol:
+        def _warm(sym, start):
+            try:
+                # sync_symbol compares these against cached Timestamps, so they must be
+                # Timestamps too — passing ISO strings raises on the '<' comparison.
+                sync_symbol(sym, start, pd.Timestamp.now().normalize())
+            except Exception as e:
+                print(f"[performance] benchmark warm-up failed for {sym}: {e}")
+        threading.Thread(target=_warm, args=(symbol, twr.index[0]), daemon=True).start()
+
+    # Rebase: a cumulative series restarted mid-life has to be un-compounded from its
+    # own value at the window's start, not merely shifted down by it.
+    # A windowed TWR is un-compounded from its own value at the window's start; Max is
+    # already the answer and is shown as-is.
+    if windowed:
+        base = window.iloc[0]
+        port = ((1 + window / 100.0) / (1 + base / 100.0) - 1.0) * 100.0
+    else:
+        port = window
+
+    bench_out, bench_ret = [], None
+    if bench is not None:
+        bw = bench[bench.index >= window.index[0]]
+        if len(bw) >= 2 and bw.iloc[0] > 0:
+            bseries = (bw / bw.iloc[0] - 1.0) * 100.0
+            bench_out = [round(float(v), 2) for v in bseries]
+            bench_ret = round(float(bseries.iloc[-1]), 2)
+
+    return jsonify({
+        "dates": [d.strftime("%Y-%m-%d") for d in port.index],
+        "portfolio": [round(float(v), 2) for v in port],
+        "benchmark": bench_out,
+        "benchmark_symbol": symbol,
+        "benchmark_available": bool(bench_out),
+        "portfolio_return": round(float(port.iloc[-1]), 2),
+        "benchmark_return": bench_ret,
+        "range": rng,
+        "basis": "twr" if windowed else "holding",
+    })
+
+
 
 @app.route("/api/portfolio/range-performance", methods=["GET"])
 @jwt_required()
@@ -2783,16 +2916,17 @@ def get_range_performance():
     converted to AUD at each end so FX is included the same way it is everywhere
     else in the app.
     """
-    rng = request.args.get("range", "All")
+    rng = request.args.get("range", "Max")
     holdings = _compute_active_holdings(current_user_id())
 
-    if rng not in RANGE_DAYS:
+    window_start = range_cutoff(rng)
+    if window_start is None:
         return jsonify([
             {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["holding_return_pct"]}
             for h in holdings
         ])
 
-    cutoff = (date.today() - timedelta(days=RANGE_DAYS[rng])).isoformat()
+    cutoff = window_start.isoformat()
     conn = db()
 
     # When did each position actually open? A window that reaches back further than
@@ -3226,6 +3360,187 @@ def _build_daily_market_return_series(conn, user_id):
             factor.loc[all_dates < sd] *= ratio
         portfolio_value += units_df[sym] * factor * prices
     return portfolio_value - cash_flow
+
+def _build_daily_value_and_flows(conn, user_id):
+    """(portfolio_value, net_flow) as daily pandas Series, both AUD.
+
+    Same replay as _build_daily_market_return_series, but returning the two pieces
+    rather than their difference — a time-weighted return needs the flow on each day
+    kept separate from the value it produced.
+    """
+    txns = load_transactions(user_id)
+    if not txns:
+        return None, None
+    df = pd.DataFrame(txns)
+    df["date"] = pd.to_datetime(df["date"])
+    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+    all_dates = pd.date_range(df["date"].min(), pd.Timestamp(date.today()), freq="D")
+
+    price_data = {}
+    for sym in list(df["sym"].unique()) + ["AUDUSD=X"]:
+        rows = conn.execute(
+            "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (sym,)
+        ).fetchall()
+        if rows:
+            s = pd.Series({pd.Timestamp(d): c for d, c in rows}).reindex(all_dates).ffill().bfill()
+            s = s.fillna(0.0 if sym != "AUDUSD=X" else 1.0)
+        else:
+            s = pd.Series(0.0 if sym != "AUDUSD=X" else 1.0, index=all_dates)
+        price_data[sym] = s
+
+    fx_rates = price_data["AUDUSD=X"]
+    units_changes = pd.DataFrame(0.0, index=all_dates, columns=df["sym"].unique())
+    sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    flows = pd.Series(0.0, index=all_dates)
+    for _, row in df.iterrows():
+        sign = -1 if row["action"].lower() == "sell" else 1
+        units_changes.loc[row["date"], row["sym"]] += sign * row["units"]
+        flows.loc[row["date"]] += row["value"]
+    units_df = units_changes.cumsum()
+
+    value = pd.Series(0.0, index=all_dates)
+    split_ratios = _split_ratios_by_symbol(txns)
+    for sym in df["sym"].unique():
+        prices = price_data[sym]
+        if sym_currency[sym] == "USD":
+            prices = prices / fx_rates
+        factor = pd.Series(1.0, index=all_dates)
+        for sd, ratio in split_ratios.get(sym, ()):
+            factor.loc[all_dates < sd] *= ratio
+        value += units_df[sym] * factor * prices
+    return value, flows
+
+
+def _build_holding_return_series(conn, user_id):
+    """Daily cumulative return on the SAME basis as the Holdings tab, as a percentage.
+
+        (unrealised + pro-rated income + pro-rated franking) / cost of units held
+
+    Deliberately not time-weighted. TWR is the textbook answer for comparing against
+    an index because it strips out when money went in — but it is a different figure
+    from the one the Holdings table shows, and a dashboard quoting two different
+    "returns" for the same portfolio is the thing this app has spent its whole life
+    getting wrong. Consistency wins; the benchmark line is a reference, not a
+    like-for-like race.
+
+    Cost and income are checkpointed at each transaction and forward-filled rather
+    than recomputed per day — 144 transactions against ~1800 days.
+    """
+    value, _ = _build_daily_value_and_flows(conn, user_id)
+    if value is None or value.empty:
+        return None
+    txns = load_transactions(user_id)
+
+    per = {}
+    checkpoints = []   # (timestamp, total_cost, {sym: (cost, gross)})
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        h = per.setdefault(sym, {"units": 0.0, "cost": 0.0, "gross": 0.0})
+        action = (t.get("action") or "").lower()
+        if action == "buy":
+            h["units"] += t["units"]; h["cost"] += t["value"]; h["gross"] += t["value"]
+        elif action == "split":
+            h["units"] += t["units"]
+        elif action == "sell" and h["units"] > 0:
+            avg = h["cost"] / h["units"]
+            h["cost"] -= t["units"] * avg
+            h["units"] -= t["units"]
+            if h["units"] <= 1e-9:
+                h["units"] = 0.0; h["cost"] = 0.0
+        checkpoints.append((pd.Timestamp(t["date"][:10]),
+                            {s: (v["cost"], v["gross"]) for s, v in per.items()}))
+
+    # Income and franking accrue on their own dates, so they get their own checkpoints.
+    div_rows = conn.execute(
+        "SELECT symbol, date, COALESCE(net_amount_aud,0), COALESCE(franking_credit_aud,0) "
+        "FROM dividends WHERE user_id = ? ORDER BY date", (user_id,)
+    ).fetchall()
+
+    idx = value.index
+    cost_s = pd.Series(0.0, index=idx)
+    pro_s = pd.Series(0.0, index=idx)
+
+    def state_at(ts):
+        last = None
+        for d, snap in checkpoints:
+            if d <= ts:
+                last = snap
+            else:
+                break
+        return last or {}
+
+    inc_by_sym = {}
+    for d in idx:
+        snap = state_at(d)
+        # Dividends banked on or before this day, per symbol.
+        while div_rows and pd.Timestamp(div_rows[0][1][:10]) <= d:
+            sym, _dt, net, frank = div_rows.pop(0)
+            cur = inc_by_sym.setdefault(sym, [0.0, 0.0])
+            cur[0] += net; cur[1] += frank
+        total_cost = sum(c for c, _g in snap.values())
+        pro = 0.0
+        for sym, (c, g) in snap.items():
+            net, frank = inc_by_sym.get(sym, (0.0, 0.0))
+            if g > 0:
+                pro += (net + frank) * (c / g)
+        cost_s[d] = total_cost
+        pro_s[d] = pro
+
+    gain = value - cost_s + pro_s
+    out = (gain / cost_s.replace(0.0, float("nan")) * 100.0)
+    return out.fillna(0.0)
+
+
+def _build_twr_series(conn, user_id):
+    """Cumulative TIME-WEIGHTED return, as a daily pandas Series of percentages.
+
+    Each day's return is (value_end − flow) / value_start − 1, chained. Subtracting
+    the day's flow before dividing is the whole point: money you paid in is not
+    performance, and without that step every deposit reads as an instant gain.
+
+    This is deliberately NOT the money-weighted figure the stat cards show. MWR
+    answers "how did MY money do" and is the honest measure of a personal result,
+    but it moves with the TIMING of contributions, so it cannot be compared against
+    an index — which has no contributions. Only TWR can sit on the same axis as a
+    benchmark line, which is the only reason this exists.
+    """
+    value, flows = _build_daily_value_and_flows(conn, user_id)
+    if value is None or len(value) < 2:
+        return None
+    prev = value.shift(1)
+    daily = (value - flows) / prev - 1.0
+    # Before the first buy prev is 0 (or the position is empty) — no capital at work,
+    # so no return to record. inf/NaN here would poison the whole cumulative product.
+    daily = daily.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
+    daily[prev <= 0] = 0.0
+    return ((1.0 + daily).cumprod() - 1.0) * 100.0
+
+
+def _benchmark_series(conn, symbol, index):
+    """Cumulative % return for a benchmark symbol over `index`, or None if unpriced.
+
+    AUD-converted when the symbol is USD-quoted, so it sits on the same axis as a
+    portfolio measured in AUD — an Australian investor holding SPY really does earn
+    the index return PLUS whatever the currency did, and hiding that would make the
+    comparison flattering rather than true. ASX symbols are already AUD.
+    """
+    rows = conn.execute(
+        "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (symbol,)
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    s = pd.Series({pd.Timestamp(d): c for d, c in rows}).reindex(index).ffill().bfill()
+    if s.isna().all():
+        return None
+    if not symbol.endswith((".AX", ".L", ".TO")):
+        fx = conn.execute(
+            "SELECT date, close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date"
+        ).fetchall()
+        if fx:
+            fxs = pd.Series({pd.Timestamp(d): c for d, c in fx}).reindex(index).ffill().bfill()
+            s = s / fxs
+    return s
+
 
 def _calc_realised_gain(txns: list) -> float:
     """Lifetime realised gain in AUD, average-cost basis, across every symbol.

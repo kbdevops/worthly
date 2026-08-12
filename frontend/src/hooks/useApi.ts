@@ -5,6 +5,7 @@ import type {
   CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
   CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
   ClosedPositionsResult,
+  PerformanceData,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
 import { apiUrl } from '../lib/apiBase'
@@ -62,6 +63,8 @@ export const useDashboardLayout = () =>
       widget_visible: Record<string, boolean> | null
       stat_keys: string[] | null
       alloc_widgets: unknown[] | null
+      /** Per-widget column span overrides, keyed by widget id. */
+      widget_spans: Record<string, number> | null
     }>('/api/dashboard-layout'),
   })
 
@@ -73,6 +76,7 @@ export const useSaveDashboardLayout = () => {
       widget_visible?: Record<string, boolean>
       stat_keys?: string[]
       alloc_widgets?: unknown[]
+      widget_spans?: Record<string, number>
     }) => post('/api/dashboard-layout', data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard-layout'] }),
   })
@@ -86,6 +90,13 @@ export const useStats = () =>
 
 export const useNetworth = () =>
   useQuery({ queryKey: ['networth'], queryFn: () => get<NetworthData>('/api/networth') })
+
+export const usePerformance = (range: string, benchmark: string) =>
+  useQuery({
+    queryKey: ['performance', range, benchmark],
+    queryFn: () => get<PerformanceData>(
+      `/api/performance?range=${encodeURIComponent(range)}&benchmark=${encodeURIComponent(benchmark)}`),
+  })
 
 export const useMonthlyChange = () =>
   useQuery({ queryKey: ['monthly-change'], queryFn: () => get<MonthlyChange>('/api/monthly-change') })
@@ -126,7 +137,10 @@ export const useRefreshPrices = () => {
     mutationFn: () => post<{ ok: boolean; symbols_refreshed: number; symbols_total: number; market_active: boolean }>(
       '/api/prices/refresh'),
     onSuccess: () => {
-      for (const k of ['portfolio', 'stats', 'breakdown', 'extended-hours', 'networth', 'monthly-change'])
+      // sync-status included so the "last updated" label refetches — without it
+      // the refresh landed new prices while the clock on screen stayed frozen.
+      for (const k of ['portfolio', 'stats', 'breakdown', 'extended-hours', 'networth',
+                       'monthly-change', 'sync-status', 'performance', 'range-performance'])
         qc.invalidateQueries({ queryKey: [k] })
     },
   })
