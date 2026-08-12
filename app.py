@@ -2751,7 +2751,83 @@ def refresh_prices_now():
         "results": results,
     })
 
-RANGE_DAYS = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+RANGE_DAYS = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
+# YTD isn't a fixed number of days, so it's resolved against the calendar instead.
+DEFAULT_BENCHMARK = "IVV.AX"
+
+
+@app.route("/api/performance", methods=["GET"])
+@jwt_required()
+def get_performance():
+    """Cumulative time-weighted return vs a benchmark, both rebased to 0% at the
+    start of the window so the two lines answer "what would $1 have done over this
+    period" rather than carrying history from before it.
+
+    Params: range = 1W|1M|3M|6M|YTD|1Y|Max, benchmark = a yfinance symbol.
+    """
+    rng = request.args.get("range", "Max")
+    symbol = (request.args.get("benchmark") or DEFAULT_BENCHMARK).strip().upper()
+    uid = current_user_id()
+    conn = db()
+    try:
+        twr = _build_twr_series(conn, uid)
+        if twr is None or twr.empty:
+            return jsonify({"dates": [], "portfolio": [], "benchmark": [],
+                            "benchmark_symbol": symbol, "benchmark_available": False,
+                            "portfolio_return": 0.0, "benchmark_return": 0.0})
+
+        if rng == "YTD":
+            cutoff = pd.Timestamp(date(date.today().year, 1, 1))
+        elif rng in RANGE_DAYS:
+            cutoff = pd.Timestamp(date.today() - timedelta(days=RANGE_DAYS[rng]))
+        else:
+            cutoff = twr.index[0]
+        window = twr[twr.index >= cutoff]
+        if len(window) < 2:
+            window = twr
+
+        bench = _benchmark_series(conn, symbol, twr.index)
+    finally:
+        conn.close()
+
+    # A benchmark the user just typed has no prices yet. Kick a background fetch so it
+    # fills in and the next poll draws the line, rather than making them find the Sync
+    # tab to make a picker work. Fire-and-forget: this request still answers now.
+    if bench is None and symbol:
+        def _warm(sym, start):
+            try:
+                # sync_symbol compares these against cached Timestamps, so they must be
+                # Timestamps too — passing ISO strings raises on the '<' comparison.
+                sync_symbol(sym, start, pd.Timestamp.now().normalize())
+            except Exception as e:
+                print(f"[performance] benchmark warm-up failed for {sym}: {e}")
+        threading.Thread(target=_warm, args=(symbol, twr.index[0]), daemon=True).start()
+
+    # Rebase: a cumulative series restarted mid-life has to be un-compounded from its
+    # own value at the window's start, not merely shifted down by it.
+    base = window.iloc[0]
+    port = ((1 + window / 100.0) / (1 + base / 100.0) - 1.0) * 100.0
+
+    bench_out, bench_ret = [], None
+    if bench is not None:
+        bw = bench[bench.index >= window.index[0]]
+        if len(bw) >= 2 and bw.iloc[0] > 0:
+            bseries = (bw / bw.iloc[0] - 1.0) * 100.0
+            bench_out = [round(float(v), 2) for v in bseries]
+            bench_ret = round(float(bseries.iloc[-1]), 2)
+
+    return jsonify({
+        "dates": [d.strftime("%Y-%m-%d") for d in port.index],
+        "portfolio": [round(float(v), 2) for v in port],
+        "benchmark": bench_out,
+        "benchmark_symbol": symbol,
+        "benchmark_available": bool(bench_out),
+        "portfolio_return": round(float(port.iloc[-1]), 2),
+        "benchmark_return": bench_ret,
+        "range": rng,
+    })
+
+
 
 @app.route("/api/portfolio/range-performance", methods=["GET"])
 @jwt_required()
@@ -3216,6 +3292,107 @@ def _build_daily_market_return_series(conn, user_id):
             factor.loc[all_dates < sd] *= ratio
         portfolio_value += units_df[sym] * factor * prices
     return portfolio_value - cash_flow
+
+def _build_daily_value_and_flows(conn, user_id):
+    """(portfolio_value, net_flow) as daily pandas Series, both AUD.
+
+    Same replay as _build_daily_market_return_series, but returning the two pieces
+    rather than their difference — a time-weighted return needs the flow on each day
+    kept separate from the value it produced.
+    """
+    txns = load_transactions(user_id)
+    if not txns:
+        return None, None
+    df = pd.DataFrame(txns)
+    df["date"] = pd.to_datetime(df["date"])
+    df["sym"] = df.apply(lambda r: yf_symbol(r["ticker"], r["exchange"]), axis=1)
+    all_dates = pd.date_range(df["date"].min(), pd.Timestamp(date.today()), freq="D")
+
+    price_data = {}
+    for sym in list(df["sym"].unique()) + ["AUDUSD=X"]:
+        rows = conn.execute(
+            "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (sym,)
+        ).fetchall()
+        if rows:
+            s = pd.Series({pd.Timestamp(d): c for d, c in rows}).reindex(all_dates).ffill().bfill()
+            s = s.fillna(0.0 if sym != "AUDUSD=X" else 1.0)
+        else:
+            s = pd.Series(0.0 if sym != "AUDUSD=X" else 1.0, index=all_dates)
+        price_data[sym] = s
+
+    fx_rates = price_data["AUDUSD=X"]
+    units_changes = pd.DataFrame(0.0, index=all_dates, columns=df["sym"].unique())
+    sym_currency = df.groupby("sym")["currency"].first().to_dict()
+    flows = pd.Series(0.0, index=all_dates)
+    for _, row in df.iterrows():
+        sign = -1 if row["action"].lower() == "sell" else 1
+        units_changes.loc[row["date"], row["sym"]] += sign * row["units"]
+        flows.loc[row["date"]] += row["value"]
+    units_df = units_changes.cumsum()
+
+    value = pd.Series(0.0, index=all_dates)
+    split_ratios = _split_ratios_by_symbol(txns)
+    for sym in df["sym"].unique():
+        prices = price_data[sym]
+        if sym_currency[sym] == "USD":
+            prices = prices / fx_rates
+        factor = pd.Series(1.0, index=all_dates)
+        for sd, ratio in split_ratios.get(sym, ()):
+            factor.loc[all_dates < sd] *= ratio
+        value += units_df[sym] * factor * prices
+    return value, flows
+
+
+def _build_twr_series(conn, user_id):
+    """Cumulative TIME-WEIGHTED return, as a daily pandas Series of percentages.
+
+    Each day's return is (value_end − flow) / value_start − 1, chained. Subtracting
+    the day's flow before dividing is the whole point: money you paid in is not
+    performance, and without that step every deposit reads as an instant gain.
+
+    This is deliberately NOT the money-weighted figure the stat cards show. MWR
+    answers "how did MY money do" and is the honest measure of a personal result,
+    but it moves with the TIMING of contributions, so it cannot be compared against
+    an index — which has no contributions. Only TWR can sit on the same axis as a
+    benchmark line, which is the only reason this exists.
+    """
+    value, flows = _build_daily_value_and_flows(conn, user_id)
+    if value is None or len(value) < 2:
+        return None
+    prev = value.shift(1)
+    daily = (value - flows) / prev - 1.0
+    # Before the first buy prev is 0 (or the position is empty) — no capital at work,
+    # so no return to record. inf/NaN here would poison the whole cumulative product.
+    daily = daily.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
+    daily[prev <= 0] = 0.0
+    return ((1.0 + daily).cumprod() - 1.0) * 100.0
+
+
+def _benchmark_series(conn, symbol, index):
+    """Cumulative % return for a benchmark symbol over `index`, or None if unpriced.
+
+    AUD-converted when the symbol is USD-quoted, so it sits on the same axis as a
+    portfolio measured in AUD — an Australian investor holding SPY really does earn
+    the index return PLUS whatever the currency did, and hiding that would make the
+    comparison flattering rather than true. ASX symbols are already AUD.
+    """
+    rows = conn.execute(
+        "SELECT date, close FROM prices WHERE symbol = ? ORDER BY date", (symbol,)
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    s = pd.Series({pd.Timestamp(d): c for d, c in rows}).reindex(index).ffill().bfill()
+    if s.isna().all():
+        return None
+    if not symbol.endswith((".AX", ".L", ".TO")):
+        fx = conn.execute(
+            "SELECT date, close FROM prices WHERE symbol = 'AUDUSD=X' ORDER BY date"
+        ).fetchall()
+        if fx:
+            fxs = pd.Series({pd.Timestamp(d): c for d, c in fx}).reindex(index).ffill().bfill()
+            s = s / fxs
+    return s
+
 
 def _calc_realised_gain(txns: list) -> float:
     """Lifetime realised gain in AUD, average-cost basis, across every symbol.

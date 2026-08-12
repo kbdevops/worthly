@@ -5,6 +5,7 @@ import type {
   CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
   CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
   ClosedPositionsResult,
+  PerformanceData,
 } from '../types'
 import { getToken, clearSession } from '../lib/auth'
 import { apiUrl } from '../lib/apiBase'
@@ -86,6 +87,13 @@ export const useStats = () =>
 
 export const useNetworth = () =>
   useQuery({ queryKey: ['networth'], queryFn: () => get<NetworthData>('/api/networth') })
+
+export const usePerformance = (range: string, benchmark: string) =>
+  useQuery({
+    queryKey: ['performance', range, benchmark],
+    queryFn: () => get<PerformanceData>(
+      `/api/performance?range=${encodeURIComponent(range)}&benchmark=${encodeURIComponent(benchmark)}`),
+  })
 
 export const useMonthlyChange = () =>
   useQuery({ queryKey: ['monthly-change'], queryFn: () => get<MonthlyChange>('/api/monthly-change') })

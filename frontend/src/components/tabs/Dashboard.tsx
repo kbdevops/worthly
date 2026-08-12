@@ -2,20 +2,21 @@ import { useState, useCallback, useEffect, useMemo } from 'react'
 import {
   Line, BarChart, Bar, Cell, LabelList,
   XAxis, YAxis, Tooltip, ResponsiveContainer, Treemap,
-  ComposedChart, Area, CartesianGrid,
+  ComposedChart, Area, CartesianGrid, AreaChart, ReferenceLine,
 } from 'recharts'
 import {
   DndContext, closestCenter, KeyboardSensor, PointerSensor,
   useSensor, useSensors,
 } from '@dnd-kit/core'
 import type { DragEndEvent } from '@dnd-kit/core'
+import type { Holding } from '../../types'
 import {
   arrayMove, SortableContext, sortableKeyboardCoordinates,
   useSortable, verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Settings, X, Eye, EyeOff, Pencil, Plus, Trash2, Check } from 'lucide-react'
-import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance, useExtendedHours } from '../../hooks/useApi'
+import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance, useExtendedHours, usePerformance } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import { SERIES_COLORS } from '../../lib/chartColors'
 import { DonutBreakdown } from '../ui/DonutBreakdown'
@@ -185,21 +186,25 @@ function exchangeToCountry(exchange: string): string {
 }
 
 // ── Fixed widget definitions ─────────────────────────────────────────────────
-type FixedWidgetId = 'networth' | 'monthly' | 'performance' | 'holdings'
+type FixedWidgetId = 'perf_chart' | 'networth' | 'monthly' | 'performance' | 'holdings'
 
 const FIXED_WIDGET_LABELS: Record<FixedWidgetId, string> = {
+  perf_chart:  'Performance',
   networth:    'Net Worth Timeline',
   monthly:     'Monthly Change',
-  performance: 'Holding Performance',
+  // Id stays 'performance' so saved layouts keep working; only the label moved. The
+  // return chart that now owns the name is 'perf_chart'.
+  performance: 'Allocation',
   holdings:    'Portfolio Holdings',
 }
 
-const DEFAULT_ORDER: string[] = ['networth', 'alloc_country', 'monthly', 'performance', 'holdings']
+const DEFAULT_ORDER: string[] = ['perf_chart', 'networth', 'performance', 'monthly', 'alloc_country', 'holdings']
 
 // Fixed column span per widget, out of 6. Net worth and holding performance sit
 // side by side at a half each; the holdings list needs the full width for its
 // donut plus two-column legend; the rest take a third.
 const WIDGET_SPAN: Record<string, number> = {
+  perf_chart: 6,
   networth: 3,
   performance: 3,
   holdings: 6,
@@ -255,6 +260,12 @@ const DEFAULT_STATS: StatKey[] = ['cagr', 'return_pct', 'income_fy', 'cost_basis
 
 // ── Time range ────────────────────────────────────────────────────────────────
 type Range = '1M' | '3M' | '6M' | '1Y' | 'All'
+/** Allocation's own scale. 'Today' is each holding's daily move, 'Total' its lifetime
+ *  holding return — the two the tiles are actually worth colouring by. */
+type AllocRange = 'Today' | '1M' | '3M' | '6M' | '1Y' | 'Total'
+const ALLOC_RANGES: AllocRange[] = ['Today', '1M', '3M', '6M', '1Y', 'Total']
+type PerfRange = '1W' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | 'Max'
+const PERF_RANGES: PerfRange[] = ['1W', '1M', '3M', '6M', 'YTD', '1Y', 'Max']
 
 function filterByRange<T extends { date: string }>(data: T[], range: Range): T[] {
   if (range === 'All' || !data.length) return data
@@ -589,7 +600,17 @@ export default function Dashboard() {
 
   const [range, setRange] = useLocalStorage<Range>('dash_range', 'All')
   // Declared after `range` — the treemap follows the same selector as the chart.
-  const { data: rangePerf } = useRangePerformance(range)
+  // Allocation gets its own selector: it used to borrow the net worth chart's range,
+  // and "Today" is meaningless on a net worth timeline.
+  const [allocRange, setAllocRange] = useLocalStorage<AllocRange>('dash_alloc_range', 'Total')
+  // Today reads daily_change_pct straight off the holding, so the query is only for
+  // the bounded windows; anything else asks the endpoint for its lifetime figure.
+  const { data: rangePerf } = useRangePerformance(
+    allocRange === 'Today' || allocRange === 'Total' ? 'All' : allocRange)
+  const [perfRange, setPerfRange] = useLocalStorage<PerfRange>('dash_perf_range', 'Max')
+  const [benchmark, setBenchmark] = useLocalStorage<string>('dash_benchmark', 'IVV.AX')
+  const [benchEdit, setBenchEdit] = useState<string | null>(null)
+  const { data: perf } = usePerformance(perfRange, benchmark)
   const { data: ext } = useExtendedHours()
 
   type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super' | 'Return'
@@ -604,7 +625,6 @@ export default function Dashboard() {
   const NW_LINES: { key: NWLine; color: string }[] = [
     { key: 'Net Worth', color: SERIES_COLORS['Net Worth'] },
     { key: 'Portfolio', color: SERIES_COLORS['Portfolio'] },
-    { key: 'Return',    color: SERIES_COLORS['Return'] },
     { key: 'Cash',      color: SERIES_COLORS['Cash'] },
     { key: 'Super',     color: SERIES_COLORS['Super'] },
   ]
@@ -755,7 +775,12 @@ export default function Dashboard() {
     const validFixed = new Set(Object.keys(FIXED_WIDGET_LABELS))
     const known = orderRaw.filter(id => validFixed.has(id) || allAllocIds.has(id))
     const newIds = DEFAULT_ORDER.filter(id => !known.includes(id))
-    return [...known, ...newIds]
+    // New widgets normally land at the bottom, which is wrong for perf_chart — it is
+    // the headline chart and belongs on top. Without this a saved layout (everyone
+    // who has ever opened the dashboard) would bury it under five other widgets and
+    // it would look like the feature never shipped.
+    const merged = [...known, ...newIds.filter(id => id !== 'perf_chart')]
+    return newIds.includes('perf_chart') ? ['perf_chart', ...merged] : merged
   }, [orderRaw, allocWidgets])
 
   const [visibleRaw, setVisible] = useLocalStorage<Record<string, boolean>>('dash_visible', DEFAULT_VISIBLE)
@@ -1465,22 +1490,140 @@ export default function Dashboard() {
           </div>
         )
 
+      case 'perf_chart': {
+        // Cumulative TIME-WEIGHTED return against a benchmark, both rebased to 0% at
+        // the window start. TWR because an index has no contributions: the app's
+        // money-weighted figure is the honest measure of a personal result but cannot
+        // share an axis with SPY or IVV. Two different questions, two different charts.
+        const pdata = (perf?.dates ?? []).map((d, i) => ({
+          date: d,
+          you: perf!.portfolio[i],
+          bench: perf!.benchmark[i] ?? null,
+        }))
+        const you = perf?.portfolio_return ?? 0
+        const bench = perf?.benchmark_return
+        const gridColor = themeColors['--border'] ?? '#262d5c'
+        const axisColor = themeColors['--text-muted'] ?? '#64748b'
+        return (
+          <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
+              <p className="text-sm font-medium text-slate-300">Performance</p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex gap-0.5">
+                  {PERF_RANGES.map(r => (
+                    <button key={r} onClick={() => setPerfRange(r)}
+                      className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
+                        perfRange === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+                      {r}
+                    </button>
+                  ))}
+                </div>
+                {benchEdit === null ? (
+                  <button onClick={() => setBenchEdit(benchmark)}
+                    className="px-2 py-0.5 text-[11px] rounded-md font-semibold border border-[var(--border)] text-slate-300 hover:border-indigo-500"
+                    title="Change benchmark">
+                    {perf?.benchmark_symbol ?? benchmark}
+                  </button>
+                ) : (
+                  <input
+                    autoFocus value={benchEdit}
+                    onChange={e => setBenchEdit(e.target.value.toUpperCase())}
+                    onBlur={() => { if (benchEdit.trim()) setBenchmark(benchEdit.trim()); setBenchEdit(null) }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { if (benchEdit.trim()) setBenchmark(benchEdit.trim()); setBenchEdit(null) }
+                      if (e.key === 'Escape') setBenchEdit(null)
+                    }}
+                    className="w-24 px-2 py-0.5 text-[11px] rounded-md bg-[var(--bg-elevated)] border border-indigo-500 text-white outline-none"
+                    placeholder="IVV.AX"
+                  />
+                )}
+              </div>
+            </div>
+            {/* Legend doubles as the readout, the way the reference does: the two
+                numbers you actually came for, above the chart rather than buried in
+                a tooltip you have to hunt for. */}
+            <div className="flex items-center gap-4 text-xs mb-3 flex-wrap">
+              <span className="text-slate-500">{pdata[pdata.length - 1]?.date ?? ''}</span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full" style={{ background: '#10b981' }} />
+                <span className="text-slate-400">Portfolio</span>
+                <span className="font-semibold tabular-nums" style={{ color: you >= 0 ? '#10b981' : '#ef4444' }}>
+                  {fmtPct(you)}
+                </span>
+              </span>
+              {perf?.benchmark_available && bench != null && (
+                <span className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full" style={{ background: '#818cf8' }} />
+                  <span className="text-slate-400">{perf.benchmark_symbol}</span>
+                  <span className="font-semibold tabular-nums text-slate-300">{fmtPct(bench)}</span>
+                </span>
+              )}
+              {perf && !perf.benchmark_available && (
+                <span className="text-[11px] text-amber-400">
+                  no prices for {perf.benchmark_symbol} — run a sync
+                </span>
+              )}
+            </div>
+            {pdata.length === 0 ? (
+              <p className="text-xs text-slate-500 text-center py-10">Not enough history yet.</p>
+            ) : (
+              <div className="flex-1 min-h-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={pdata} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="perfFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.28} />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
+                    <XAxis dataKey="date" tick={{ fill: axisColor, fontSize: 11 }} minTickGap={40}
+                      tickFormatter={(d: string) => {
+                        const [y, m] = d.split('-')
+                        return `${MONTHS[Number(m) - 1]} '${y.slice(2)}`
+                      }} />
+                    <YAxis tick={{ fill: axisColor, fontSize: 11 }} width={52}
+                      tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
+                    <Tooltip
+                      contentStyle={{ background: 'var(--bg-card)', border: `1px solid ${gridColor}`, borderRadius: 8, fontSize: 12 }}
+                      formatter={(v: unknown, n: unknown) =>
+                        [fmtPct(v as number), n === 'you' ? 'Portfolio' : (perf?.benchmark_symbol ?? 'Benchmark')]}
+                    />
+                    <ReferenceLine y={0} stroke={axisColor} strokeDasharray="2 2" />
+                    <Area type="monotone" dataKey="you" stroke="#10b981" strokeWidth={2}
+                      fill="url(#perfFill)" dot={false} isAnimationActive={false} />
+                    {perf?.benchmark_available && (
+                      <Area type="monotone" dataKey="bench" stroke="#818cf8" strokeWidth={1.5}
+                        fill="none" dot={false} isAnimationActive={false} />
+                    )}
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        )
+      }
+
       case 'performance': {
-        // Returns follow the same range selector as the net worth chart. Falls back
-        // to the portfolio's all-time figures until the range query resolves, so the
-        // treemap never blanks out while switching ranges.
-        // 'All' is holding_return_pct — identical to the Portfolio table's Return
-        // column, so the tile and the table finally quote one number. The tile's AREA
-        // is current value, so its figure covers current holdings only; the lifetime
-        // one, which counts sold parcels, is the dashboard headline.
+        // Falls back to the portfolio's own figures until the range query resolves, so
+        // the treemap never blanks out while switching scales.
+        // 'Total' is holding_return_pct — identical to the Portfolio table's Return
+        // column, so the tile and the table quote one number. The tile's AREA is
+        // current value, so its figure covers current holdings only; the lifetime one,
+        // which counts sold parcels, is the dashboard headline.
+        // 'Today' needs no request at all: daily_change_pct is already on the holding.
         const perfByTicker = new Map((rangePerf ?? []).map(r => [r.ticker, r]))
+        const tilePct = (h: Holding) =>
+          allocRange === 'Today'
+            ? h.daily_change_pct
+            : (perfByTicker.get(h.ticker)?.return_pct ?? h.holding_return_pct)
         const treemapData = portfolio
           ? portfolio
               .filter(h => h.units > 0 && h.value_aud > 0)
               .map(h => ({
                 name: h.ticker as string,
                 size: h.value_aud as number,
-                return_pct: perfByTicker.get(h.ticker)?.return_pct ?? (h.holding_return_pct as number),
+                return_pct: tilePct(h),
                 logo_url: h.logo_url as string,
               }))
           : []
@@ -1488,15 +1631,28 @@ export default function Dashboard() {
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
             <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
               <div className="flex items-baseline gap-2">
-                <p className="text-sm font-medium text-slate-300">Holding Performance</p>
+                <p className="text-sm font-medium text-slate-300">Allocation</p>
                 <span className="text-[11px] text-slate-500">
-                  {range === 'All' ? 'since purchase' : `${range} price move`}
+                  {allocRange === 'Today' ? "today's move"
+                    : allocRange === 'Total' ? 'since purchase'
+                    : `${allocRange} price move`}
                 </span>
               </div>
-              <div className="flex items-center gap-3 text-[10px] text-slate-500">
-                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
-                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#15803d' }} />gain</span>
-                <span className="text-slate-600">size = weight</span>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex gap-0.5">
+                  {ALLOC_RANGES.map(r => (
+                    <button key={r} onClick={() => setAllocRange(r)}
+                      className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
+                        allocRange === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+                      {r}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#15803d' }} />gain</span>
+                  <span className="text-slate-600">size = weight</span>
+                </div>
               </div>
             </div>
             {treemapData.length === 0 ? (
