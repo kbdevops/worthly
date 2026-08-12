@@ -63,6 +63,8 @@ export const useDashboardLayout = () =>
       widget_visible: Record<string, boolean> | null
       stat_keys: string[] | null
       alloc_widgets: unknown[] | null
+      /** Per-widget column span overrides, keyed by widget id. */
+      widget_spans: Record<string, number> | null
     }>('/api/dashboard-layout'),
   })
 
@@ -74,6 +76,7 @@ export const useSaveDashboardLayout = () => {
       widget_visible?: Record<string, boolean>
       stat_keys?: string[]
       alloc_widgets?: unknown[]
+      widget_spans?: Record<string, number>
     }) => post('/api/dashboard-layout', data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard-layout'] }),
   })

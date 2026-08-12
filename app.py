@@ -433,6 +433,14 @@ def db():
     except:
         pass
 
+    # Per-widget width overrides. Server-side for the same reason order and visibility
+    # are: a layout that only exists in localStorage isn't the user's layout, it's that
+    # browser's layout.
+    try:
+        conn.execute("ALTER TABLE dashboard_layout ADD COLUMN widget_spans TEXT")
+    except:
+        pass
+
     # Migrate transactions to track where a row came from (manual entry vs IBKR import)
     # and a stable per-broker-execution key so re-syncing IBKR updates existing rows
     # instead of duplicating them. external_id is NULL for every manual row — SQLite
@@ -721,18 +729,20 @@ def change_password():
 def get_dashboard_layout():
     conn = db()
     row = conn.execute(
-        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets FROM dashboard_layout WHERE user_id = ?",
+        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans "
+        "FROM dashboard_layout WHERE user_id = ?",
         (current_user_id(),),
     ).fetchone()
     conn.close()
     if not row:
         return jsonify({"widget_order": None, "widget_visible": None,
-                        "stat_keys": None, "alloc_widgets": None})
+                        "stat_keys": None, "alloc_widgets": None, "widget_spans": None})
     return jsonify({
         "widget_order": json.loads(row[0]) if row[0] else None,
         "widget_visible": json.loads(row[1]) if row[1] else None,
         "stat_keys": json.loads(row[2]) if row[2] else None,
         "alloc_widgets": json.loads(row[3]) if row[3] else None,
+        "widget_spans": json.loads(row[4]) if row[4] else None,
     })
 
 @app.route("/api/dashboard-layout", methods=["POST"])
@@ -741,13 +751,14 @@ def save_dashboard_layout():
     data = request.json or {}
     conn = db()
     conn.execute(
-        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
         "widget_order=excluded.widget_order, widget_visible=excluded.widget_visible, "
         "stat_keys=excluded.stat_keys, alloc_widgets=excluded.alloc_widgets, "
-        "updated_at=excluded.updated_at",
+        "widget_spans=excluded.widget_spans, updated_at=excluded.updated_at",
         (current_user_id(), json.dumps(data.get("widget_order")), json.dumps(data.get("widget_visible")),
          json.dumps(data.get("stat_keys")), json.dumps(data.get("alloc_widgets")),
+         json.dumps(data.get("widget_spans")),
          datetime.now().isoformat()),
     )
     conn.commit()

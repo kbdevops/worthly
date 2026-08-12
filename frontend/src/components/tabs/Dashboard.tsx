@@ -198,20 +198,29 @@ const FIXED_WIDGET_LABELS: Record<FixedWidgetId, string> = {
   holdings:    'Portfolio Holdings',
 }
 
-const DEFAULT_ORDER: string[] = ['perf_chart', 'networth', 'performance', 'monthly', 'alloc_country', 'holdings']
+const DEFAULT_ORDER: string[] = ['perf_chart', 'performance', 'networth', 'monthly', 'alloc_country', 'holdings']
 
 // Fixed column span per widget, out of 6. Net worth and holding performance sit
 // side by side at a half each; the holdings list needs the full width for its
 // donut plus two-column legend; the rest take a third.
+// Defaults only — every widget's width is user-settable in Dashboard Settings and
+// persisted per widget, so this is the starting point rather than the law.
 const WIDGET_SPAN: Record<string, number> = {
-  perf_chart: 6,
-  networth: 3,
+  perf_chart: 3,
+  networth: 6,
   performance: 3,
   holdings: 6,
   // Full width: 60+ monthly bars are unreadable squeezed into a third of the row.
   monthly: 6,
 }
 const spanOf = (id: string) => WIDGET_SPAN[id] ?? 2
+/** Widths a widget can be set to, out of the 6-column grid. Thirds and halves only:
+ *  arbitrary spans leave ragged gaps because the row has to divide evenly. */
+const SPAN_CHOICES: { span: number; label: string }[] = [
+  { span: 2, label: '⅓' },
+  { span: 3, label: '½' },
+  { span: 6, label: 'Full' },
+]
 
 // Shared height for the three full-width widgets so they read as one rhythm down
 // the page. Sized to the tallest natural content (Portfolio Holdings' 11-row list)
@@ -838,6 +847,13 @@ export default function Dashboard() {
     return newIds.includes('perf_chart') ? ['perf_chart', ...merged] : merged
   }, [orderRaw, allocWidgets])
 
+  // User width overrides, keyed by widget id. Empty means "use the default span".
+  const [spans, setSpans] = useLocalStorage<Record<string, number>>('dash_spans', {})
+  const widthOf = useCallback((id: string) => spans[id] ?? spanOf(id), [spans])
+  const setWidth = useCallback((id: string, span: number) => {
+    setSpans({ ...spans, [id]: span })
+  }, [spans, setSpans])
+
   const [visibleRaw, setVisible] = useLocalStorage<Record<string, boolean>>('dash_visible', DEFAULT_VISIBLE)
   const visible = useMemo(() => ({ ...visibleRaw }), [visibleRaw])
 
@@ -862,6 +878,7 @@ export default function Dashboard() {
     // widgets whose config only existed in one browser's localStorage, so they were
     // filtered out and appeared to have been deleted.
     if (remoteLayout.alloc_widgets) setAllocWidgets(remoteLayout.alloc_widgets as AllocWidgetConfig[])
+    if (remoteLayout.widget_spans) setSpans(remoteLayout.widget_spans as Record<string, number>)
     setLayoutLoadedFromAccount(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remoteLayout])
@@ -870,10 +887,10 @@ export default function Dashboard() {
     if (!layoutLoadedFromAccount) return
     saveLayout.mutate({
       widget_order: order, widget_visible: visible,
-      stat_keys: statKeys, alloc_widgets: allocWidgets,
+      stat_keys: statKeys, alloc_widgets: allocWidgets, widget_spans: spans,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order, visible, statKeys, allocWidgets, layoutLoadedFromAccount])
+  }, [order, visible, statKeys, allocWidgets, spans, layoutLoadedFromAccount])
 
   // One-time migration. A layout saved before the hero and ledger existed still lists
   // net_worth, portfolio, cash, day_pl, total_return and so on, which would now print
@@ -1823,21 +1840,37 @@ export default function Dashboard() {
             <p className="text-xs text-slate-400 mb-2">
               Widgets <span className="text-slate-600">(click to show or hide)</span>
             </p>
-            <div className="flex flex-wrap gap-2">
+            <div className="space-y-1.5">
               {order.map(id => {
                 const shown = visible[id] !== false
                 return (
-                  <button key={id} onClick={() => toggleWidget(id)}
-                    className={`flex items-center gap-1.5 px-3 py-1 text-xs rounded-full border transition-colors ${shown ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300' : 'border-[var(--border)] text-slate-500 hover:text-slate-300'}`}
-                  >
-                    {shown ? <Eye size={11} /> : <EyeOff size={11} />}
-                    {getWidgetLabel(id)}
-                  </button>
+                  <div key={id} className="flex items-center justify-between gap-3 flex-wrap">
+                    <button onClick={() => toggleWidget(id)}
+                      className={`flex items-center gap-1.5 px-3 py-1 text-xs rounded-full border transition-colors ${shown ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300' : 'border-[var(--border)] text-slate-500 hover:text-slate-300'}`}
+                    >
+                      {shown ? <Eye size={11} /> : <EyeOff size={11} />}
+                      {getWidgetLabel(id)}
+                    </button>
+                    {/* Width only bites at xl and above — below that every widget is
+                        full width regardless, so offering the choice on a phone would
+                        be a control that visibly does nothing. */}
+                    <div className="hidden xl:flex gap-0.5">
+                      {SPAN_CHOICES.map(c => (
+                        <button key={c.span} onClick={() => setWidth(id, c.span)}
+                          title={`${getWidgetLabel(id)} — ${c.label} width`}
+                          className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
+                            widthOf(id) === c.span ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 )
               })}
             </div>
             <p className="text-xs text-slate-600 mt-2">
               Drag the <GripVertical size={11} className="inline" /> handle on any widget to reorder.
+              Widths apply on wide screens; everything stacks full width on a phone.
             </p>
           </div>
 
@@ -1943,7 +1976,7 @@ export default function Dashboard() {
               widgets. Each card is now its own height. */}
           <div className="grid grid-cols-1 xl:grid-cols-6 gap-4 items-start">
             {visibleOrder.map(id => (
-              <SortableWidget key={id} id={id} span={spanOf(id)}>
+              <SortableWidget key={id} id={id} span={widthOf(id)}>
                 {renderWidget(id)}
               </SortableWidget>
             ))}
