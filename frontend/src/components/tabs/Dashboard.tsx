@@ -172,8 +172,9 @@ const ALLOC_DIMENSION_LABELS: Record<AllocDimension, string> = {
 }
 
 const DEFAULT_ALLOC_WIDGETS: AllocWidgetConfig[] = [
-  { id: 'alloc_country', name: 'Country Allocation', dimension: 'country' },
-  { id: 'alloc_sector', name: 'Sector Allocation', dimension: 'sector' },
+  { id: 'alloc_country',  name: 'Country Allocation',  dimension: 'country' },
+  { id: 'alloc_sector',   name: 'Sector Allocation',   dimension: 'sector' },
+  { id: 'alloc_exchange', name: 'Exchange Allocation', dimension: 'exchange' },
 ]
 
 const COUNTRY_OPTIONS = ['AU', 'US', 'UK', 'JP', 'CN', 'EU', 'CA', 'SG', 'HK', 'NZ', 'DE', 'FR', 'IN']
@@ -199,7 +200,13 @@ const FIXED_WIDGET_LABELS: Record<FixedWidgetId, string> = {
   holdings:    'Portfolio Holdings',
 }
 
-const DEFAULT_ORDER: string[] = ['perf_chart', 'performance', 'networth', 'monthly', 'alloc_country', 'alloc_sector', 'holdings']
+const DEFAULT_ORDER: string[] = [
+  'perf_chart', 'performance',                            // ½ + ½
+  'networth',                                             // full
+  'alloc_country', 'alloc_sector', 'alloc_exchange',      // ⅓ + ⅓ + ⅓
+  'monthly',                                              // full
+  'holdings',                                             // full
+]
 
 // Fixed column span per widget, out of 6. Net worth and holding performance sit
 // side by side at a half each; the holdings list needs the full width for its
@@ -275,8 +282,12 @@ const monthLabel = (iso: string): string => {
   const [y, m] = iso.split('-').map(Number)
   return y && m ? `${MONTHS[m - 1]} ${String(y).slice(2)}` : iso
 }
+// Everything in DEFAULT_ORDER, on. A key missing here reads as visible anyway
+// (visible[id] !== false), but listing them keeps the two in step when either moves.
 const DEFAULT_VISIBLE: Record<string, boolean> = {
-  networth: true, 'alloc_country': true, monthly: true, performance: true, holdings: true,
+  perf_chart: true, performance: true, networth: true,
+  alloc_country: true, alloc_sector: true, alloc_exchange: true,
+  monthly: true, holdings: true,
 }
 
 
@@ -854,7 +865,11 @@ export default function Dashboard() {
     const allAllocIds = new Set(allocWidgets.map(w => w.id))
     const validFixed = new Set(Object.keys(FIXED_WIDGET_LABELS))
     const known = orderRaw.filter(id => validFixed.has(id) || allAllocIds.has(id))
-    const newIds = DEFAULT_ORDER.filter(id => !known.includes(id))
+    // Same validity test as `known`. Without it a default id whose widget config the
+    // user doesn't have (their allocation widgets carry their own ids) is listed in
+    // Settings as a bare id and renders nothing.
+    const newIds = DEFAULT_ORDER.filter(
+      id => !known.includes(id) && (validFixed.has(id) || allAllocIds.has(id)))
     // New widgets normally land at the bottom, which is wrong for perf_chart — it is
     // the headline chart and belongs on top. Without this a saved layout (everyone
     // who has ever opened the dashboard) would bury it under five other widgets and
