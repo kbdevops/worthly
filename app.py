@@ -1549,10 +1549,18 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
                 if hist.empty:
                     continue
                 hist.index = hist.index.tz_localize(None)
+                # Drop NaN closes. yfinance returns them routinely — an FX pair on a
+                # non-trading day, a halted session, an incomplete candle — and
+                # float(nan) reaches SQLite as NULL, which trips prices.close NOT NULL
+                # and fails the WHOLE executemany. One unusable row was throwing away
+                # every good row alongside it and marking the symbol's sync failed.
                 rows = [
                     (symbol, d.strftime("%Y-%m-%d"), float(c))
                     for d, c in hist["Close"].items()
+                    if pd.notna(c)
                 ]
+                if not rows:
+                    continue
                 conn.executemany(
                     "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
                     rows,
@@ -1583,6 +1591,8 @@ def sync_symbol(symbol, needed_start, needed_end, force=False):
                 intraday.index = intraday.index.tz_localize(None)
                 latest = intraday.iloc[-1]
                 latest_date = latest.name.strftime("%Y-%m-%d")
+                if pd.isna(latest["Close"]):
+                    raise ValueError("intraday close is NaN")
                 latest_close = float(latest["Close"])
                 conn.execute(
                     "INSERT OR REPLACE INTO prices (symbol, date, close) VALUES (?, ?, ?)",
