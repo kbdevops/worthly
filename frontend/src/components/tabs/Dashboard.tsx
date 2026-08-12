@@ -1604,10 +1604,12 @@ export default function Dashboard() {
         )
 
       case 'perf_chart': {
-        // Cumulative TIME-WEIGHTED return against a benchmark, both rebased to 0% at
-        // the window start. TWR because an index has no contributions: the app's
-        // money-weighted figure is the honest measure of a personal result but cannot
-        // share an axis with SPY or IVV. Two different questions, two different charts.
+        // Cumulative return on the SAME basis as the Holdings tab: price, currency and
+        // a pro-rated share of dividends and franking on the units still held. NOT
+        // time-weighted — TWR is the textbook way to race an index, but it produces a
+        // different number from the one Holdings shows, and this app has spent its
+        // whole life fixing exactly that kind of split. Consistency wins; the benchmark
+        // is a reference line, not a like-for-like race, and the caption says so.
         const pdata = (perf?.dates ?? []).map((d, i) => ({
           date: d,
           you: perf!.portfolio[i],
@@ -1669,6 +1671,10 @@ export default function Dashboard() {
                 </span>
               )}
             </div>
+            <p className="text-[11px] text-slate-500 mb-3 -mt-1">
+              Return on what you hold — price, currency and dividends — the same figure as
+              the Holdings tab.{perf?.benchmark_available && ` ${perf.benchmark_symbol} is a price-only index for reference; it excludes its own distributions.`}
+            </p>
             {pdata.length === 0 ? (
               <p className="text-xs text-slate-500 text-center py-10">Not enough history yet.</p>
             ) : (

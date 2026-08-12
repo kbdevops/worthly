@@ -2826,7 +2826,7 @@ def get_performance():
     uid = current_user_id()
     conn = db()
     try:
-        twr = _build_twr_series(conn, uid)
+        twr = _build_holding_return_series(conn, uid)
         if twr is None or twr.empty:
             return jsonify({"dates": [], "portfolio": [], "benchmark": [],
                             "benchmark_symbol": symbol, "benchmark_available": False,
@@ -2857,8 +2857,9 @@ def get_performance():
 
     # Rebase: a cumulative series restarted mid-life has to be un-compounded from its
     # own value at the window's start, not merely shifted down by it.
-    base = window.iloc[0]
-    port = ((1 + window / 100.0) / (1 + base / 100.0) - 1.0) * 100.0
+    # Max shows the figure itself, so the last point equals the Holdings tab exactly.
+    # A bounded window shows the change since the window opened.
+    port = window if rng not in RANGE_DAYS and rng not in ("YTD", "FY", "Today") else window - window.iloc[0]
 
     bench_out, bench_ret = [], None
     if bench is not None:
@@ -3394,6 +3395,86 @@ def _build_daily_value_and_flows(conn, user_id):
             factor.loc[all_dates < sd] *= ratio
         value += units_df[sym] * factor * prices
     return value, flows
+
+
+def _build_holding_return_series(conn, user_id):
+    """Daily cumulative return on the SAME basis as the Holdings tab, as a percentage.
+
+        (unrealised + pro-rated income + pro-rated franking) / cost of units held
+
+    Deliberately not time-weighted. TWR is the textbook answer for comparing against
+    an index because it strips out when money went in — but it is a different figure
+    from the one the Holdings table shows, and a dashboard quoting two different
+    "returns" for the same portfolio is the thing this app has spent its whole life
+    getting wrong. Consistency wins; the benchmark line is a reference, not a
+    like-for-like race.
+
+    Cost and income are checkpointed at each transaction and forward-filled rather
+    than recomputed per day — 144 transactions against ~1800 days.
+    """
+    value, _ = _build_daily_value_and_flows(conn, user_id)
+    if value is None or value.empty:
+        return None
+    txns = load_transactions(user_id)
+
+    per = {}
+    checkpoints = []   # (timestamp, total_cost, {sym: (cost, gross)})
+    for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
+        sym = yf_symbol(t["ticker"], t["exchange"])
+        h = per.setdefault(sym, {"units": 0.0, "cost": 0.0, "gross": 0.0})
+        action = (t.get("action") or "").lower()
+        if action == "buy":
+            h["units"] += t["units"]; h["cost"] += t["value"]; h["gross"] += t["value"]
+        elif action == "split":
+            h["units"] += t["units"]
+        elif action == "sell" and h["units"] > 0:
+            avg = h["cost"] / h["units"]
+            h["cost"] -= t["units"] * avg
+            h["units"] -= t["units"]
+            if h["units"] <= 1e-9:
+                h["units"] = 0.0; h["cost"] = 0.0
+        checkpoints.append((pd.Timestamp(t["date"][:10]),
+                            {s: (v["cost"], v["gross"]) for s, v in per.items()}))
+
+    # Income and franking accrue on their own dates, so they get their own checkpoints.
+    div_rows = conn.execute(
+        "SELECT symbol, date, COALESCE(net_amount_aud,0), COALESCE(franking_credit_aud,0) "
+        "FROM dividends WHERE user_id = ? ORDER BY date", (user_id,)
+    ).fetchall()
+
+    idx = value.index
+    cost_s = pd.Series(0.0, index=idx)
+    pro_s = pd.Series(0.0, index=idx)
+
+    def state_at(ts):
+        last = None
+        for d, snap in checkpoints:
+            if d <= ts:
+                last = snap
+            else:
+                break
+        return last or {}
+
+    inc_by_sym = {}
+    for d in idx:
+        snap = state_at(d)
+        # Dividends banked on or before this day, per symbol.
+        while div_rows and pd.Timestamp(div_rows[0][1][:10]) <= d:
+            sym, _dt, net, frank = div_rows.pop(0)
+            cur = inc_by_sym.setdefault(sym, [0.0, 0.0])
+            cur[0] += net; cur[1] += frank
+        total_cost = sum(c for c, _g in snap.values())
+        pro = 0.0
+        for sym, (c, g) in snap.items():
+            net, frank = inc_by_sym.get(sym, (0.0, 0.0))
+            if g > 0:
+                pro += (net + frank) * (c / g)
+        cost_s[d] = total_cost
+        pro_s[d] = pro
+
+    gain = value - cost_s + pro_s
+    out = (gain / cost_s.replace(0.0, float("nan")) * 100.0)
+    return out.fillna(0.0)
 
 
 def _build_twr_series(conn, user_id):
