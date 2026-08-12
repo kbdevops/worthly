@@ -1509,8 +1509,8 @@ export default function Dashboard() {
             <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
               <p className="text-sm font-medium text-slate-300">Performance</p>
               <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex gap-0.5">
-                  {PERF_RANGES.map(r => (
+                <div className="flex gap-0.5 flex-wrap">
+                  {(narrow ? PERF_RANGES.filter(r => r !== '3M' && r !== '6M') : PERF_RANGES).map(r => (
                     <button key={r} onClick={() => setPerfRange(r)}
                       className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
                         perfRange === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
@@ -1577,12 +1577,14 @@ export default function Dashboard() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke={gridColor} vertical={false} />
-                    <XAxis dataKey="date" tick={{ fill: axisColor, fontSize: 11 }} minTickGap={40}
+                    <XAxis dataKey="date" tick={{ fill: axisColor, fontSize: 11 }}
+                      tickLine={false} axisLine={false} minTickGap={narrow ? 64 : 40}
                       tickFormatter={(d: string) => {
                         const [y, m] = d.split('-')
                         return `${MONTHS[Number(m) - 1]} '${y.slice(2)}`
                       }} />
-                    <YAxis tick={{ fill: axisColor, fontSize: 11 }} width={52}
+                    <YAxis tick={{ fill: axisColor, fontSize: 11 }}
+                      tickLine={false} axisLine={false} width={narrow ? 38 : 52}
                       tickFormatter={(v: number) => `${v.toFixed(0)}%`} />
                     <Tooltip
                       contentStyle={{ background: 'var(--bg-card)', border: `1px solid ${gridColor}`, borderRadius: 8, fontSize: 12 }}
@@ -1639,7 +1641,7 @@ export default function Dashboard() {
                 </span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <div className="flex gap-0.5">
+                <div className="flex gap-0.5 flex-wrap">
                   {ALLOC_RANGES.map(r => (
                     <button key={r} onClick={() => setAllocRange(r)}
                       className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
@@ -1648,11 +1650,13 @@ export default function Dashboard() {
                     </button>
                   ))}
                 </div>
-                <div className="flex items-center gap-3 text-[10px] text-slate-500">
-                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
-                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#15803d' }} />gain</span>
-                  <span className="text-slate-600">size = weight</span>
-                </div>
+                {!narrow && (
+                  <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                    <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
+                    <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#15803d' }} />gain</span>
+                    <span className="text-slate-600">size = weight</span>
+                  </div>
+                )}
               </div>
             </div>
             {treemapData.length === 0 ? (
