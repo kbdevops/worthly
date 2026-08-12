@@ -2752,8 +2752,30 @@ def refresh_prices_now():
     })
 
 RANGE_DAYS = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365}
-# YTD isn't a fixed number of days, so it's resolved against the calendar instead.
 DEFAULT_BENCHMARK = "IVV.AX"
+
+
+def range_cutoff(rng):
+    """Start date for a range key, or None for the whole history.
+
+    One vocabulary for every widget that has a range dial — Today/1W/1M/3M/6M/YTD/
+    FY/1Y/Max — so the same window can't end up called "All" on one chart and "Max"
+    on another, which is exactly what it was called before this existed.
+
+    YTD and FY aren't fixed day counts, so they resolve against the calendar. FY is
+    the Australian financial year: 1 July to 30 June, the window the user's tax
+    actually runs on, and the same boundary /api/stats uses for income_fy.
+    """
+    today = date.today()
+    if rng == "Today":
+        return today
+    if rng == "YTD":
+        return date(today.year, 1, 1)
+    if rng == "FY":
+        return date(today.year - (1 if today.month < 7 else 0), 7, 1)
+    if rng in RANGE_DAYS:
+        return today - timedelta(days=RANGE_DAYS[rng])
+    return None   # Max
 
 
 @app.route("/api/performance", methods=["GET"])
@@ -2776,12 +2798,8 @@ def get_performance():
                             "benchmark_symbol": symbol, "benchmark_available": False,
                             "portfolio_return": 0.0, "benchmark_return": 0.0})
 
-        if rng == "YTD":
-            cutoff = pd.Timestamp(date(date.today().year, 1, 1))
-        elif rng in RANGE_DAYS:
-            cutoff = pd.Timestamp(date.today() - timedelta(days=RANGE_DAYS[rng]))
-        else:
-            cutoff = twr.index[0]
+        start = range_cutoff(rng)
+        cutoff = pd.Timestamp(start) if start else twr.index[0]
         window = twr[twr.index >= cutoff]
         if len(window) < 2:
             window = twr
@@ -2849,16 +2867,17 @@ def get_range_performance():
     converted to AUD at each end so FX is included the same way it is everywhere
     else in the app.
     """
-    rng = request.args.get("range", "All")
+    rng = request.args.get("range", "Max")
     holdings = _compute_active_holdings(current_user_id())
 
-    if rng not in RANGE_DAYS:
+    window_start = range_cutoff(rng)
+    if window_start is None:
         return jsonify([
             {"ticker": h["ticker"], "value_aud": h["value_aud"], "return_pct": h["holding_return_pct"]}
             for h in holdings
         ])
 
-    cutoff = (date.today() - timedelta(days=RANGE_DAYS[rng])).isoformat()
+    cutoff = window_start.isoformat()
     conn = db()
 
     # When did each position actually open? A window that reaches back further than

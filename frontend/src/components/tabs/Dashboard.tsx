@@ -259,21 +259,74 @@ const DEFAULT_VISIBLE: Record<string, boolean> = {
 const DEFAULT_STATS: StatKey[] = ['cagr', 'return_pct', 'income_fy', 'cost_basis', 'daily_ath']
 
 // ── Time range ────────────────────────────────────────────────────────────────
-type Range = '1M' | '3M' | '6M' | '1Y' | 'All'
-/** Allocation's own scale. 'Today' is each holding's daily move, 'Total' its lifetime
- *  holding return — the two the tiles are actually worth colouring by. */
-type AllocRange = 'Today' | '1M' | '3M' | '6M' | '1Y' | 'Total'
-const ALLOC_RANGES: AllocRange[] = ['Today', '1M', '3M', '6M', '1Y', 'Total']
-type PerfRange = '1W' | '1M' | '3M' | '6M' | 'YTD' | '1Y' | 'Max'
-const PERF_RANGES: PerfRange[] = ['1W', '1M', '3M', '6M', 'YTD', '1Y', 'Max']
+/** ONE range vocabulary for every widget with a dial. Each widget picks the subset
+ *  that means something for it, but the words never diverge — the same window used
+ *  to be "All" on the net worth chart, "Total" on Allocation and "Max" here.
+ *  FY is the Australian financial year (1 July), which for an AU investor is the
+ *  window that actually matters; it's the same boundary /api/stats uses for income.
+ *  Dials stay INDEPENDENT rather than one shared control: Today only means anything
+ *  on Allocation, and wanting Performance on Max while Allocation shows Today is the
+ *  normal case, not the exception. */
+type Range = 'Today' | '1W' | '1M' | '3M' | '6M' | 'YTD' | 'FY' | '1Y' | 'Max'
+const RANGES_ALL: Range[] = ['Today', '1W', '1M', '3M', '6M', 'YTD', 'FY', '1Y', 'Max']
+// A single point is not a timeline, so the net worth chart has no Today.
+const RANGES_TIME: Range[] = RANGES_ALL.filter(r => r !== 'Today')
+const ALLOC_RANGES: Range[] = RANGES_ALL
+const PERF_RANGES: Range[] = RANGES_TIME
+type AllocRange = Range
+type PerfRange = Range
+
+function RangeDial({ options, value, onChange, narrow }: {
+  options: Range[]; value: Range; onChange: (r: Range) => void; narrow: boolean
+}) {
+  // Nine pills do not fit 375px. A select keeps every option reachable instead of
+  // hiding some on mobile, which would make the vocabulary differ by screen size —
+  // the exact problem this shared list exists to remove.
+  if (narrow) {
+    return (
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value as Range)}
+        className="px-2 py-1 text-[11px] rounded-md bg-[var(--bg-elevated)] border border-[var(--border)] text-slate-300 outline-none"
+      >
+        {options.map(r => <option key={r} value={r}>{r}</option>)}
+      </select>
+    )
+  }
+  return (
+    <div className="flex gap-0.5 flex-wrap">
+      {options.map(r => (
+        <button key={r} onClick={() => onChange(r)}
+          className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
+            value === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+          {r}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Saved prefs predate the shared vocabulary: 'All' and 'Total' both meant Max. */
+const migrateRange = (r: string): Range =>
+  (r === 'All' || r === 'Total' ? 'Max' : r as Range)
+
+/** Mirrors range_cutoff() in app.py — same vocabulary, same boundaries. */
+function rangeCutoff(range: Range): string | null {
+  if (range === 'Max') return null
+  const now = new Date()
+  if (range === 'Today') return now.toISOString().slice(0, 10)
+  if (range === 'YTD') return `${now.getFullYear()}-01-01`
+  if (range === 'FY') return `${now.getFullYear() - (now.getMonth() < 6 ? 1 : 0)}-07-01`
+  const days: Record<string, number> = { '1W': 7, '1M': 30, '3M': 90, '6M': 180, '1Y': 365 }
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - (days[range] ?? 0))
+  return cutoff.toISOString().slice(0, 10)
+}
 
 function filterByRange<T extends { date: string }>(data: T[], range: Range): T[] {
-  if (range === 'All' || !data.length) return data
-  const days: Record<Range, number> = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, All: 0 }
-  const cutoff = new Date()
-  cutoff.setDate(cutoff.getDate() - days[range])
-  const cutStr = cutoff.toISOString().slice(0, 10)
-  return data.filter(d => d.date >= cutStr)
+  const cut = rangeCutoff(range)
+  if (!cut || !data.length) return data
+  return data.filter(d => d.date >= cut)
 }
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -598,16 +651,18 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const [range, setRange] = useLocalStorage<Range>('dash_range', 'All')
+  const [rangeRaw, setRange] = useLocalStorage<Range>('dash_range', 'Max')
+  const range = migrateRange(rangeRaw)
   // Declared after `range` — the treemap follows the same selector as the chart.
   // Allocation gets its own selector: it used to borrow the net worth chart's range,
   // and "Today" is meaningless on a net worth timeline.
-  const [allocRange, setAllocRange] = useLocalStorage<AllocRange>('dash_alloc_range', 'Total')
+  const [allocRangeRaw, setAllocRange] = useLocalStorage<AllocRange>('dash_alloc_range', 'Max')
+  const allocRange = migrateRange(allocRangeRaw)
   // Today reads daily_change_pct straight off the holding, so the query is only for
   // the bounded windows; anything else asks the endpoint for its lifetime figure.
-  const { data: rangePerf } = useRangePerformance(
-    allocRange === 'Today' || allocRange === 'Total' ? 'All' : allocRange)
-  const [perfRange, setPerfRange] = useLocalStorage<PerfRange>('dash_perf_range', 'Max')
+  const { data: rangePerf } = useRangePerformance(allocRange === 'Today' ? 'Max' : allocRange)
+  const [perfRangeRaw, setPerfRange] = useLocalStorage<PerfRange>('dash_perf_range', 'Max')
+  const perfRange = migrateRange(perfRangeRaw)
   const [benchmark, setBenchmark] = useLocalStorage<string>('dash_benchmark', 'IVV.AX')
   const [benchEdit, setBenchEdit] = useState<string | null>(null)
   const { data: perf } = usePerformance(perfRange, benchmark)
@@ -1090,7 +1145,7 @@ export default function Dashboard() {
     itemStyle: { color: '#e2e8f0' },
   }
 
-  const ranges: Range[] = ['1M', '3M', '6M', '1Y', 'All']
+  const ranges: Range[] = RANGES_TIME
 
   function renderAllocWidget(cfg: AllocWidgetConfig) {
     const isEditing = editingAllocId === cfg.id
@@ -1278,16 +1333,7 @@ export default function Dashboard() {
                 </div>
               </div>
               {/* Range selector */}
-              <div className="flex gap-1 flex-wrap">
-                {ranges.map(r => (
-                  <button key={r} onClick={() => setRange(r)}
-                    className="px-2.5 py-1 text-xs rounded font-medium transition-colors"
-                    style={range === r
-                      ? { background: 'var(--accent)', color: '#fff' }
-                      : { color: 'var(--text-muted)' }}
-                  >{r}</button>
-                ))}
-              </div>
+              <RangeDial options={ranges} value={range} onChange={setRange} narrow={narrow} />
             </div>
 
             {latest && (
@@ -1509,15 +1555,7 @@ export default function Dashboard() {
             <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
               <p className="text-sm font-medium text-slate-300">Performance</p>
               <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex gap-0.5 flex-wrap">
-                  {(narrow ? PERF_RANGES.filter(r => r !== '3M' && r !== '6M') : PERF_RANGES).map(r => (
-                    <button key={r} onClick={() => setPerfRange(r)}
-                      className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
-                        perfRange === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-                      {r}
-                    </button>
-                  ))}
-                </div>
+                <RangeDial options={PERF_RANGES} value={perfRange} onChange={setPerfRange} narrow={narrow} />
                 {benchEdit === null ? (
                   <button onClick={() => setBenchEdit(benchmark)}
                     className="px-2 py-0.5 text-[11px] rounded-md font-semibold border border-[var(--border)] text-slate-300 hover:border-indigo-500"
@@ -1636,20 +1674,12 @@ export default function Dashboard() {
                 <p className="text-sm font-medium text-slate-300">Allocation</p>
                 <span className="text-[11px] text-slate-500">
                   {allocRange === 'Today' ? "today's move"
-                    : allocRange === 'Total' ? 'since purchase'
+                    : allocRange === 'Max' ? 'since purchase'
                     : `${allocRange} price move`}
                 </span>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <div className="flex gap-0.5 flex-wrap">
-                  {ALLOC_RANGES.map(r => (
-                    <button key={r} onClick={() => setAllocRange(r)}
-                      className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
-                        allocRange === r ? 'bg-[var(--accent)] text-white' : 'text-slate-500 hover:text-slate-300'}`}>
-                      {r}
-                    </button>
-                  ))}
-                </div>
+                <RangeDial options={ALLOC_RANGES} value={allocRange} onChange={setAllocRange} narrow={narrow} />
                 {!narrow && (
                   <div className="flex items-center gap-3 text-[10px] text-slate-500">
                     <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
