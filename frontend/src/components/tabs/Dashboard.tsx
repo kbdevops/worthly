@@ -1671,9 +1671,13 @@ export default function Dashboard() {
                 </span>
               )}
             </div>
+            {/* The two bases answer different questions, so the caption changes with the
+                range rather than making the reader work out which one they're looking at. */}
             <p className="text-[11px] text-slate-500 mb-3 -mt-1">
-              Return on what you hold — price, currency and dividends — the same figure as
-              the Holdings tab.{perf?.benchmark_available && ` ${perf.benchmark_symbol} is a price-only index for reference; it excludes its own distributions.`}
+              {perf?.basis === 'twr'
+                ? 'Return over this period, excluding the effect of money added or withdrawn.'
+                : 'Return on what you hold — price, currency and dividends — the same figure as the Holdings tab.'}
+              {perf?.benchmark_available && ` ${perf.benchmark_symbol} is a price-only index for reference; it excludes its own distributions.`}
             </p>
             {pdata.length === 0 ? (
               <p className="text-xs text-slate-500 text-center py-10">Not enough history yet.</p>

@@ -2826,7 +2826,16 @@ def get_performance():
     uid = current_user_id()
     conn = db()
     try:
-        twr = _build_holding_return_series(conn, uid)
+        # Max answers "what is my return" and must equal the Holdings tab, so it uses
+        # return-on-cost. A bounded window asks a different question — "how did I do
+        # over this period" — and return-on-cost cannot answer it: the denominator
+        # moves when you buy. $357,818 of new capital in twelve months dragged a real
+        # +17.87% down to a displayed +2.96%, which is an artefact of the cost base
+        # growing, not a year of flat performance. Windows therefore use the
+        # time-weighted return, which is immune to contributions by construction.
+        windowed = rng in RANGE_DAYS or rng in ("YTD", "FY", "Today")
+        twr = (_build_twr_series(conn, uid) if windowed
+               else _build_holding_return_series(conn, uid))
         if twr is None or twr.empty:
             return jsonify({"dates": [], "portfolio": [], "benchmark": [],
                             "benchmark_symbol": symbol, "benchmark_available": False,
@@ -2857,9 +2866,13 @@ def get_performance():
 
     # Rebase: a cumulative series restarted mid-life has to be un-compounded from its
     # own value at the window's start, not merely shifted down by it.
-    # Max shows the figure itself, so the last point equals the Holdings tab exactly.
-    # A bounded window shows the change since the window opened.
-    port = window if rng not in RANGE_DAYS and rng not in ("YTD", "FY", "Today") else window - window.iloc[0]
+    # A windowed TWR is un-compounded from its own value at the window's start; Max is
+    # already the answer and is shown as-is.
+    if windowed:
+        base = window.iloc[0]
+        port = ((1 + window / 100.0) / (1 + base / 100.0) - 1.0) * 100.0
+    else:
+        port = window
 
     bench_out, bench_ret = [], None
     if bench is not None:
@@ -2878,6 +2891,7 @@ def get_performance():
         "portfolio_return": round(float(port.iloc[-1]), 2),
         "benchmark_return": bench_ret,
         "range": rng,
+        "basis": "twr" if windowed else "holding",
     })
 
 
