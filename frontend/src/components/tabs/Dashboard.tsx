@@ -173,6 +173,7 @@ const ALLOC_DIMENSION_LABELS: Record<AllocDimension, string> = {
 
 const DEFAULT_ALLOC_WIDGETS: AllocWidgetConfig[] = [
   { id: 'alloc_country', name: 'Country Allocation', dimension: 'country' },
+  { id: 'alloc_sector', name: 'Sector Allocation', dimension: 'sector' },
 ]
 
 const COUNTRY_OPTIONS = ['AU', 'US', 'UK', 'JP', 'CN', 'EU', 'CA', 'SG', 'HK', 'NZ', 'DE', 'FR', 'IN']
@@ -198,7 +199,7 @@ const FIXED_WIDGET_LABELS: Record<FixedWidgetId, string> = {
   holdings:    'Portfolio Holdings',
 }
 
-const DEFAULT_ORDER: string[] = ['perf_chart', 'performance', 'networth', 'monthly', 'alloc_country', 'holdings']
+const DEFAULT_ORDER: string[] = ['perf_chart', 'performance', 'networth', 'monthly', 'alloc_country', 'alloc_sector', 'holdings']
 
 // Fixed column span per widget, out of 6. Net worth and holding performance sit
 // side by side at a half each; the holdings list needs the full width for its
@@ -221,6 +222,21 @@ const SPAN_CHOICES: { span: number; label: string }[] = [
   { span: 3, label: '½' },
   { span: 6, label: 'Full' },
 ]
+
+/** Narrowest width at which a widget still says something. Offering a size that
+ *  visibly breaks the content isn't a choice, it's a trap — Portfolio Holdings at a
+ *  third clips its legend, and Monthly Change becomes 60 unreadable slivers. Widths
+ *  below these are removed from the picker AND clamped on read, so a layout already
+ *  saved too small repairs itself rather than staying broken. */
+const MIN_SPAN: Record<string, number> = {
+  holdings: 6,      // donut plus a two-column legend
+  monthly: 6,       // 60+ bars; the existing comment says as much
+  perf_chart: 3,    // range dial + benchmark chip + legend won't fit a third
+  networth: 3,      // four series and a range dial
+  performance: 3,   // treemap tiles drop their labels below this
+}
+const minSpanOf = (id: string) => MIN_SPAN[id] ?? 2
+const spanChoicesFor = (id: string) => SPAN_CHOICES.filter(c => c.span >= minSpanOf(id))
 
 // Shared height for the three full-width widgets so they read as one rhythm down
 // the page. Sized to the tallest natural content (Portfolio Holdings' 11-row list)
@@ -849,7 +865,8 @@ export default function Dashboard() {
 
   // User width overrides, keyed by widget id. Empty means "use the default span".
   const [spans, setSpans] = useLocalStorage<Record<string, number>>('dash_spans', {})
-  const widthOf = useCallback((id: string) => spans[id] ?? spanOf(id), [spans])
+  const widthOf = useCallback(
+    (id: string) => Math.max(spans[id] ?? spanOf(id), minSpanOf(id)), [spans])
   const setWidth = useCallback((id: string, span: number) => {
     setSpans({ ...spans, [id]: span })
   }, [spans, setSpans])
@@ -1199,7 +1216,25 @@ export default function Dashboard() {
               <div className="flex items-center gap-1.5 shrink-0">
                 <button onClick={() => startEditAlloc(cfg)} className="text-slate-600 hover:text-slate-300 transition-colors" title="Edit"><Pencil size={13} /></button>
                 <button onClick={() => removeAllocWidget(cfg.id)} className="text-slate-700 hover:text-red-400 transition-colors" title="Remove widget"><Trash2 size={13} /></button>
-                <span className="text-[10px] text-slate-600 px-1.5 py-0.5 rounded bg-slate-800/60">{ALLOC_DIMENSION_LABELS[cfg.dimension]}</span>
+                {/* Flip country/sector/exchange in place. Custom is excluded: it needs
+                    slices defined, which is what the edit pencil is for. */}
+                {cfg.dimension === 'custom' ? (
+                  <span className="text-[10px] text-slate-600 px-1.5 py-0.5 rounded bg-slate-800/60">
+                    {ALLOC_DIMENSION_LABELS[cfg.dimension]}
+                  </span>
+                ) : (
+                  <select
+                    value={cfg.dimension}
+                    onChange={e => setAllocWidgets(allocWidgets.map(w =>
+                      w.id === cfg.id ? { ...w, dimension: e.target.value as AllocDimension } : w))}
+                    className="text-[10px] text-slate-400 px-1 py-0.5 rounded bg-slate-800/60 border border-transparent hover:border-slate-600 outline-none cursor-pointer"
+                    title="Group by"
+                  >
+                    {(['country', 'sector', 'exchange'] as AllocDimension[]).map(d => (
+                      <option key={d} value={d}>{ALLOC_DIMENSION_LABELS[d]}</option>
+                    ))}
+                  </select>
+                )}
               </div>
             </>
           )}
@@ -1855,7 +1890,7 @@ export default function Dashboard() {
                         full width regardless, so offering the choice on a phone would
                         be a control that visibly does nothing. */}
                     <div className="hidden xl:flex gap-0.5">
-                      {SPAN_CHOICES.map(c => (
+                      {spanChoicesFor(id).map(c => (
                         <button key={c.span} onClick={() => setWidth(id, c.span)}
                           title={`${getWidgetLabel(id)} — ${c.label} width`}
                           className={`px-2 py-0.5 text-[11px] rounded-md font-medium transition-colors ${
@@ -1953,15 +1988,32 @@ export default function Dashboard() {
         </div>
         {syncStatuses && syncStatuses.length > 0 && (() => {
           const holdings = portfolio?.map(h => h.symbol) ?? []
-          const relevant = syncStatuses.filter(s => holdings.includes(s.symbol) && s.last_synced)
+          // Reads actual_to — the newest price actually stored — not last_synced,
+          // which is only when we last spoke to Yahoo. Those diverge constantly: a
+          // sync that finds nothing new still stamps last_synced, and a background
+          // refresh writes prices without stamping it at all. The label said
+          // "95h ago" while the table held prices from that morning.
+          const relevant = syncStatuses.filter(s => holdings.includes(s.symbol) && s.actual_to)
           if (!relevant.length) return null
-          const latest = relevant.reduce((a, b) => (a.last_synced > b.last_synced ? a : b))
-          const ago = Date.now() - new Date(latest.last_synced).getTime()
-          const mins = Math.floor(ago / 60000)
-          const label = mins < 1 ? 'just now' : mins < 60 ? `${mins}m ago` : `${Math.floor(mins / 60)}h ago`
-          const stale = mins > 120
+          const asOf = relevant.reduce((a, b) => (a.actual_to > b.actual_to ? a : b)).actual_to
+
+          // Markets shut on weekends, so "yesterday" is not a useful yardstick — the
+          // honest one is the most recent weekday. Anything older than that means a
+          // genuinely missed close; Friday's price on a Sunday is simply correct.
+          const lastTradingDay = (() => {
+            const d = new Date()
+            while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1)
+            return d.toISOString().slice(0, 10)
+          })()
+          const today = new Date().toISOString().slice(0, 10)
+          const label = asOf === today
+            ? 'today'
+            : new Date(asOf + 'T00:00:00').toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })
+          const stale = asOf < lastTradingDay
+          const syncedAt = relevant.reduce((a, b) => (a.last_synced > b.last_synced ? a : b)).last_synced
           return (
-            <p className="text-[11px] mt-2 text-right" style={{ color: stale ? '#f59e0b' : '#475569' }}>
+            <p className="text-[11px] mt-2 text-right" style={{ color: stale ? '#f59e0b' : '#475569' }}
+               title={syncedAt ? `Last checked ${new Date(syncedAt).toLocaleString('en-AU')}` : undefined}>
               {stale ? '⚠ ' : ''}Prices as of {label}
             </p>
           )
