@@ -5,6 +5,7 @@ import {
 } from 'recharts'
 import { useCompounder } from '../../hooks/useApi'
 import type { CompounterFYRow } from '../../types'
+import CompoundCalculator from '../CompoundCalculator'
 
 function fmt(n: number | null | undefined, decimals = 0): string {
   if (n == null) return '—'
@@ -426,6 +427,11 @@ export default function Compounder() {
 
       {/* CAGR Calculator */}
       <CAGRCalculator monthly={monthly} fyRows={fy_rows} />
+
+      {/* Forward-looking projection. Sits below the CAGR calculator deliberately:
+          that one measures what actually happened, this one is a what-if, and the
+          historical figures should be read first. */}
+      <CompoundCalculator />
 
       {/* FY Annual Snapshot table */}
       <div className="rounded-xl overflow-hidden" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
