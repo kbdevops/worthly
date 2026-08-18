@@ -530,7 +530,10 @@ function SortableWidget({ id, span, children }: { id: string; span: number; chil
 }
 
 // ── Holding Performance treemap ───────────────────────────────────────────────
-function perfColor(pct: number): string {
+function perfColor(pct: number, noData = false): string {
+  // Absent data gets a neutral tile. Colouring it green would assert a gain that was
+  // never measured — an ASX holding has no extended session to have moved in.
+  if (noData) return '#1e2536'
   if (pct >= 100) return '#14532d'
   if (pct >= 50)  return '#166534'
   if (pct >= 20)  return '#15803d'
@@ -543,9 +546,10 @@ function perfColor(pct: number): string {
 
 function TreemapTile(props: {
   x?: number; y?: number; width?: number; height?: number;
-  name?: string; return_pct?: number; value?: number; logo_url?: string;
+  name?: string; return_pct?: number; value?: number; logo_url?: string; no_data?: boolean;
 }) {
-  const { x = 0, y = 0, width = 0, height = 0, name = '', return_pct = 0, logo_url } = props
+  const { x = 0, y = 0, width = 0, height = 0, name = '', return_pct = 0, logo_url,
+          no_data = false } = props
   // Recharts calls `content` for every node in the hierarchy, including the
   // invisible root wrapping the whole chart — it has no ticker name, so skip it.
   if (!name || width < 30 || height < 30) return null
@@ -553,7 +557,7 @@ function TreemapTile(props: {
   const gap = 1.5
   const ix = x + gap, iy = y + gap, iw = width - gap * 2, ih = height - gap * 2
   const cx = ix + iw / 2
-  const color = perfColor(return_pct)
+  const color = perfColor(return_pct, no_data)
 
   const logoR      = Math.max(10, Math.min(18, iw * 0.22, ih * 0.24))
   const fs         = Math.min(13, Math.max(9, iw / 6))
@@ -585,6 +589,9 @@ function TreemapTile(props: {
     (showTicker ? fs + 2        : 0) +
     (showPct    ? pfs           : 0)
   let cy = iy + (ih - totalH) / 2
+
+  // Sign comes off the rounded figure, so -0.004% doesn't print as "−0.0%".
+  const rounded = Number(return_pct.toFixed(1))
 
   const blocks: React.ReactNode[] = []
 
@@ -621,9 +628,12 @@ function TreemapTile(props: {
   if (showPct) {
     blocks.push(
       <text key="pct" x={cx} y={cy + pfs} textAnchor="middle"
-        fill={return_pct >= 0 ? 'rgba(134,239,172,0.9)' : 'rgba(252,165,165,0.9)'}
+        fill={no_data ? 'rgba(148,163,184,0.7)'
+          : rounded > 0 ? 'rgba(134,239,172,0.9)'
+          : rounded < 0 ? 'rgba(252,165,165,0.9)'
+          : 'rgba(203,213,225,0.85)'}
         fontSize={pfs} fontWeight="500">
-        {return_pct >= 0 ? '+' : ''}{return_pct.toFixed(1)}%
+        {no_data ? '—' : `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded).toFixed(1)}%`}
       </text>
     )
   }
@@ -1734,6 +1744,10 @@ export default function Dashboard() {
             : allocRange === 'Pre/Post'
               ? (ext?.by_ticker?.[h.ticker]?.pct_aud ?? 0)
               : (perfByTicker.get(h.ticker)?.return_pct ?? h.holding_return_pct)
+        // Only Pre/Post can be genuinely unmeasured: the ASX has no extended session,
+        // so those holdings are absent from the feed rather than flat.
+        const tileNoData = (h: Holding) =>
+          allocRange === 'Pre/Post' && !ext?.by_ticker?.[h.ticker]
         const treemapData = portfolio
           ? portfolio
               .filter(h => h.units > 0 && h.value_aud > 0)
@@ -1741,6 +1755,7 @@ export default function Dashboard() {
                 name: h.ticker as string,
                 size: h.value_aud as number,
                 return_pct: tilePct(h),
+                no_data: tileNoData(h),
                 logo_url: h.logo_url as string,
               }))
           : []
