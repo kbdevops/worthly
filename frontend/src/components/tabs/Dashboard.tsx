@@ -706,7 +706,7 @@ export default function Dashboard() {
   const { data: perf } = usePerformance(perfRange, benchmark)
   const { data: ext } = useExtendedHours()
 
-  type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super' | 'Return'
+  type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super'
   // Portfolio + Cash + Super sum exactly to net worth, so those three render as a
   // stack. Net Worth is drawn from its own series rather than read off the top of
   // the stack, so hiding a band shrinks the fill without ever making the headline
@@ -722,31 +722,26 @@ export default function Dashboard() {
     { key: 'Super',     color: SERIES_COLORS['Super'] },
   ]
   const NW_BANDS: NWLine[] = ['Super', 'Cash', 'Portfolio']   // stack order, bottom up
-  const nwColor = (k: NWLine) => NW_LINES.find(l => l.key === k)!.color
-  const [activeLines, setActiveLines] = useLocalStorage<NWLine[]>('dash_nw_lines', ['Net Worth', 'Portfolio', 'Cash', 'Super'])
+  const nwColor = (k: NWLine) =>
+    NW_LINES.find(l => l.key === k)?.color ?? 'var(--text-muted)'
+  const [activeLinesRaw, setActiveLines] = useLocalStorage<NWLine[]>('dash_nw_lines', ['Net Worth', 'Portfolio', 'Cash', 'Super'])
   const COMPOSITION: NWLine[] = ['Net Worth', 'Portfolio', 'Cash', 'Super']
+  // Saved selections outlive the code that made them. Anything not currently a line is
+  // discarded, and an empty result falls back to the composition.
+  const activeLines = useMemo(() => {
+    const known = new Set(NW_LINES.map(l => l.key))
+    const kept = activeLinesRaw.filter(l => known.has(l))
+    return kept.length ? kept : COMPOSITION
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeLinesRaw])
 
   /**
-   * Return is an EXCLUSIVE mode, not an overlay.
-   *
-   * Overlaying it meant two different zeros on one plot: Return's zero landed at the
-   * same pixel height as $300k of net worth, so the moment the portfolio crossed from
-   * loss into profit appeared a third of the way up the net-worth scale, and a $210k
-   * return sat visually adjacent to $1.03m of net worth. Showing it alone keeps one
-   * axis with one zero and nothing to misread.
+   * Return used to be an EXCLUSIVE mode here, because a percentage and a dollar axis
+   * can't share a zero — its zero landed a third of the way up the net-worth scale.
+   * It now has its own widget, so this chart is four series on one axis and the
+   * special case is gone.
    */
   function toggleLine(k: NWLine) {
-    const inReturnMode = activeLines.includes('Return')
-    if (k === 'Return') {
-      // Toggling Return off restores the composition rather than leaving an empty chart.
-      setActiveLines(inReturnMode ? COMPOSITION : ['Return'])
-      return
-    }
-    if (inReturnMode) {
-      // Picking any balance series leaves Return mode.
-      setActiveLines([k])
-      return
-    }
     setActiveLines(activeLines.includes(k)
       ? activeLines.length > 1 ? activeLines.filter(l => l !== k) : activeLines
       : [...activeLines, k]
@@ -1438,7 +1433,7 @@ export default function Dashboard() {
                   cursor={{ stroke: axisColor, strokeDasharray: '3 3' }}
                   content={({ active, payload, label }) => {
                     if (!active || !payload?.length) return null
-                    const order = ['Net Worth', 'Portfolio', 'Cash', 'Super', 'Return']
+                    const order = ['Net Worth', 'Portfolio', 'Cash', 'Super']
                     const rows = [...payload].sort(
                       (a, b) => order.indexOf(String(a.name)) - order.indexOf(String(b.name)))
                     return (
@@ -1468,10 +1463,6 @@ export default function Dashboard() {
                     stroke="none" fill={nwColor(b)} fillOpacity={0.62} isAnimationActive={false} />
                 ))}
 
-                {activeLines.includes('Return') && (
-                  <Line type="monotone" dataKey="Return" stroke={nwColor('Return')}
-                    dot={false} strokeWidth={1.5} strokeDasharray="4 3" isAnimationActive={false} />
-                )}
                 {activeLines.includes('Net Worth') && (
                   <Line type="monotone" dataKey="Net Worth" stroke={nwColor('Net Worth')}
                     dot={false} strokeWidth={2.4} isAnimationActive={false}
