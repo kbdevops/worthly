@@ -248,7 +248,7 @@ const spanChoicesFor = (id: string) => SPAN_CHOICES.filter(c => c.span >= minSpa
 // Shared height for the three full-width widgets so they read as one rhythm down
 // the page. Sized to the tallest natural content (Portfolio Holdings' 11-row list)
 // so nothing has to scroll or be clipped — the charts simply get more room.
-const FULL_WIDGET_H = 560
+const FULL_WIDGET_H = 620
 
 // Fixed abbreviations rather than toLocaleDateString: en-AU renders "short" months
 // unevenly, spelling June and July in full beside Aug, which reads as broken on an axis.
@@ -1769,14 +1769,14 @@ export default function Dashboard() {
           : []
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
-            {/* Deliberately TWO fixed-height rows rather than one that wraps. A single
-                flex-wrap row put the dial on a second line for "After hours · AUD" and
-                kept it inline for "today's move", so the header height — and therefore
-                the plot area — changed with the range, and the treemap re-squarified
-                into a different arrangement. min-height didn't fix it: the row still
-                wrapped, it just couldn't get shorter. Two rows can't disagree. */}
-            <div className="mb-3">
-              <div className="flex items-baseline gap-2 min-w-0 h-5">
+            {/* ONE fixed-height row, and critically flex-nowrap: the reflow that made
+                the chart resize between ranges came from a wrapping header, so wrapping
+                is simply not available here. The subtitle truncates and the dial never
+                moves, which buys the treemap back a whole row of height.
+                The loss/gain swatches are gone — red and green need no key — and
+                "size = weight" rides on the subtitle, where it costs nothing. */}
+            <div className="flex items-center justify-between gap-3 mb-2 h-7 flex-nowrap">
+              <div className="flex items-baseline gap-2 min-w-0">
                 <p className="text-sm font-medium text-slate-300 shrink-0">Allocation</p>
                 <span className="text-[11px] text-slate-500 truncate">
                   {allocRange === 'Today' ? "today's move"
@@ -1784,17 +1784,11 @@ export default function Dashboard() {
                       ? `${ext?.label ?? 'Pre / after market'} · AUD`
                     : allocRange === 'Max' ? 'since purchase'
                     : `${allocRange} price move`}
+                  {!narrow && ' · size = weight'}
                 </span>
               </div>
-              <div className="flex items-center gap-3 mt-2 h-6 overflow-hidden">
+              <div className="shrink-0">
                 <RangeDial options={ALLOC_RANGES} value={allocRange} onChange={setAllocRange} narrow={narrow} />
-                {!narrow && (
-                  <div className="flex items-center gap-3 text-[10px] text-slate-500">
-                    <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#991b1b' }} />loss</span>
-                    <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm" style={{ background: '#15803d' }} />gain</span>
-                    <span className="text-slate-600">size = weight</span>
-                  </div>
-                )}
               </div>
             </div>
             {treemapData.length === 0 ? (
