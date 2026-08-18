@@ -1769,10 +1769,10 @@ export default function Dashboard() {
           : []
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
-            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-              <div className="flex items-baseline gap-2">
-                <p className="text-sm font-medium text-slate-300">Allocation</p>
-                <span className="text-[11px] text-slate-500">
+            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap min-h-[30px]">
+              <div className="flex items-baseline gap-2 min-w-0">
+                <p className="text-sm font-medium text-slate-300 shrink-0">Allocation</p>
+                <span className="text-[11px] text-slate-500 truncate">
                   {allocRange === 'Today' ? "today's move"
                     : allocRange === 'Pre/Post'
                       ? `${ext?.label ?? 'Pre / after market'} · AUD`
