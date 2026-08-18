@@ -247,19 +247,20 @@ export default function CompoundCalculator() {
       {/* Stacked bars, one per year: the floor is what you put in and everything above
           it is interest. A single balance line hides the crossover, which is the whole
           point of the exercise. */}
-      <div style={{ height: 300 }}>
+      <div style={{ height: 360 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 4 }}>
+          <BarChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 18 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
             <XAxis dataKey="year" tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
               tickLine={false} axisLine={false} minTickGap={16}
-              label={{ value: 'Years', position: 'insideBottom', offset: -2,
+              label={{ value: 'Years', position: 'insideBottom', offset: -14,
                        fill: 'var(--text-muted)', fontSize: 11 }} />
             <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
               tickLine={false} axisLine={false} width={54}
               tickFormatter={(v: number) => moneyCompact(v)} />
             <Tooltip cursor={{ fill: 'rgba(148,163,184,0.08)' }} content={<StrategyTooltip />} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Legend verticalAlign="top" align="right" height={22}
+              wrapperStyle={{ fontSize: 11, paddingBottom: 6 }} />
             <Bar dataKey="initial" name="Initial deposit" stackId="s" fill="#6366f1" isAnimationActive={false} />
             <Bar dataKey="regular" name="Regular deposits" stackId="s" fill="#818cf8" isAnimationActive={false} />
             <Bar dataKey="interest" name="Total interest" stackId="s" fill="#10b981" isAnimationActive={false} />
