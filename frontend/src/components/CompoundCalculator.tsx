@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from 'recharts'
 
 /** Periods per year. Deposit and compound frequency are chosen independently, the way
@@ -28,8 +28,10 @@ export interface CompoundInputs {
 export interface CompoundYear {
   year: number
   balance: number
-  deposits: number   // cumulative capital in, initial included
-  interest: number   // cumulative interest, i.e. balance - deposits
+  initial: number    // flat — the opening deposit, never changes
+  regular: number    // cumulative regular deposits, initial excluded
+  deposits: number   // initial + regular
+  interest: number   // balance - deposits
 }
 
 /** Nominal annual rate compounded n times a year is not the rate you actually earn.
@@ -61,7 +63,9 @@ export function projectCompound(input: CompoundInputs): CompoundYear[] {
   const periodRate = ratePct / 100 / cpy
   const depositsPerPeriod = dpy / cpy
 
-  const rows: CompoundYear[] = [{ year: 0, balance: initial, deposits: initial, interest: 0 }]
+  const rows: CompoundYear[] = [
+    { year: 0, balance: initial, initial, regular: 0, deposits: initial, interest: 0 },
+  ]
   let balance = initial
   let paidIn = initial
 
@@ -75,6 +79,8 @@ export function projectCompound(input: CompoundInputs): CompoundYear[] {
     rows.push({
       year: y,
       balance,
+      initial,
+      regular: paidIn - initial,
       deposits: paidIn,
       interest: balance - paidIn,
     })
@@ -89,6 +95,35 @@ const moneyCompact = (n: number) => {
   if (a >= 1_000_000) return `$${(n / 1_000_000).toFixed(a >= 10_000_000 ? 0 : 1)}m`
   if (a >= 1_000) return `$${Math.round(n / 1_000)}k`
   return `$${Math.round(n)}`
+}
+
+function StrategyTooltip({ active, payload, label }: {
+  active?: boolean
+  payload?: { payload: CompoundYear }[]
+  label?: number | string
+}) {
+  if (!active || !payload?.length) return null
+  const r = payload[0].payload
+  const Row = ({ k, v, bold }: { k: string; v: string; bold?: boolean }) => (
+    <div className={`flex justify-between gap-8 ${bold ? 'font-semibold pt-1.5 mt-1' : ''}`}
+      style={bold ? { borderTop: '1px solid var(--border)' } : undefined}>
+      <span style={{ color: bold ? 'var(--text-primary)' : 'var(--text-muted)' }}>{k}</span>
+      <span className="tabular-nums" style={{ color: 'var(--text-primary)' }}>{v}</span>
+    </div>
+  )
+  return (
+    <div className="rounded-lg px-3 py-2.5 text-xs"
+      style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
+      <div className="flex justify-between gap-8 mb-1.5">
+        <span style={{ color: 'var(--text-primary)' }}>After {label} years</span>
+        <span style={{ color: 'var(--text-muted)' }}>Your strategy</span>
+      </div>
+      <Row k="Initial deposit" v={money(r.initial)} />
+      <Row k="Regular deposits" v={money(r.regular)} />
+      <Row k="Total interest" v={money(r.interest)} />
+      <Row k="Total" v={money(r.balance)} bold />
+    </div>
+  )
 }
 
 function Field({ label, children, hint }: {
@@ -209,31 +244,26 @@ export default function CompoundCalculator() {
         </div>
       </div>
 
-      {/* Stacked so the split is readable directly: the lower band is money you put
-          in, everything above it is interest. A single balance line hides the point. */}
-      <div style={{ height: 280 }}>
+      {/* Stacked bars, one per year: the floor is what you put in and everything above
+          it is interest. A single balance line hides the crossover, which is the whole
+          point of the exercise. */}
+      <div style={{ height: 300 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 0 }}>
+          <BarChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 4 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
             <XAxis dataKey="year" tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-              tickLine={false} axisLine={false}
-              tickFormatter={(y: number) => `${y}y`} minTickGap={24} />
+              tickLine={false} axisLine={false} minTickGap={16}
+              label={{ value: 'Years', position: 'insideBottom', offset: -2,
+                       fill: 'var(--text-muted)', fontSize: 11 }} />
             <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
               tickLine={false} axisLine={false} width={54}
               tickFormatter={(v: number) => moneyCompact(v)} />
-            <Tooltip
-              contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-              labelFormatter={(y) => `Year ${y}`}
-              formatter={(v: unknown, n: unknown) =>
-                [money(v as number), n === 'deposits' ? 'Deposits' : 'Interest']}
-            />
-            <Legend wrapperStyle={{ fontSize: 11 }}
-              formatter={(v: string) => (v === 'deposits' ? 'Deposits' : 'Interest')} />
-            <Area type="monotone" dataKey="deposits" stackId="1" stroke="#818cf8"
-              fill="#818cf8" fillOpacity={0.35} isAnimationActive={false} />
-            <Area type="monotone" dataKey="interest" stackId="1" stroke="#10b981"
-              fill="#10b981" fillOpacity={0.35} isAnimationActive={false} />
-          </AreaChart>
+            <Tooltip cursor={{ fill: 'rgba(148,163,184,0.08)' }} content={<StrategyTooltip />} />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar dataKey="initial" name="Initial deposit" stackId="s" fill="#6366f1" isAnimationActive={false} />
+            <Bar dataKey="regular" name="Regular deposits" stackId="s" fill="#818cf8" isAnimationActive={false} />
+            <Bar dataKey="interest" name="Total interest" stackId="s" fill="#10b981" isAnimationActive={false} />
+          </BarChart>
         </ResponsiveContainer>
       </div>
     </div>

@@ -428,11 +428,6 @@ export default function Compounder() {
       {/* CAGR Calculator */}
       <CAGRCalculator monthly={monthly} fyRows={fy_rows} />
 
-      {/* Forward-looking projection. Sits below the CAGR calculator deliberately:
-          that one measures what actually happened, this one is a what-if, and the
-          historical figures should be read first. */}
-      <CompoundCalculator />
-
       {/* FY Annual Snapshot table */}
       <div className="rounded-xl overflow-hidden" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
         <div className="px-5 py-3 border-b flex items-center gap-2 flex-wrap" style={{ borderColor: 'var(--border)' }}>
@@ -540,6 +535,10 @@ export default function Compounder() {
           </table>
         </div>
       </div>
+
+      {/* Forward-looking projection, last on the page: everything above measures what
+          actually happened, this one is a what-if and shouldn't be read as history. */}
+      <CompoundCalculator />
     </div>
   )
 }
