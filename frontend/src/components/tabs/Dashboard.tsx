@@ -303,8 +303,10 @@ const DEFAULT_STATS: StatKey[] = ['cagr', 'return_pct', 'income_fy', 'cost_basis
  *  Dials stay INDEPENDENT rather than one shared control: Today only means anything
  *  on Allocation, and wanting Performance on Max while Allocation shows Today is the
  *  normal case, not the exception. */
-type Range = 'Today' | 'Pre/Post' | '1W' | '1M' | '3M' | '6M' | 'YTD' | 'FY' | '1Y' | 'Max'
-const RANGES_ALL: Range[] = ['Today', 'Pre/Post', '1W', '1M', '3M', '6M', 'YTD', 'FY', '1Y', 'Max']
+type Range = 'Pre/Post' | 'Today' | '1W' | '1M' | '3M' | '6M' | 'YTD' | 'FY' | '1Y' | 'Max'
+// Pre/Post leads, then Today, then the windows — newest information first, which is
+// the order you actually scan them in.
+const RANGES_ALL: Range[] = ['Pre/Post', 'Today', '1W', '1M', '3M', '6M', 'YTD', 'FY', '1Y', 'Max']
 // A single point is not a timeline, and an extended-hours tick even less so — both
 // are snapshots, which only the treemap can render.
 const RANGES_TIME: Range[] = RANGES_ALL.filter(r => r !== 'Today' && r !== 'Pre/Post')
