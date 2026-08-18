@@ -1769,8 +1769,14 @@ export default function Dashboard() {
           : []
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
-            <div className="flex items-center justify-between mb-3 gap-3 flex-wrap min-h-[30px]">
-              <div className="flex items-baseline gap-2 min-w-0">
+            {/* Deliberately TWO fixed-height rows rather than one that wraps. A single
+                flex-wrap row put the dial on a second line for "After hours · AUD" and
+                kept it inline for "today's move", so the header height — and therefore
+                the plot area — changed with the range, and the treemap re-squarified
+                into a different arrangement. min-height didn't fix it: the row still
+                wrapped, it just couldn't get shorter. Two rows can't disagree. */}
+            <div className="mb-3">
+              <div className="flex items-baseline gap-2 min-w-0 h-5">
                 <p className="text-sm font-medium text-slate-300 shrink-0">Allocation</p>
                 <span className="text-[11px] text-slate-500 truncate">
                   {allocRange === 'Today' ? "today's move"
@@ -1780,7 +1786,7 @@ export default function Dashboard() {
                     : `${allocRange} price move`}
                 </span>
               </div>
-              <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-3 mt-2 h-6 overflow-hidden">
                 <RangeDial options={ALLOC_RANGES} value={allocRange} onChange={setAllocRange} narrow={narrow} />
                 {!narrow && (
                   <div className="flex items-center gap-3 text-[10px] text-slate-500">
