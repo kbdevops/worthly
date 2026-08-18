@@ -181,10 +181,15 @@ export const useExtendedHours = () =>
   useQuery({
     queryKey: ['extended-hours'],
     queryFn: () => get<{
-      session: string; label: string; market_state: string
+      session: string; label: string; market_state: string; as_of?: string
       total_aud: number; pct: number; us_value_aud: number
       covered: number; total_holdings: number
-      movers: { ticker: string; delta_aud: number; pct: number; price: number }[]
+      movers: { ticker: string; delta_aud: number; pct: number; pct_aud: number; price: number }[]
+      /** Every quoted symbol, for the Allocation treemap. pct is the move in the
+       *  share's own currency; pct_aud also carries the exchange rate since the close. */
+      by_ticker?: Record<string, { pct: number; pct_aud: number; delta_aud: number }>
+      audusd_close?: number
+      audusd_live?: number
       note: string | null
     }>('/api/portfolio/extended-hours'),
     // Server caches for 60s; poll a little slower than that.

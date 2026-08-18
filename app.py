@@ -3017,6 +3017,16 @@ def extended_hours():
     fx_conn.close()
     audusd = float(fx_row[0]) if fx_row else 0.65
 
+    # Rate at the last regular close, so the AUD move can separate "the share moved"
+    # from "the dollar moved". Falls back to the stored close, which makes the currency
+    # leg exactly zero rather than guessed.
+    try:
+        _fxi = yf.Ticker("AUDUSD=X").info
+        audusd_live = float(_fxi.get("regularMarketPrice") or audusd)
+        audusd_close = float(_fxi.get("regularMarketPreviousClose") or audusd_live)
+    except Exception:
+        audusd_live = audusd_close = audusd
+
     def quote(h):
         try:
             info = yf.Ticker(h["symbol"]).info
@@ -3081,10 +3091,15 @@ def extended_hours():
         delta_aud = delta_native * q["units"] / audusd
         total_aud += delta_aud
         base_aud += q["reg"] * q["units"] / audusd
+        # pct is the move in its own currency; pct_aud additionally carries whatever the
+        # exchange rate did since the close, which is what an AUD holder actually feels.
+        aud_now = q["ext"] / audusd_live
+        aud_close = q["reg"] / audusd_close
         movers.append({
             "ticker": q["ticker"],
             "delta_aud": round(delta_aud, 2),
             "pct": round((delta_native / q["reg"] * 100) if q["reg"] else 0.0, 2),
+            "pct_aud": round(((aud_now / aud_close - 1) * 100) if aud_close else 0.0, 2),
             "price": round(q["ext"], 2),
         })
     movers.sort(key=lambda m: -abs(m["delta_aud"]))
@@ -3109,6 +3124,11 @@ def extended_hours():
         "covered": len(quotes),
         "total_holdings": len(holdings),
         "movers": movers[:5],
+        # Every symbol, keyed for lookup — the treemap colours all tiles, not a top five.
+        "by_ticker": {m["ticker"]: {"pct": m["pct"], "pct_aud": m["pct_aud"],
+                                    "delta_aud": m["delta_aud"]} for m in movers},
+        "audusd_close": round(audusd_close, 4),
+        "audusd_live": round(audusd_live, 4),
         "note": None,
     }
     _EXT_HOURS_CACHE.update(at=now, data=out)

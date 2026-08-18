@@ -303,10 +303,11 @@ const DEFAULT_STATS: StatKey[] = ['cagr', 'return_pct', 'income_fy', 'cost_basis
  *  Dials stay INDEPENDENT rather than one shared control: Today only means anything
  *  on Allocation, and wanting Performance on Max while Allocation shows Today is the
  *  normal case, not the exception. */
-type Range = 'Today' | '1W' | '1M' | '3M' | '6M' | 'YTD' | 'FY' | '1Y' | 'Max'
-const RANGES_ALL: Range[] = ['Today', '1W', '1M', '3M', '6M', 'YTD', 'FY', '1Y', 'Max']
-// A single point is not a timeline, so the net worth chart has no Today.
-const RANGES_TIME: Range[] = RANGES_ALL.filter(r => r !== 'Today')
+type Range = 'Today' | 'Pre/Post' | '1W' | '1M' | '3M' | '6M' | 'YTD' | 'FY' | '1Y' | 'Max'
+const RANGES_ALL: Range[] = ['Today', 'Pre/Post', '1W', '1M', '3M', '6M', 'YTD', 'FY', '1Y', 'Max']
+// A single point is not a timeline, and an extended-hours tick even less so — both
+// are snapshots, which only the treemap can render.
+const RANGES_TIME: Range[] = RANGES_ALL.filter(r => r !== 'Today' && r !== 'Pre/Post')
 const ALLOC_RANGES: Range[] = RANGES_ALL
 const PERF_RANGES: Range[] = RANGES_TIME
 type AllocRange = Range
@@ -696,7 +697,8 @@ export default function Dashboard() {
   const allocRange = migrateRange(allocRangeRaw)
   // Today reads daily_change_pct straight off the holding, so the query is only for
   // the bounded windows; anything else asks the endpoint for its lifetime figure.
-  const { data: rangePerf } = useRangePerformance(allocRange === 'Today' ? 'Max' : allocRange)
+  const { data: rangePerf } = useRangePerformance(
+    allocRange === 'Today' || allocRange === 'Pre/Post' ? 'Max' : allocRange)
   const [perfRangeRaw, setPerfRange] = useLocalStorage<PerfRange>('dash_perf_range', 'Max')
   const perfRange = migrateRange(perfRangeRaw)
   const [benchmark, setBenchmark] = useLocalStorage<string>('dash_benchmark', 'IVV.AX')
@@ -1730,10 +1732,15 @@ export default function Dashboard() {
         // which counts sold parcels, is the dashboard headline.
         // 'Today' needs no request at all: daily_change_pct is already on the holding.
         const perfByTicker = new Map((rangePerf ?? []).map(r => [r.ticker, r]))
+        // Pre/Post reads the extended-hours feed, in AUD so the currency leg is in it.
+        // ASX names have no extended session and simply aren't in the map — they land
+        // on 0, which is the truth rather than a gap.
         const tilePct = (h: Holding) =>
           allocRange === 'Today'
             ? h.daily_change_pct
-            : (perfByTicker.get(h.ticker)?.return_pct ?? h.holding_return_pct)
+            : allocRange === 'Pre/Post'
+              ? (ext?.by_ticker?.[h.ticker]?.pct_aud ?? 0)
+              : (perfByTicker.get(h.ticker)?.return_pct ?? h.holding_return_pct)
         const treemapData = portfolio
           ? portfolio
               .filter(h => h.units > 0 && h.value_aud > 0)
@@ -1751,6 +1758,8 @@ export default function Dashboard() {
                 <p className="text-sm font-medium text-slate-300">Allocation</p>
                 <span className="text-[11px] text-slate-500">
                   {allocRange === 'Today' ? "today's move"
+                    : allocRange === 'Pre/Post'
+                      ? `${ext?.label ?? 'Pre / after market'} · AUD`
                     : allocRange === 'Max' ? 'since purchase'
                     : `${allocRange} price move`}
                 </span>
