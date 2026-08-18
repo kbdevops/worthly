@@ -1748,9 +1748,17 @@ export default function Dashboard() {
         // so those holdings are absent from the feed rather than flat.
         const tileNoData = (h: Holding) =>
           allocRange === 'Pre/Post' && !ext?.by_ticker?.[h.ticker]
+        // Ordered by COST, not live value. A squarified treemap lays tiles out in array
+        // order, and ordering by value means every price tick that swaps two holdings'
+        // rank reshuffles the whole board — NVDA, VAS and RDDT sit within 5% of each
+        // other, so that was happening on a 60s poll. Cost only moves when you trade,
+        // so the arrangement holds still while the tiles keep resizing and recolouring
+        // from live data.
         const treemapData = portfolio
           ? portfolio
               .filter(h => h.units > 0 && h.value_aud > 0)
+              .slice()
+              .sort((a, b) => b.cost_aud - a.cost_aud)
               .map(h => ({
                 name: h.ticker as string,
                 size: h.value_aud as number,
