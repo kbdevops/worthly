@@ -2489,6 +2489,13 @@ def _compute_active_holdings(user_id):
     conn.close()
 
     audusd = latest_prices.get("AUDUSD=X", 0.65)
+    # Rate at the PREVIOUS close, so a USD holding's daily change carries the currency
+    # move as well as the price move. Converting both legs at today's rate (which is
+    # what this did) cancels FX out entirely and reports only half the day on a day the
+    # dollar moves — on 2026-08-24 the currency leg was $1,406 of a $3,065 gain, and it
+    # appeared nowhere. Falls back to today's rate when there is no prior FX row, which
+    # makes the currency leg exactly zero rather than guessed.
+    audusd_prev = prev_prices.get("AUDUSD=X", audusd)
 
     # Sort chronologically to compute cost bases properly
     txns_sorted = sorted(txns, key=lambda x: x["date"])
@@ -2608,7 +2615,7 @@ def _compute_active_holdings(user_id):
         prev_price = prev_prices.get(sym, current_price)  # fallback to current if no prev
         if h["currency"] == "USD":
             current_price_aud = current_price / audusd
-            prev_price_aud = prev_price / audusd
+            prev_price_aud = prev_price / audusd_prev
         else:
             current_price_aud = current_price
             prev_price_aud = prev_price
@@ -2616,9 +2623,14 @@ def _compute_active_holdings(user_id):
         value_aud = h["units"] * current_price_aud
         total_portfolio_value += value_aud
 
-        # Daily change
+        # Daily change in AUD, and therefore inclusive of the currency move: each leg is
+        # converted at its own day's rate. Split into the two causes because they are
+        # different things to an AUD holder — the share moved, or the dollar did — and
+        # because the price leg on its own is what the extended-hours card reports.
         daily_change = (current_price_aud - prev_price_aud) * h["units"]
         daily_change_pct = ((current_price_aud - prev_price_aud) / prev_price_aud * 100) if prev_price_aud > 0 else 0.0
+        daily_change_price = (current_price - prev_price) * h["units"] / (audusd if h["currency"] == "USD" else 1.0)
+        daily_change_fx = daily_change - daily_change_price
 
         avg_price_aud = h["cost_aud"] / h["units"] if h["units"] > 0 else 0.0
         avg_price_local = h["cost_local"] / h["units"] if h["units"] > 0 else 0.0
@@ -2735,6 +2747,9 @@ def _compute_active_holdings(user_id):
             "franking_pct_of_cost": round(pct_of_gross(franking_aud), 2),
             "daily_change": round(daily_change, 2),
             "daily_change_pct": round(daily_change_pct, 2),
+            # The two legs of daily_change. They sum to it exactly; fx is 0 on AUD lines.
+            "daily_change_price": round(daily_change_price, 2),
+            "daily_change_fx": round(daily_change_fx, 2),
             "buys_count": h["buys_count"],
             "sells_count": h["sells_count"],
             "last_synced": last_synced_map.get(sym),
@@ -3088,9 +3103,13 @@ def extended_hours():
     movers = []
     for q in quotes:
         delta_native = q["ext"] - q["reg"]
-        delta_aud = delta_native * q["units"] / audusd
+        # AUD move, not just the price move — each leg at its own rate, matching
+        # daily_change in _compute_active_holdings and this card's own pct_aud below.
+        # These collapse to the price-only figure when the live FX lookup failed, since
+        # audusd_live and audusd_close are both the stored rate in that case.
+        delta_aud = (q["ext"] / audusd_live - q["reg"] / audusd_close) * q["units"]
         total_aud += delta_aud
-        base_aud += q["reg"] * q["units"] / audusd
+        base_aud += q["reg"] * q["units"] / audusd_close
         # pct is the move in its own currency; pct_aud additionally carries whatever the
         # exchange rate did since the close, which is what an AUD holder actually feels.
         aud_now = q["ext"] / audusd_live
@@ -3844,6 +3863,8 @@ def get_stats():
             "daily_ath_date": None,
             "day_pl": 0.0,
             "day_pl_pct": 0.0,
+            "day_pl_price": 0.0,
+            "day_pl_fx": 0.0,
         })
 
     # Fetch latest exchange rate and holdings
@@ -3875,6 +3896,8 @@ def get_stats():
             "daily_ath_date": None,
             "day_pl": 0.0,
             "day_pl_pct": 0.0,
+            "day_pl_price": 0.0,
+            "day_pl_fx": 0.0,
         })
 
     total_value = sum(h["value_aud"] for h in holdings)
@@ -3890,9 +3913,14 @@ def get_stats():
     holding_return = sum(h["holding_return_aud"] for h in holdings)
     holding_return_pct = (holding_return / total_cost * 100) if total_cost > 0 else 0.0
 
-    # Today's P&L — sum of each holding's own daily_change (already price-only, not
-    # affected by units bought/sold today, same fix as Daily ATH needed)
+    # Today's P&L — sum of each holding's own daily_change, which is a true AUD move
+    # (price + currency, each leg at its own day's rate) and is unaffected by units
+    # bought or sold today, the same fix Daily ATH needed. The legs are reported
+    # separately so the card can say which of the two actually moved the number;
+    # they sum back to day_pl exactly.
     day_pl = sum(h["daily_change"] for h in holdings)
+    day_pl_price = sum(h["daily_change_price"] for h in holdings)
+    day_pl_fx = sum(h["daily_change_fx"] for h in holdings)
     prev_total_value = total_value - day_pl
     day_pl_pct = (day_pl / prev_total_value * 100) if prev_total_value > 0 else 0.0
     
@@ -3992,6 +4020,8 @@ def get_stats():
         "daily_ath_date": daily_ath_date,
         "day_pl": round(day_pl, 2),
         "day_pl_pct": round(day_pl_pct, 2),
+        "day_pl_price": round(day_pl_price, 2),
+        "day_pl_fx": round(day_pl_fx, 2),
         "cost_basis": round(total_cost, 2),
         "cagr": cagr_pct,
         "cagr_years": cagr_years,

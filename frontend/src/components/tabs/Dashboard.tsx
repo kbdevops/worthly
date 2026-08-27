@@ -17,7 +17,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical, Settings, X, Eye, EyeOff, Pencil, Plus, Trash2, Check } from 'lucide-react'
 import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance, useExtendedHours, usePerformance } from '../../hooks/useApi'
-import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
+import { fmtCurrency, fmtCurrencySigned, fmtCurrencyCompact, fmtPct, fmtDate } from '../../lib/utils'
 import { SERIES_COLORS } from '../../lib/chartColors'
 import { DonutBreakdown } from '../ui/DonutBreakdown'
 import { LogoBadge } from '../ui/LogoBadge'
@@ -389,6 +389,10 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
  *
  * The delta is rebased to net worth: stats.day_pl_pct divides by the previous
  * PORTFOLIO value, which printed +1.63% beside a $1m headline that had moved +1.16%.
+ * So this badge reads lower than the Today's P&L card on the same screen, and both are
+ * right — the card is portfolio-basis and says so. Cash is genuinely flat intraday;
+ * super is not, it just isn't marked to market between snapshots, so a day's move is
+ * understated by whatever the super balance did.
  */
 function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
   netWorth: number; portfolio: number; superAnn: number; cash: number; dayPl: number
@@ -1154,7 +1158,23 @@ export default function Dashboard() {
       case 'day_pl': {
         const pl = stats?.day_pl ?? 0
         const plPct = stats?.day_pl_pct ?? 0
-        return { label: "Today's P&L", value: fmtCurrencySigned(pl), sub: `${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}%`, color: pl >= 0 ? '#10b981' : '#ef4444' }
+        // Split shown because the two legs answer different questions, and on a day the
+        // dollar moves hard the currency leg can be most of the number — it was 42% of
+        // it on 2026-08-24, back when it was excluded from this figure altogether.
+        // Compact form and only when there IS an FX leg, since the sub line wraps rather
+        // than truncating and an all-AUD portfolio has nothing to split.
+        const fx = stats?.day_pl_fx ?? 0
+        const price = stats?.day_pl_price ?? 0
+        const sgn = (v: number) => (v >= 0 ? '+' : '') + fmtCurrencyCompact(v)
+        const legs = Math.abs(fx) >= 1 ? ` · ${sgn(price)} price, ${sgn(fx)} FX` : ''
+        return {
+          label: "Today's P&L",
+          // Percent is over the portfolio, not net worth — said out loud because the
+          // hero badge above divides the same dollars by net worth and reads lower.
+          sub: `${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}% of portfolio${legs}`,
+          value: fmtCurrencySigned(pl),
+          color: pl >= 0 ? '#10b981' : '#ef4444',
+        }
       }
     }
   }

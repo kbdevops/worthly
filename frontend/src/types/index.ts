@@ -25,8 +25,14 @@ export interface Stats {
   all_time_high_date: string | null
   daily_ath: number
   daily_ath_date: string | null
+  /** True AUD day move — price and currency, each leg at its own day's rate. */
   day_pl: number
+  /** Over the PORTFOLIO's previous value. The net worth hero rebases this over net
+   *  worth instead, so the two legitimately differ; cash and super cannot move. */
   day_pl_pct: number
+  /** The two legs of day_pl. Sum to it exactly; fx is 0 with no USD holdings. */
+  day_pl_price: number
+  day_pl_fx: number
   cost_basis: number
   /** Legacy cost-basis CAGR. Understates badly — ignores sales and dividends and
    *  stretches all capital back to the first buy. No card reads it; use mwr_pct. */
@@ -137,8 +143,12 @@ export interface Holding {
   held_franking_pct: number
   holding_return_aud: number
   holding_return_pct: number
+  /** True AUD day move for this holding — price and currency legs combined. */
   daily_change: number
   daily_change_pct: number
+  /** The legs of daily_change. Sum to it exactly; fx is 0 on AUD-denominated lines. */
+  daily_change_price: number
+  daily_change_fx: number
   weight: number
   sector: string
   industry: string
