@@ -11,7 +11,7 @@
 ![React](https://img.shields.io/badge/react-19-61dafb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-<!-- TODO: hero screenshot/GIF of the Dashboard tab goes here once available -->
+![Worthly dashboard](docs/media/dashboard.gif)
 
 ## Contents
 
@@ -28,32 +28,38 @@
 ### Dashboard
 Customisable, drag-to-reorder widgets - net worth timeline, allocation breakdown, holding performance, monthly change - with 5 color themes and configurable stat cards.
 
+Today's change is a **true AUD move**: for a USD holding, price and exchange rate are each converted at their own day's rate, and the two legs are reported separately. Converting both at today's rate cancels the currency move out entirely, which on a day the dollar moves reports roughly half the real figure - so the card tells you whether the share moved or the dollar did.
 
-https://github.com/user-attachments/assets/20a55c36-7ff1-4dfc-9372-7152c5b91541
 
+#### Customise
+Top-left **Customise** opens the layout editor: pick which stat cards show, toggle or reorder widgets, and switch between five themes or dial in a custom accent hue - the whole page recolours live.
+
+![Customise](docs/media/customise.gif)
 
 ### Holdings
 Every position with full transaction history. Click into any holding for per-lot gain/loss, add or delete trades, sector/industry metadata pulled automatically.
 
 
-https://github.com/user-attachments/assets/4f616609-4616-4ae5-aed5-ec00434e08ca
+![Holdings](docs/media/holdings.gif)
 
 
 ### Tax (Australian CGT)
 CGT calculations with the 50% long-term discount applied automatically, per-parcel breakdown, optimal sell-date suggestions.
 
 
-https://github.com/user-attachments/assets/853394db-8440-473b-99b4-e870e13940a2
+![Tax](docs/media/tax-cgt.gif)
 
 
 ### Dividends
 Full dividend history auto-fetched from Yahoo Finance, sized by the units you actually held on each ex-dividend date. Tracks Australian franking credits (manually entered - no feed publishes these) and US treaty withholding tax automatically, with net and grossed-up totals.
 
+![Dividends](docs/media/dividends.gif)
+
 ### Milestones
 Goals that track live app data - pick one metric or combine several (e.g. Cash + Portfolio), set a target in AUD or USD (USD targets convert to their live AUD equivalent every time you open the app, so progress moves with the exchange rate). Plus an achievements log for past milestones.
 
 
-https://github.com/user-attachments/assets/60ecbf40-c88f-4a89-9565-d526a927afcb
+![Milestones](docs/media/milestones.gif)
 
 
 
@@ -62,8 +68,12 @@ Long-run growth view: monthly net worth history, Australian FY annual snapshots 
 
 Returns under a year are reported as plain cumulative growth rather than annualised - annualising a short period produces numbers that are arithmetically true and completely meaningless (a 3% move over two days annualises to roughly 25,000%).
 
+![Compounder](docs/media/compounder.gif)
+
 ### Data Sync
 Background sync runs automatically twice a day (after ASX and NYSE/NASDAQ close). The Sync tab surfaces real health - per-symbol errors, staleness warnings, last-run results - instead of a black box.
+
+![Data Sync](docs/media/data-sync.gif)
 
 #### How prices stay current
 
@@ -104,12 +114,33 @@ single-worker Flask app (persistent connections, reconnect handling). Polling ge
 "a few seconds stale when you look at it", which is the right trade for a portfolio tracker.
 
 ### Brokerage import (Interactive Brokers)
-Connect an IBKR **Flex Web Service** token and query ID once, then pull trade executions straight in. Partial fills within the same minute are merged into a single trade, AUD conversion uses IBKR's own reported FX rate, and newly-imported tickers trigger a price sync automatically.
+Connect an IBKR **Flex Web Service** token and query ID once, then fetch your trade executions and **choose which to import**. Nothing is written to your ledger until you pick.
 
-Imports are idempotent - each trade carries a deterministic external id, so re-syncing updates in place instead of duplicating. Trades that look like ones you'd already entered by hand are flagged as **duplicate warnings** for you to review; nothing is ever auto-deleted. The Flex token is write-only: no API route ever returns it.
+Every candidate is classified against what you already have:
 
+| Badge | Meaning | Ticked by default |
+|---|---|---|
+| **New** | Nothing in your ledger resembles it | yes |
+| **Replaces manual** | Same date, size and price as a hand-entered row | no |
+| **Same trade, different date** | Matches on size and price, within 5 days | no |
+| **Already imported** | A previous sync already has this exact fill | no |
 
-https://github.com/user-attachments/assets/13b2fe3e-f030-4dd5-9aa8-e191eaeb1847
+The third case is the one that matters. IBKR reports the **US execution date**, while a hand-typed entry often carries the **Australian** one - a fill on Friday afternoon in New York is already Saturday in Sydney. Matching on date equality alone labels those as new, and importing them double-counts the position. Each flagged row shows your existing entry beside IBKR's, both dates visible, so you can see the offset instead of guessing.
+
+Ticking a flagged row imports IBKR's version and deletes the manual row it supersedes - the broker's figures are the authoritative ones, and keeping both would double-count. You're shown exactly which rows will be deleted before it happens, and which were afterwards.
+
+Partial fills within the same minute merge into one trade, AUD conversion uses IBKR's own reported FX rate, and newly-imported tickers trigger a price sync automatically. Imports are idempotent - each trade carries a deterministic external id, so re-running is always safe. The Flex token is write-only: no API route ever returns it.
+
+> **Note on history:** the Flex Web Service serves a maximum of 365 days per request, and the date range lives in the saved query rather than the request. To reach further back, create one query per year and run them in turn - imports are idempotent, so overlap is harmless.
+
+### Trade export (CSV)
+One click in Holdings exports every trade - including positions you've since closed - in Sharesight's trade-import column order, extended with the fields worthly stores that their template has no slot for: trade currency, instrument name, and the AUD consideration.
+
+Deliberately a **trade ledger, not a positions report**: no market value, no gain/loss, no return percentages. Those are all derived from today's prices and the cost-basis method, so exporting them would bake this app's accounting choices into a file whose whole purpose is to be read somewhere else. Raw trades reconstruct any of it; the reverse isn't true. It also means the export is stable - re-running tomorrow gives byte-identical output unless the trades themselves changed.
+
+Dates go out as DD/MM/YYYY so Excel in an en-AU locale parses them as dates rather than text, numbers carry no thousands separators or currency symbols (which turn a numeric column into text on import), and the file leads with a UTF-8 BOM so Excel doesn't guess the local codepage on instrument names.
+
+![Trade export](docs/media/export-csv.gif)
 
 
 ---
@@ -231,3 +262,9 @@ See [CLAUDE.md](CLAUDE.md) for the complete API reference, database schema, and 
 ## Contributing
 
 Issues and PRs welcome. This started as a personal project, so some assumptions (single user, AUD base currency, Australian tax rules) are baked in fairly deep - if you want to use it differently, open an issue to discuss before a large PR.
+
+---
+
+<sub>Every GIF above is recorded against `demo/seed_demo_data.py` — fabricated dollar
+figures against real tickers and real live prices. No actual portfolio data appears
+anywhere in this repository.</sub>
