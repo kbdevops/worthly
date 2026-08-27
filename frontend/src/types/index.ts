@@ -344,28 +344,72 @@ export interface IbkrCredentialsStatus {
   last_synced: string | null
 }
 
-export interface IbkrDuplicateWarning {
-  ibkr_txn_id: number
-  manual_txn_id: number
-  ticker: string
-  date: string
-  units: number
-  price: number
+/** One trade from the last preview, with what it collides with in your ledger. */
+export interface IbkrStagedCandidate {
+  external_id: string
+  /** new = not in worthly · already_imported = a prior IBKR sync has it ·
+   *  manual_duplicate = matches a hand-entered row, which importing will replace. */
+  status: 'new' | 'already_imported' | 'manual_duplicate' | 'near_duplicate'
+  trade: {
+    date: string
+    ticker: string
+    name: string
+    exchange: string
+    action: string
+    units: number
+    price: number
+    currency: string
+    brokerage: number
+    exch_rate: number
+    value: number
+    external_id: string
+  }
+  /** The existing row this candidate collides with — its own figures, so the UI can
+   *  show IBKR's version beside yours rather than just asserting they differ. */
+  match: {
+    id: number
+    date: string
+    ticker: string
+    action: string
+    units: number
+    price: number
+    exch_rate: number
+    brokerage: number
+    value: number
+    source: string
+  } | null
 }
 
-export interface IbkrSyncJob {
+export interface IbkrStaged {
+  fetched_at: string | null
+  candidates: IbkrStagedCandidate[]
+  counts: { new: number; already_imported: number; manual_duplicate: number; near_duplicate: number }
+}
+
+export interface IbkrPreviewJob {
   job_id?: string
   status: 'running' | 'done' | 'error' | 'not_found'
-  results?: {
-    trades_processed: number
+  summary?: {
+    candidates: number
+    new: number
+    already_imported: number
+    manual_duplicate: number
+    near_duplicate: number
     skipped_options: number
     skipped_currency: Record<string, number>
-  }
-  duplicate_warnings?: IbkrDuplicateWarning[]
-  price_sync_results?: SyncResult[]
+  } | null
   started_at?: string
   finished_at?: string
-  error?: string
+  error?: string | null
+}
+
+export interface IbkrImportResult {
+  ok: boolean
+  imported: number
+  imported_ids: string[]
+  /** Manual rows deleted because an imported IBKR trade superseded them. */
+  replaced_manual: { external_id: string; deleted_txn_id: number; ticker: string; date: string }[]
+  price_sync_results?: SyncResult[]
 }
 
 export interface HoldingGroup {

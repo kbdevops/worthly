@@ -1,24 +1,41 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { RefreshCw, CheckCircle, XCircle, AlertTriangle, Unlink } from 'lucide-react'
 import {
   useSyncStatus, useSync,
-  useIbkrCredentials, useSaveIbkrCredentials, useDeleteIbkrCredentials, useIbkrSync,
+  useIbkrCredentials, useSaveIbkrCredentials, useDeleteIbkrCredentials,
+  useIbkrPreview, useIbkrStaged, useIbkrImport, useIbkrClearStaged,
 } from '../../hooks/useApi'
 import { fmtDate, fmtCurrency } from '../../lib/utils'
-import type { SyncResult, IbkrSyncJob } from '../../types'
+import type { SyncResult, IbkrPreviewJob, IbkrImportResult } from '../../types'
 
 function IbkrSyncCard() {
   const { data: creds } = useIbkrCredentials()
   const saveCreds = useSaveIbkrCredentials()
   const deleteCreds = useDeleteIbkrCredentials()
-  const ibkrSync = useIbkrSync()
+  const configured = creds?.configured ?? false
+
+  const preview = useIbkrPreview()
+  const doImport = useIbkrImport()
+  const clearStaged = useIbkrClearStaged()
+  const { data: staged } = useIbkrStaged(configured)
 
   const [editing, setEditing] = useState(false)
   const [token, setToken] = useState('')
   const [queryId, setQueryId] = useState('')
-  const [lastJob, setLastJob] = useState<IbkrSyncJob | null>(null)
+  const [previewJob, setPreviewJob] = useState<IbkrPreviewJob | null>(null)
+  const [result, setResult] = useState<IbkrImportResult | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
 
-  const configured = creds?.configured ?? false
+  const candidates = staged?.candidates ?? []
+
+  // Default the ticks to the genuinely new trades only. Anything already imported, or
+  // that collides with a hand-entered row, starts unticked — those are the two cases
+  // where importing has a consequence beyond adding a row, so they should be a
+  // deliberate choice rather than the default. Keyed on fetched_at so a fresh preview
+  // resets the selection but re-renders in between don't stomp on the user's ticks.
+  useEffect(() => {
+    setSelected(new Set(candidates.filter(c => c.status === 'new').map(c => c.external_id)))
+  }, [staged?.fetched_at])                                          // eslint-disable-line react-hooks/exhaustive-deps
 
   function startEdit() {
     setToken('')
@@ -38,10 +55,40 @@ function IbkrSyncCard() {
     deleteCreds.mutate()
   }
 
-  async function handleSync() {
-    setLastJob(null)
-    const res = await ibkrSync.mutateAsync()
-    setLastJob(res)
+  async function handleFetch() {
+    setResult(null)
+    setPreviewJob(null)
+    setPreviewJob(await preview.mutateAsync())
+  }
+
+  async function handleImport() {
+    const ids = [...selected]
+    if (!ids.length) return
+    // Named explicitly because it deletes rows. The count comes from the candidates
+    // actually ticked, not from the whole flagged set.
+    const replacing = candidates.filter(c => selected.has(c.external_id) && (c.status === 'manual_duplicate' || c.status === 'near_duplicate'))
+    if (replacing.length && !confirm(
+      `Import ${ids.length} trade(s)?\n\n${replacing.length} of them will REPLACE a manual entry, ` +
+      `deleting your hand-typed row:\n` +
+      replacing.map(c => `  • ${c.trade.ticker} ${c.trade.date} — ${c.trade.units} @ ${c.trade.price}`).join('\n')
+    )) return
+    setResult(await doImport.mutateAsync(ids))
+    setPreviewJob(null)
+  }
+
+  const toggle = (id: string) => setSelected(s => {
+    const next = new Set(s)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
+  const STATUS: Record<string, { label: string; fg: string; bg: string }> = {
+    new:               { label: 'New',              fg: '#10b981', bg: 'rgba(16,185,129,0.12)' },
+    already_imported:  { label: 'Already imported', fg: '#94a3b8', bg: 'rgba(148,163,184,0.12)' },
+    manual_duplicate:  { label: 'Replaces manual',  fg: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    // Red, not amber: this is the case that silently double-counts if waved through,
+    // and it reads as 'new' to the eye because the dates differ.
+    near_duplicate:    { label: 'Same trade, different date', fg: '#f87171', bg: 'rgba(248,113,113,0.14)' },
   }
 
   return (
@@ -55,7 +102,8 @@ function IbkrSyncCard() {
         )}
       </div>
       <p className="text-xs text-slate-500 mb-4">
-        Pull trade executions from your IBKR Flex Web Service query and import them as transactions.
+        Fetch trade executions from your IBKR Flex query, then choose which to import. Nothing
+        is written until you pick.
       </p>
 
       {!configured || editing ? (
@@ -98,58 +146,154 @@ function IbkrSyncCard() {
       ) : (
         <div className="flex items-center gap-3 flex-wrap">
           <button
-            onClick={handleSync}
-            disabled={ibkrSync.isPending}
+            onClick={handleFetch}
+            disabled={preview.isPending}
             className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-60"
             style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
           >
-            <RefreshCw size={14} className={ibkrSync.isPending ? 'spin' : ''} />
-            {ibkrSync.isPending ? 'Syncing…' : 'Sync Trades'}
+            <RefreshCw size={14} className={preview.isPending ? 'spin' : ''} />
+            {preview.isPending ? 'Fetching…' : candidates.length ? 'Re-fetch from IBKR' : 'Fetch Trades'}
           </button>
           <button onClick={startEdit} className="text-xs text-slate-500 hover:text-slate-300">
             Update credentials
           </button>
           <span className="text-xs text-slate-500">
-            {creds?.last_synced ? `Last synced ${new Date(creds.last_synced).toLocaleString('en-AU')}` : 'Never synced'}
+            {creds?.last_synced ? `Last imported ${new Date(creds.last_synced).toLocaleString('en-AU')}` : 'Nothing imported yet'}
           </span>
         </div>
       )}
 
-      {lastJob?.status === 'error' && (
+      {previewJob?.status === 'error' && (
         <div className="mt-4 rounded-lg p-3 text-sm text-red-300" style={{ background: 'rgba(239,68,68,0.1)' }}>
-          {lastJob.error}
+          {previewJob.error}
         </div>
       )}
 
-      {lastJob?.status === 'done' && lastJob.results && (
-        <div className="mt-4 space-y-3">
-          <div className="rounded-lg p-3 text-sm text-emerald-300" style={{ background: 'rgba(16,185,129,0.1)' }}>
-            {lastJob.results.trades_processed} trade{lastJob.results.trades_processed === 1 ? '' : 's'} imported/updated.
-            {lastJob.results.skipped_options > 0 && <> {lastJob.results.skipped_options} options trade(s) skipped (not supported).</>}
-            {Object.entries(lastJob.results.skipped_currency).map(([cur, n]) => (
-              <span key={cur}> {n} trade(s) in {cur} skipped (unsupported currency).</span>
-            ))}
-            {lastJob.price_sync_results && lastJob.price_sync_results.length > 0 && (
-              <> Also synced prices for {lastJob.price_sync_results.filter(r => r.ok).map(r => r.symbol).join(', ')}
-              {lastJob.price_sync_results.some(r => !r.ok) && <>
-                {' '}(failed: {lastJob.price_sync_results.filter(r => !r.ok).map(r => r.symbol).join(', ')})
-              </>}.</>
-            )}
+      {previewJob?.status === 'done' && previewJob.summary && candidates.length === 0 && (
+        <div className="mt-4 rounded-lg p-3 text-sm text-slate-300" style={{ background: 'rgba(148,163,184,0.1)' }}>
+          The query returned no trades to review.
+          {previewJob.summary.skipped_options > 0 && <> {previewJob.summary.skipped_options} options trade(s) skipped (not supported).</>}
+          {Object.entries(previewJob.summary.skipped_currency).map(([cur, n]) => (
+            <span key={cur}> {n} trade(s) in {cur} skipped (unsupported currency).</span>
+          ))}
+        </div>
+      )}
+
+      {/* ── Review list ─────────────────────────────────────────────────────── */}
+      {candidates.length > 0 && (
+        <div className="mt-4 rounded-lg border border-[var(--border)] overflow-hidden">
+          <div className="flex items-center justify-between gap-3 px-4 py-2.5 flex-wrap"
+               style={{ background: 'var(--bg-elevated)' }}>
+            <div className="flex items-center gap-3 flex-wrap">
+              <p className="text-xs font-semibold text-slate-300">
+                {candidates.length} trade{candidates.length === 1 ? '' : 's'} from IBKR
+              </p>
+              {(['near_duplicate', 'manual_duplicate', 'new', 'already_imported'] as const).map(s =>
+                staged!.counts[s] > 0 && (
+                  <span key={s} className="text-[11px] px-1.5 py-0.5 rounded font-medium"
+                        style={{ color: STATUS[s].fg, background: STATUS[s].bg }}>
+                    {staged!.counts[s]} {STATUS[s].label.toLowerCase()}
+                  </span>
+                ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setSelected(new Set(candidates.map(c => c.external_id)))}
+                      className="text-xs text-slate-400 hover:text-white">All</button>
+              <span className="text-slate-600">·</span>
+              <button onClick={() => setSelected(new Set())}
+                      className="text-xs text-slate-400 hover:text-white">None</button>
+            </div>
           </div>
 
-          {lastJob.duplicate_warnings && lastJob.duplicate_warnings.length > 0 && (
+          <div className="divide-y divide-[var(--border)] max-h-96 overflow-y-auto">
+            {candidates.map(c => {
+              const st = STATUS[c.status]
+              const on = selected.has(c.external_id)
+              return (
+                <label key={c.external_id}
+                       className="flex items-start gap-3 px-4 py-2.5 cursor-pointer hover:bg-white/[0.02]">
+                  <input type="checkbox" checked={on} onChange={() => toggle(c.external_id)}
+                         className="mt-0.5 accent-indigo-500 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium text-white">{c.trade.ticker}</span>
+                      <span className={`text-xs font-medium ${c.trade.action === 'sell' ? 'text-red-400' : 'text-emerald-400'}`}>
+                        {c.trade.action.toUpperCase()}
+                      </span>
+                      <span className="text-xs text-slate-400 tabular-nums">
+                        {c.trade.units} @ {c.trade.price} {c.trade.currency}
+                      </span>
+                      <span className="text-xs text-slate-500">{fmtDate(c.trade.date)}</span>
+                      <span className="text-[11px] px-1.5 py-0.5 rounded font-medium"
+                            style={{ color: st.fg, background: st.bg }}>{st.label}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                      {fmtCurrency(Math.abs(c.trade.value))} AUD · fx {c.trade.exch_rate} · brokerage {c.trade.brokerage}
+                    </p>
+                    {/* IBKR's figures beside yours, so a collision is a comparison rather
+                        than an assertion that the two disagree. */}
+                    {c.match && (
+                      <p className="text-[11px] mt-1 tabular-nums"
+                         style={{ color: c.status === 'near_duplicate' ? '#f87171'
+                                : c.status === 'manual_duplicate' ? '#fbbf24' : '#94a3b8' }}>
+                        {c.status === 'already_imported' ? 'Existing IBKR row' : 'Your manual row'} #{c.match.id}
+                        {' '}on <strong>{fmtDate(c.match.date)}</strong>:
+                        {' '}{c.match.units} @ {c.match.price} · fx {c.match.exch_rate}
+                        {' · '}{fmtCurrency(Math.abs(c.match.value))} AUD
+                        {c.match.date !== c.trade.date && <> — IBKR says <strong>{fmtDate(c.trade.date)}</strong></>}
+                        {c.status !== 'already_imported' && on && <strong> — will be deleted</strong>}
+                      </p>
+                    )}
+                  </div>
+                </label>
+              )
+            })}
+          </div>
+
+          <div className="flex items-center justify-between gap-3 px-4 py-3 flex-wrap border-t border-[var(--border)]">
+            <button
+              onClick={handleImport}
+              disabled={doImport.isPending || selected.size === 0}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
+            >
+              {doImport.isPending ? 'Importing…' : `Import ${selected.size} selected`}
+            </button>
+            <button
+              onClick={() => { if (confirm('Discard this review list? Nothing has been imported.')) clearStaged.mutate() }}
+              className="text-xs text-slate-500 hover:text-slate-300"
+            >
+              Discard
+            </button>
+          </div>
+        </div>
+      )}
+
+      {result?.ok && (
+        <div className="mt-4 space-y-3">
+          <div className="rounded-lg p-3 text-sm text-emerald-300 flex items-start gap-2"
+               style={{ background: 'rgba(16,185,129,0.1)' }}>
+            <CheckCircle size={15} className="mt-0.5 shrink-0" />
+            <span>
+              {result.imported} trade{result.imported === 1 ? '' : 's'} imported.
+              {result.price_sync_results && result.price_sync_results.length > 0 && (
+                <> Also synced prices for {result.price_sync_results.filter(r => r.ok).map(r => r.symbol).join(', ')}
+                {result.price_sync_results.some(r => !r.ok) && <>
+                  {' '}(failed: {result.price_sync_results.filter(r => !r.ok).map(r => r.symbol).join(', ')})
+                </>}.</>
+              )}
+            </span>
+          </div>
+          {result.replaced_manual.length > 0 && (
             <div className="rounded-lg p-3 border" style={{ background: 'rgba(245,158,11,0.08)', borderColor: 'rgba(245,158,11,0.3)' }}>
               <p className="text-xs font-semibold text-amber-300 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                <AlertTriangle size={13} /> Possible duplicates — review before keeping both
+                <AlertTriangle size={13} /> Manual entries replaced
               </p>
-              <div className="space-y-1.5">
-                {lastJob.duplicate_warnings.map((w, i) => (
-                  <p key={i} className="text-xs text-amber-200">
-                    <span className="font-medium">{w.ticker}</span> on {fmtDate(w.date)} — {w.units} units @ {fmtCurrency(w.price)} exists
-                    as both a manual entry and this IBKR import. Check Holdings and delete the manual one if it's the same trade.
-                  </p>
-                ))}
-              </div>
+              {result.replaced_manual.map(r => (
+                <p key={r.external_id} className="text-xs text-amber-200">
+                  {r.ticker} on {fmtDate(r.date)} — your manual row #{r.deleted_txn_id} was deleted in favour of IBKR's.
+                </p>
+              ))}
             </div>
           )}
         </div>

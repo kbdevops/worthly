@@ -3,7 +3,8 @@ import type {
   Breakdown, Stats, NetworthData, MonthlyChange, Allocation,
   Holding, Transaction, CashAccount, SuperHolding, Snapshot,
   CGTResult, SyncStatus, SyncResponse, SyncJob, Milestone, Dividend, HoldingGroup,
-  CompounterData, IbkrCredentialsStatus, IbkrSyncJob, TaxIncomeResult, TaxSettings,
+  CompounterData, IbkrCredentialsStatus, TaxIncomeResult, TaxSettings,
+  IbkrStaged, IbkrPreviewJob, IbkrImportResult,
   ClosedPositionsResult,
   PerformanceData,
 } from '../types'
@@ -411,13 +412,16 @@ export const useDeleteIbkrCredentials = () => {
   })
 }
 
-export const useIbkrSync = () => {
+/** Fetch the Flex report and stage it for review. Imports nothing — the trades land in
+ *  ibkr_staged and the user picks from them. Polls to completion, then refreshes the
+ *  staged list rather than the whole cache, since no transaction has changed yet. */
+export const useIbkrPreview = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async (): Promise<IbkrSyncJob> => {
-      const job = await post<IbkrSyncJob>('/api/ibkr/sync')
-      const poll = async (): Promise<IbkrSyncJob> => {
-        const progress = await get<IbkrSyncJob>(`/api/ibkr/sync/progress/${job.job_id}`)
+    mutationFn: async (): Promise<IbkrPreviewJob> => {
+      const job = await post<IbkrPreviewJob>('/api/ibkr/preview')
+      const poll = async (): Promise<IbkrPreviewJob> => {
+        const progress = await get<IbkrPreviewJob>(`/api/ibkr/preview/${job.job_id}`)
         if (progress.status === 'running') {
           await new Promise(r => setTimeout(r, 1000))
           return poll()
@@ -426,10 +430,35 @@ export const useIbkrSync = () => {
       }
       return poll()
     },
-    onSuccess: () => {
-      qc.invalidateQueries()
-      qc.invalidateQueries({ queryKey: ['ibkr-credentials'] })
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ibkr-staged'] }),
+  })
+}
+
+/** The review list. `enabled` is caller-controlled so the Sync tab can skip the request
+ *  entirely until credentials exist. */
+export const useIbkrStaged = (enabled = true) =>
+  useQuery({
+    queryKey: ['ibkr-staged'],
+    queryFn: () => get<IbkrStaged>('/api/ibkr/staged'),
+    enabled,
+  })
+
+/** Import the named candidates. This is the only call here that writes transactions, so
+ *  it's the only one that invalidates the whole cache. */
+export const useIbkrImport = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (externalIds: string[]) =>
+      post<IbkrImportResult>('/api/ibkr/import', { external_ids: externalIds }),
+    onSuccess: () => qc.invalidateQueries(),
+  })
+}
+
+export const useIbkrClearStaged = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => del('/api/ibkr/staged'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ibkr-staged'] }),
   })
 }
 

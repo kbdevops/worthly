@@ -249,6 +249,37 @@ def db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    # ── IBKR review-before-import staging ─────────────────────────────────────
+    # Both tables are DB-backed rather than in-process dicts ON PURPOSE. gunicorn runs
+    # with -w 2, so a module-level dict lives separately in each worker: a preview
+    # started on worker 1 is invisible to an import routed to worker 2. Anything that
+    # has to survive between two HTTP requests belongs here, not in memory.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ibkr_staged (
+            user_id INTEGER NOT NULL,
+            external_id TEXT NOT NULL,
+            -- 'new' | 'already_imported' | 'manual_duplicate'
+            status TEXT NOT NULL,
+            -- transactions.id this candidate collides with, for the latter two states
+            match_txn_id INTEGER,
+            payload TEXT NOT NULL,          -- JSON of the parsed, exchange-resolved trade
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, external_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ibkr_preview_jobs (
+            job_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            status TEXT NOT NULL,           -- 'running' | 'done' | 'error'
+            error TEXT,
+            summary TEXT,                   -- JSON: candidate counts by status
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             symbol TEXT NOT NULL,
@@ -1071,44 +1102,6 @@ def parse_and_aggregate_ibkr_trades(raw_payload):
         })
 
     return trades, stats
-
-
-def find_ibkr_manual_duplicates(conn, user_id):
-    """After an IBKR sync, flag existing MANUAL rows that look like the same trade as
-    a newly-imported IBKR row, so the user can review/delete the manual one themselves.
-    Never deletes or modifies anything."""
-    ibkr_rows = conn.execute(
-        "SELECT id, date, ticker, units, price, action FROM transactions "
-        "WHERE user_id=? AND source='ibkr'", (user_id,)
-    ).fetchall()
-    manual_rows = conn.execute(
-        "SELECT id, date, ticker, units, price, action FROM transactions "
-        "WHERE user_id=? AND source='manual'", (user_id,)
-    ).fetchall()
-
-    warnings = []
-    for ib_id, ib_date, ib_ticker, ib_units, ib_price, ib_action in ibkr_rows:
-        for m_id, m_date, m_ticker, m_units, m_price, m_action in manual_rows:
-            if ib_date != m_date:
-                continue
-            if ib_ticker.upper() != m_ticker.upper():
-                continue
-            if ib_action.lower() != m_action.lower():
-                continue
-            if abs(ib_units - m_units) > 0.01:
-                continue
-            tol = max(0.01, abs(m_price) * 0.01)
-            if abs(ib_price - m_price) > tol:
-                continue
-            warnings.append({
-                "ibkr_txn_id": ib_id,
-                "manual_txn_id": m_id,
-                "ticker": ib_ticker,
-                "date": ib_date,
-                "units": ib_units,
-                "price": ib_price,
-            })
-    return warnings
 
 
 def ingest_excel_to_json():
@@ -2175,119 +2168,307 @@ def delete_ibkr_credentials():
     return jsonify({"ok": True})
 
 
-_ibkr_sync_jobs: dict = {}  # job_id -> {status, results, duplicate_warnings, started_at, finished_at, error}
-_ibkr_sync_lock = threading.Lock()
+def _resolve_ibkr_exchanges(conn, user_id, trades):
+    """Pin every fill of a ticker to one exchange bucket, mutating `trades` in place.
 
-def _run_ibkr_sync_job(job_id, user_id, token, query_id):
+    A single real-world ticker must always resolve to the same exchange bucket — the
+    per-ticker transaction list filters by (ticker, exchange) together, so a split would
+    silently hide rows. IBKR reports a different execution venue per fill (NASDAQ vs
+    ARCA vs blank), which fragments one position across exchange values if trusted
+    as-is. Prefer whatever exchange this user already holds the ticker under (manual
+    entry or an earlier sync); for a ticker with no prior record, pin every fill in this
+    batch to the first-resolved exchange for it.
+    """
+    existing_exchange = {}
+    for tk, ex in conn.execute(
+        "SELECT ticker, exchange FROM transactions WHERE user_id=? ORDER BY id", (user_id,)
+    ).fetchall():
+        existing_exchange.setdefault(tk, ex)
+    batch_exchange = {}
+    for t in trades:
+        t["exchange"] = existing_exchange.get(t["ticker"]) or batch_exchange.setdefault(
+            t["ticker"], t["exchange"])
+    return trades
+
+
+def _ibkr_aud_value(t):
+    """AUD consideration for a parsed trade — same formula as manual entry, so an
+    imported row and a hand-typed one for the same fill agree to the cent."""
+    signed_units = -t["units"] if t["action"] == "sell" else t["units"]
+    return round((signed_units * t["price"] + t["brokerage"]) / t["exch_rate"], 2)
+
+
+IBKR_NEAR_DUPLICATE_DAYS = 5
+
+
+def _classify_ibkr_trade(conn, user_id, t):
+    """Decide whether a candidate is new, already imported, or collides with a manual row.
+
+    Returns (status, match_txn_id). 'already_imported' wins over 'manual_duplicate':
+    if this exact fill is already in as an IBKR row, that is the more specific fact, and
+    re-importing it is an update rather than a new entry.
+
+    The manual-duplicate predicate — same date, ticker and action, units within 0.01, price
+    within 1% — is the one the old post-import warning used, moved to before the write so
+    it informs the decision instead of reporting a fait accompli.
+    """
+    row = conn.execute(
+        "SELECT id FROM transactions WHERE user_id=? AND external_id=? AND source='ibkr'",
+        (user_id, t["external_id"]),
+    ).fetchone()
+    if row:
+        return "already_imported", row[0]
+
+    # A duplicate is not required to share a date. IBKR reports the US execution date,
+    # while a hand-typed entry often carries the Australian calendar date — a fill on
+    # Friday afternoon in New York is already Saturday in Sydney. On this ledger 11 of 25
+    # overlapping US trades were offset by exactly +1 day that way, and matching on date
+    # equality alone labelled every one of them "new": $150k of trades one click from
+    # being double-counted, under a reassuring green badge. The window is wider than the
+    # offset it exists to catch, so it also covers T+2 settlement across a weekend.
+    day = datetime.strptime(t["date"], "%Y-%m-%d")
+    lo = (day - timedelta(days=IBKR_NEAR_DUPLICATE_DAYS)).strftime("%Y-%m-%d")
+    hi = (day + timedelta(days=IBKR_NEAR_DUPLICATE_DAYS)).strftime("%Y-%m-%d")
+
+    near = []
+    for m_id, m_date, m_units, m_price in conn.execute(
+        "SELECT id, date, units, price FROM transactions WHERE user_id=? AND source='manual' "
+        "AND UPPER(ticker)=? AND LOWER(action)=? AND date BETWEEN ? AND ?",
+        (user_id, t["ticker"].upper(), t["action"].lower(), lo, hi),
+    ).fetchall():
+        if abs(t["units"] - m_units) > 0.01:
+            continue
+        if abs(t["price"] - m_price) > max(0.01, abs(m_price) * 0.01):
+            continue
+        if m_date == t["date"]:
+            return "manual_duplicate", m_id
+        near.append((abs((datetime.strptime(m_date, "%Y-%m-%d") - day).days), m_id))
+
+    if near:
+        # Closest by date, so a candidate never binds to a further row when an adjacent
+        # one is the real counterpart.
+        return "near_duplicate", min(near)[1]
+    return "new", None
+
+
+def _run_ibkr_preview_job(job_id, user_id, token, query_id):
+    """Fetch, parse and classify — writing NOTHING to `transactions`.
+
+    Job state and results both land in the DB rather than a module dict: under -w 2 the
+    POST that starts this and the GET that polls it can be served by different workers,
+    so in-memory state is invisible half the time.
+    """
+    def finish(status, **fields):
+        c = db()
+        c.execute(
+            "UPDATE ibkr_preview_jobs SET status=?, error=?, summary=?, finished_at=? WHERE job_id=?",
+            (status, fields.get("error"), json.dumps(fields.get("summary")) if fields.get("summary") else None,
+             datetime.now().isoformat(), job_id),
+        )
+        c.commit()
+        c.close()
+
     try:
         raw = fetch_ibkr_flex_report(token, query_id)
         trades, stats = parse_and_aggregate_ibkr_trades(raw)
 
         conn = db()
+        _resolve_ibkr_exchanges(conn, user_id, trades)
 
-        # A single real-world ticker must always resolve to the same exchange bucket —
-        # the per-ticker transaction list filters by (ticker, exchange) together, so a
-        # split would silently hide rows. IBKR reports a different execution venue per
-        # fill (NASDAQ vs ARCA vs blank), which fragments one position across exchange
-        # values if trusted as-is. Prefer whatever exchange this user already holds the
-        # ticker under (manual entry or an earlier sync); for a ticker with no prior
-        # record, pin every fill in this batch to the first-resolved exchange for it.
-        existing_exchange = {}
-        for tk, ex in conn.execute(
-            "SELECT ticker, exchange FROM transactions WHERE user_id=? ORDER BY id", (user_id,)
-        ).fetchall():
-            existing_exchange.setdefault(tk, ex)
-        batch_exchange = {}
+        # A fresh preview supersedes any earlier one — stale candidates from a previous
+        # fetch would otherwise linger in the review list and could be imported later
+        # against prices and FX rates that IBKR has since revised.
+        conn.execute("DELETE FROM ibkr_staged WHERE user_id=?", (user_id,))
+        now = datetime.now().isoformat()
+        counts = {"new": 0, "already_imported": 0, "manual_duplicate": 0, "near_duplicate": 0}
         for t in trades:
-            t["exchange"] = existing_exchange.get(t["ticker"]) or batch_exchange.setdefault(t["ticker"], t["exchange"])
-
-        for t in trades:
-            if t["action"] == "sell":
-                aud_value = (-t["units"] * t["price"] + t["brokerage"]) / t["exch_rate"]
-            else:
-                aud_value = (t["units"] * t["price"] + t["brokerage"]) / t["exch_rate"]
+            status, match_id = _classify_ibkr_trade(conn, user_id, t)
+            counts[status] += 1
+            t["value"] = _ibkr_aud_value(t)
             conn.execute(
-                "INSERT INTO transactions (date, exchange, ticker, name, action, units, price, "
-                "currency, brokerage, brokerage_currency, exch_rate, value, user_id, source, external_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(user_id, external_id) DO UPDATE SET date=excluded.date, exchange=excluded.exchange, "
-                "ticker=excluded.ticker, name=excluded.name, action=excluded.action, units=excluded.units, "
-                "price=excluded.price, currency=excluded.currency, brokerage=excluded.brokerage, "
-                "brokerage_currency=excluded.brokerage_currency, exch_rate=excluded.exch_rate, value=excluded.value "
-                "WHERE transactions.source='ibkr'",
-                (t["date"], t["exchange"], t["ticker"], t["name"], t["action"], t["units"], t["price"],
-                 t["currency"], t["brokerage"], t["currency"], t["exch_rate"], round(aud_value, 2),
-                 user_id, "ibkr", t["external_id"]),
+                "INSERT INTO ibkr_staged (user_id, external_id, status, match_txn_id, payload, fetched_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(user_id, external_id) DO UPDATE SET "
+                "status=excluded.status, match_txn_id=excluded.match_txn_id, "
+                "payload=excluded.payload, fetched_at=excluded.fetched_at",
+                (user_id, t["external_id"], status, match_id, json.dumps(t), now),
             )
-        warnings = find_ibkr_manual_duplicates(conn, user_id)
-        conn.execute(
-            "UPDATE ibkr_credentials SET last_synced=? WHERE user_id=?",
-            (datetime.now().isoformat(), user_id),
-        )
         conn.commit()
         conn.close()
 
-        # A ticker this import touched might be brand new (no price history yet) — left
-        # alone it'd sit at a $0 value until the next manual price sync. Piggyback a
-        # "missing only" price pass right away so newly-imported holdings show a real
-        # value immediately. Cheap for tickers already synced recently: sync_symbol has
-        # its own per-symbol cooldown, so this only actually hits yfinance for the new
-        # ones. Filtered down to just this import's tickers so the reported summary
-        # stays relevant instead of dumping the whole tracked-symbol universe.
-        price_sync_results = []
-        if trades:
-            imported_symbols = {yf_symbol(t["ticker"], t["exchange"]) for t in trades}
-            price_sync_results = [r for r in _run_sync(force=False) if r["symbol"] in imported_symbols]
-
-        with _ibkr_sync_lock:
-            _ibkr_sync_jobs[job_id] = {
-                "status": "done",
-                "results": {
-                    "trades_processed": len(trades),
-                    "skipped_options": stats["skipped_options"],
-                    "skipped_currency": stats["skipped_currency"],
-                },
-                "duplicate_warnings": warnings,
-                "price_sync_results": price_sync_results,
-                "finished_at": datetime.now().isoformat(),
-            }
+        finish("done", summary={
+            "candidates": len(trades),
+            **counts,
+            "skipped_options": stats["skipped_options"],
+            "skipped_currency": stats["skipped_currency"],
+        })
     except Exception as e:
-        with _ibkr_sync_lock:
-            _ibkr_sync_jobs[job_id] = {
-                "status": "error",
-                "error": str(e),
-                "finished_at": datetime.now().isoformat(),
-            }
+        finish("error", error=str(e))
 
 
-@app.route("/api/ibkr/sync", methods=["POST"])
+@app.route("/api/ibkr/preview", methods=["POST"])
 @jwt_required()
-def sync_ibkr():
-    """Start an async IBKR trade import — returns a job_id immediately. Poll
-    /api/ibkr/sync/progress/<job_id>. Uses its own job dict (not /api/sync's) since
-    the result shape is different and job ids shouldn't collide across sync kinds."""
+def preview_ibkr():
+    """Fetch the Flex report and stage its trades for review. Imports nothing.
+
+    This replaced a one-click sync that wrote every parsed trade straight in and only
+    then reported which of your manual rows it duplicated — by which point the damage
+    needed undoing by hand. Nothing reaches `transactions` until /api/ibkr/import names
+    the external_ids to take.
+    """
     uid = current_user_id()
     conn = db()
     row = conn.execute("SELECT flex_token, query_id FROM ibkr_credentials WHERE user_id=?", (uid,)).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return jsonify({"ok": False, "error": "IBKR credentials not configured"}), 400
     token, query_id = row
     job_id = uuid.uuid4().hex[:10]
-    with _ibkr_sync_lock:
-        _ibkr_sync_jobs[job_id] = {"status": "running", "started_at": datetime.now().isoformat()}
-    threading.Thread(target=_run_ibkr_sync_job, args=(job_id, uid, token, query_id), daemon=True).start()
+    conn.execute(
+        "INSERT INTO ibkr_preview_jobs (job_id, user_id, status, started_at) VALUES (?,?,?,?)",
+        (job_id, uid, "running", datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    threading.Thread(target=_run_ibkr_preview_job, args=(job_id, uid, token, query_id), daemon=True).start()
     return jsonify({"job_id": job_id, "status": "running"})
 
 
-@app.route("/api/ibkr/sync/progress/<job_id>", methods=["GET"])
+@app.route("/api/ibkr/preview/<job_id>", methods=["GET"])
 @jwt_required()
-def ibkr_sync_progress(job_id):
-    with _ibkr_sync_lock:
-        job = _ibkr_sync_jobs.get(job_id)
-    if not job:
+def ibkr_preview_progress(job_id):
+    """Scoped to the caller — a job_id is a short random hex, not a capability."""
+    conn = db()
+    row = conn.execute(
+        "SELECT status, error, summary, started_at, finished_at FROM ibkr_preview_jobs "
+        "WHERE job_id=? AND user_id=?", (job_id, current_user_id()),
+    ).fetchone()
+    conn.close()
+    if not row:
         return jsonify({"status": "not_found"}), 404
-    return jsonify(job)
+    status, error, summary, started_at, finished_at = row
+    return jsonify({"status": status, "error": error,
+                    "summary": json.loads(summary) if summary else None,
+                    "started_at": started_at, "finished_at": finished_at})
+
+
+@app.route("/api/ibkr/staged", methods=["GET"])
+@jwt_required()
+def get_ibkr_staged():
+    """The review list: every candidate from the last preview, with what it collides with.
+
+    `match` carries the existing row's own figures so the UI can show IBKR's version
+    beside yours rather than just asserting they differ.
+    """
+    uid = current_user_id()
+    conn = db()
+    rows = conn.execute(
+        "SELECT external_id, status, match_txn_id, payload, fetched_at FROM ibkr_staged "
+        "WHERE user_id=? ORDER BY json_extract(payload,'$.date'), json_extract(payload,'$.ticker')",
+        (uid,),
+    ).fetchall()
+    out, fetched_at = [], None
+    for ext_id, status, match_id, payload, fetched in rows:
+        fetched_at = fetched
+        trade = json.loads(payload)
+        match = None
+        if match_id:
+            m = conn.execute(
+                "SELECT id, date, ticker, action, units, price, exch_rate, brokerage, value, source "
+                "FROM transactions WHERE id=? AND user_id=?", (match_id, uid),
+            ).fetchone()
+            if m:
+                match = {"id": m[0], "date": m[1], "ticker": m[2], "action": m[3], "units": m[4],
+                         "price": m[5], "exch_rate": m[6], "brokerage": m[7], "value": m[8],
+                         "source": m[9]}
+        out.append({"external_id": ext_id, "status": status, "trade": trade, "match": match})
+    conn.close()
+    return jsonify({"fetched_at": fetched_at, "candidates": out,
+                    "counts": {s: sum(1 for c in out if c["status"] == s)
+                               for s in ("new", "already_imported", "manual_duplicate", "near_duplicate")}})
+
+
+@app.route("/api/ibkr/staged", methods=["DELETE"])
+@jwt_required()
+def clear_ibkr_staged():
+    """Discard the review list without importing anything."""
+    conn = db()
+    conn.execute("DELETE FROM ibkr_staged WHERE user_id=?", (current_user_id(),))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/ibkr/import", methods=["POST"])
+@jwt_required()
+def import_ibkr():
+    """Import the named staged trades, and only those.
+
+    A candidate flagged `manual_duplicate` replaces the manual row it matches: the IBKR
+    figures are the broker's own, so they win, and leaving both would double-count the
+    position. The delete is scoped to that one id and reported back — nothing else in
+    `transactions` is touched.
+    """
+    uid = current_user_id()
+    wanted = (request.json or {}).get("external_ids")
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({"ok": False, "error": "external_ids must be a non-empty list"}), 400
+
+    conn = db()
+    rows = conn.execute(
+        f"SELECT external_id, status, match_txn_id, payload FROM ibkr_staged "
+        f"WHERE user_id=? AND external_id IN ({','.join('?' * len(wanted))})",
+        (uid, *wanted),
+    ).fetchall()
+    if not rows:
+        conn.close()
+        return jsonify({"ok": False, "error": "No matching staged trades — re-run the preview."}), 404
+
+    imported, replaced, touched = [], [], []
+    for ext_id, status, match_id, payload in rows:
+        t = json.loads(payload)
+        conn.execute(
+            "INSERT INTO transactions (date, exchange, ticker, name, action, units, price, "
+            "currency, brokerage, brokerage_currency, exch_rate, value, user_id, source, external_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(user_id, external_id) DO UPDATE SET date=excluded.date, exchange=excluded.exchange, "
+            "ticker=excluded.ticker, name=excluded.name, action=excluded.action, units=excluded.units, "
+            "price=excluded.price, currency=excluded.currency, brokerage=excluded.brokerage, "
+            "brokerage_currency=excluded.brokerage_currency, exch_rate=excluded.exch_rate, value=excluded.value "
+            "WHERE transactions.source='ibkr'",
+            (t["date"], t["exchange"], t["ticker"], t["name"], t["action"], t["units"], t["price"],
+             t["currency"], t["brokerage"], t["currency"], t["exch_rate"], _ibkr_aud_value(t),
+             uid, "ibkr", ext_id),
+        )
+        # Guarded on source='manual': a match_txn_id can only ever point at a manual row,
+        # but the guard means a mis-stored id can never delete an IBKR row.
+        if status in ("manual_duplicate", "near_duplicate") and match_id:
+            cur = conn.execute(
+                "DELETE FROM transactions WHERE id=? AND user_id=? AND source='manual'",
+                (match_id, uid),
+            )
+            if cur.rowcount:
+                replaced.append({"external_id": ext_id, "deleted_txn_id": match_id,
+                                 "ticker": t["ticker"], "date": t["date"]})
+        imported.append(ext_id)
+        touched.append(yf_symbol(t["ticker"], t["exchange"]))
+
+    conn.execute(
+        f"DELETE FROM ibkr_staged WHERE user_id=? AND external_id IN ({','.join('?' * len(imported))})",
+        (uid, *imported),
+    )
+    conn.execute("UPDATE ibkr_credentials SET last_synced=? WHERE user_id=?",
+                 (datetime.now().isoformat(), uid))
+    conn.commit()
+    conn.close()
+
+    # A ticker this import touched might be brand new (no price history yet) — left alone
+    # it'd sit at a $0 value until the next price sync. Piggyback a "missing only" pass so
+    # newly-imported holdings show a real value immediately; sync_symbol's per-symbol
+    # cooldown means this only actually hits yfinance for the new ones.
+    price_sync_results = [r for r in _run_sync(force=False) if r["symbol"] in set(touched)]
+
+    return jsonify({"ok": True, "imported": len(imported), "imported_ids": imported,
+                    "replaced_manual": replaced, "price_sync_results": price_sync_results})
 
 
 @app.route("/api/sync-status", methods=["GET"])
