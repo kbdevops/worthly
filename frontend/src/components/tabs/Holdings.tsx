@@ -1,11 +1,12 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
-import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3, Pencil, Check, Layers, Archive } from 'lucide-react'
+import { Plus, Trash2, ChevronDown, ChevronUp, Clock, X, Search, Columns3, Pencil, Check, Layers, Archive, Download } from 'lucide-react'
 import {
   useCashAccounts, useSuperHoldings, usePortfolio, useSnapshots, useBreakdown,
   useSaveCashAccounts, useSaveSuperHoldings, useAddSnapshot,
   useTransactions, useAddTransaction, useUpdateTransaction, useDeleteTransaction,
   useHoldingGroups, useAddHoldingGroup, useUpdateHoldingGroup, useDeleteHoldingGroup,
   useDividends, useSparklines, useClosedPositions,
+  exportTransactionsCsv,
 } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import type { CashAccount, SuperHolding, Snapshot, Holding, Transaction } from '../../types'
@@ -773,6 +774,23 @@ export default function Holdings() {
     return rows
   }, [activeHoldings, groupModal?.symbols, closed])
 
+  /** CSV export. Local state rather than a TanStack mutation because nothing on the
+   *  server changes — there's no cache to invalidate, only a button to keep honest
+   *  while the request is in flight. The error state self-clears so a failed export
+   *  doesn't leave the button reading "Export failed" forever. */
+  const [exportState, setExportState] = useState<'idle' | 'busy' | 'error'>('idle')
+  const handleExport = async () => {
+    setExportState('busy')
+    try {
+      await exportTransactionsCsv()
+      setExportState('idle')
+    } catch (e) {
+      console.error('CSV export failed', e)
+      setExportState('error')
+      setTimeout(() => setExportState('idle'), 4000)
+    }
+  }
+
   const openAddGroup = () => setGroupModal({ id: null, name: '', symbols: [] })
   const openEditGroup = (g: { id: number; name: string; symbols: string[] }) =>
     setGroupModal({ id: g.id, name: g.name, symbols: g.symbols })
@@ -1055,13 +1073,28 @@ export default function Holdings() {
           <h2 className="text-sm font-medium text-slate-400">Portfolio</h2>
           <UnitToggle unit={unit} onChange={setUnit} />
         </div>
-        <button
-          onClick={() => setShowAddTxn(true)}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-          style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
-        >
-          <Plus size={14} /> Add Transaction
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Secondary styling on purpose: Add Transaction stays the one accented action
+              in this header, and an export is something you reach for rarely. */}
+          <button
+            onClick={handleExport}
+            disabled={exportState === 'busy'}
+            title="Every trade as CSV — Sharesight column order, no valuations or returns"
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-300
+                       border border-[var(--border)] hover:border-[var(--border-hover)] hover:text-white
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download size={14} />
+            {exportState === 'busy' ? 'Exporting…' : exportState === 'error' ? 'Export failed' : 'Export CSV'}
+          </button>
+          <button
+            onClick={() => setShowAddTxn(true)}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
+            style={{ background: 'linear-gradient(135deg, var(--accent), var(--accent-2))' }}
+          >
+            <Plus size={14} /> Add Transaction
+          </button>
+        </div>
       </div>
 
       {/* Dense sortable table on desktop; the card layout below is kept for narrow

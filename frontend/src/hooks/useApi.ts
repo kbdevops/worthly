@@ -55,6 +55,44 @@ const put = async <T>(url: string, body: unknown): Promise<T> => {
   return res.json()
 }
 
+/** Download a CSV endpoint as a file.
+ *
+ *  Not a plain <a href> because every /api route needs the JWT in an Authorization
+ *  header, which a link navigation can't carry — it would just 401 and, worse, do it
+ *  invisibly by navigating away. So: fetch with auth, turn the body into a blob, and
+ *  click a synthetic link.
+ *
+ *  Returns the row count from X-Row-Count so the caller can distinguish "exported 0
+ *  trades because you have none" from a failure. Throws on non-2xx, and clears the
+ *  session on 401 like every other call here.
+ */
+async function downloadCsv(url: string, fallbackName: string): Promise<number> {
+  const res = await fetch(apiUrl(url), { headers: { ...authHeaders() } })
+  if (!res.ok) { await handleAuthError(res); throw new Error(`${url} ${res.status}`) }
+
+  // Prefer the server's filename; it carries the export date. The regex tolerates the
+  // quoted and bare forms rather than assuming one.
+  const cd = res.headers.get('Content-Disposition') ?? ''
+  const name = /filename="?([^";]+)"?/.exec(cd)?.[1]?.trim() || fallbackName
+  const rows = Number(res.headers.get('X-Row-Count') ?? NaN)
+
+  const blobUrl = URL.createObjectURL(await res.blob())
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  // Revoked on the next tick, not immediately — Safari cancels an in-flight download
+  // if the blob URL is released in the same task as the click.
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 0)
+  return Number.isFinite(rows) ? rows : -1
+}
+
+/** Every trade as a Sharesight-shaped CSV. Trades only — no valuations or returns. */
+export const exportTransactionsCsv = () =>
+  downloadCsv('/api/transactions/export.csv', 'worthly-transactions.csv')
+
 export const useDashboardLayout = () =>
   useQuery({
     queryKey: ['dashboard-layout'],

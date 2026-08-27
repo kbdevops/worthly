@@ -5,7 +5,7 @@ Flask application with SQLite backend, multi-currency support (AUD base),
 and detailed portfolio analytics. All data stored in prices.db.
 """
 
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 import yfinance as yf
 import pandas as pd
 import requests
@@ -1659,6 +1659,92 @@ def serve_spa(path):
     if path and os.path.exists(full):
         return send_from_directory(FRONTEND_DIST, path)
     return send_from_directory(FRONTEND_DIST, "index.html")
+
+# ── CSV export ────────────────────────────────────────────────────────────────
+# Column order follows Sharesight's trade-import template, which is the shape anyone
+# tracking AU holdings already recognises, extended with the fields worthly stores and
+# that template has no slot for (trade currency, instrument name, provenance).
+#
+# Deliberately a TRADE LEDGER, not a positions report: no market value, no gain/loss, no
+# return percentages. Those are all derived from today's prices and the cost-basis method,
+# so exporting them would bake this app's accounting choices into a file whose whole
+# purpose is to be read somewhere else. Raw trades reconstruct any of it; the reverse
+# isn't true. It also means the file is stable — re-exporting tomorrow gives byte-identical
+# output unless the trades themselves changed.
+EXPORT_COLUMNS = [
+    # Sharesight's template columns, in its order.
+    ("Trade Date",         lambda t: _csv_date(t["date"])),
+    ("Instrument Code",    lambda t: t.get("ticker") or ""),
+    ("Market Code",        lambda t: t.get("exchange") or ""),
+    ("Quantity",           lambda t: _csv_num(t.get("units"))),
+    ("Price",              lambda t: _csv_num(t.get("price"))),
+    ("Transaction Type",   lambda t: (t.get("action") or "").upper()),
+    ("Exchange Rate",      lambda t: _csv_num(t.get("exch_rate"))),
+    ("Brokerage",          lambda t: _csv_num(t.get("brokerage"))),
+    ("Brokerage Currency", lambda t: t.get("brokerage_currency") or ""),
+    ("Comments",           lambda t: f"worthly:{t.get('source') or 'manual'}"),
+    # worthly's own, after Sharesight's so its importer still finds what it expects.
+    ("Currency",           lambda t: t.get("currency") or ""),
+    ("Instrument Name",    lambda t: t.get("name") or ""),
+    ("Value (AUD)",        lambda t: _csv_num(t.get("value"))),
+]
+
+
+def _csv_date(raw):
+    """Stored YYYY-MM-DD out as DD/MM/YYYY — Sharesight's AU convention, and the one
+    Excel in an en-AU locale parses as a date rather than mangling into text."""
+    try:
+        return datetime.strptime((raw or "").strip()[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return raw or ""
+
+
+def _csv_num(v):
+    """Plain decimal, no thousands separators or currency symbols — those turn a numeric
+    column into text on import. Trailing zeros trimmed so 40.0 units reads as 40, but
+    fractional units (IBKR fills, DRP allocations) keep their precision."""
+    if v is None or v == "":
+        return ""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return f"{f:.8f}".rstrip("0").rstrip(".") or "0"
+
+
+@app.route("/api/transactions/export.csv", methods=["GET"])
+@jwt_required()
+def export_transactions_csv():
+    """Every trade this user has, as CSV. Includes trades in positions since sold — the
+    ledger is history, so filtering to currently-held symbols would silently drop the
+    sold parcels that any CGT or realised-gain calculation downstream needs."""
+    txns = load_transactions(current_user_id())
+
+    buf = io.StringIO()
+    # QUOTE_MINIMAL over the csv module rather than manual joins: instrument names carry
+    # commas ("Applovin Corp - Ordinary Shares - Class A") and would split the row.
+    w = csv.writer(buf, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
+    w.writerow([name for name, _ in EXPORT_COLUMNS])
+    for t in sorted(txns, key=lambda x: ((x.get("date") or ""), x.get("ticker") or "", x.get("id") or 0)):
+        w.writerow([fn(t) for _, fn in EXPORT_COLUMNS])
+
+    filename = f"worthly-transactions-{date.today().isoformat()}.csv"
+    # BOM so Excel reads it as UTF-8; without one it guesses the local codepage and
+    # mangles any non-ASCII instrument name. Harmless to pandas, Numbers and Sheets.
+    return Response(
+        "﻿" + buf.getvalue(),
+        # mimetype, not content_type — Flask appends "; charset=utf-8" itself, and
+        # spelling it out here produces a doubled charset parameter.
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # The count is here so the client can report "exported N trades" without
+            # parsing the body, and so an empty export is distinguishable from a failure.
+            "X-Row-Count": str(len(txns)),
+            "Cache-Control": "no-store",
+        },
+    )
+
 
 @app.route("/api/transactions", methods=["GET"])
 @jwt_required()
