@@ -24,6 +24,16 @@ function fmtMoney(n: number | null | undefined): string {
   return `${sign}$${fmt(abs, 0)}`
 }
 
+// The FY table's dollar columns must reconcile by eye: fmtMoney rounds >=$1M to two
+// decimals, so $1,010,620 and $1,002,491 both collapsed to $1.01M/$1.00M and the row
+// read as a $10k gap while Growth $ correctly said -$8.1k. Levels and their difference
+// have to share one precision, so this table shows whole dollars.
+function fmtMoneyExact(n: number | null | undefined): string {
+  if (n == null) return '—'
+  const sign = n < 0 ? '-' : ''
+  return `${sign}$${Math.round(Math.abs(n)).toLocaleString('en-AU')}`
+}
+
 function fmtPct(n: number | null | undefined): string {
   if (n == null) return '—'
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
@@ -481,14 +491,14 @@ export default function Compounder() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs" style={{ color: 'var(--text-primary)' }}>
-                      {fmtMoney(row.nw_end)}
+                      {fmtMoneyExact(row.nw_end)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs" style={{ color: 'var(--text-muted)' }}>
-                      {row.prior_nw != null ? fmtMoney(row.prior_nw) : '—'}
+                      {row.prior_nw != null ? fmtMoneyExact(row.prior_nw) : '—'}
                     </td>
                     <td className={`px-4 py-3 text-right font-mono text-xs ${pctColor(row.growth_dollar)}`}>
                       {row.growth_dollar != null
-                        ? `${row.growth_dollar >= 0 ? '+' : ''}${fmtMoney(row.growth_dollar)}`
+                        ? `${row.growth_dollar >= 0 ? '+' : ''}${fmtMoneyExact(row.growth_dollar)}`
                         : '—'}
                     </td>
                     <td className={`px-4 py-3 text-right font-mono text-xs font-semibold ${pctColor(row.growth_pct)}`}>
@@ -513,10 +523,10 @@ export default function Compounder() {
                       {fmtPct(row.avg_mom)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs" style={{ color: 'var(--text-primary)' }}>
-                      {fmtMoney(row.portfolio_end)}
+                      {fmtMoneyExact(row.portfolio_end)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs" style={{ color: 'var(--text-muted)' }}>
-                      {fmtMoney(row.cash_end)}
+                      {fmtMoneyExact(row.cash_end)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-xs" style={{ color: 'var(--text-muted)' }}>
                       {row.port_pct != null ? `${row.port_pct.toFixed(1)}%` : '—'}
