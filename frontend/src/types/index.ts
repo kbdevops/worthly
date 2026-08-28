@@ -46,6 +46,11 @@ export interface Stats {
   /** False under one year, where mwr_pct is a plain cumulative return instead. */
   mwr_annualised: boolean
   mwr_pct_ex_income: number | null
+  /** Same portfolio, time-weighted. Contribution-immune, so it is the only one of the
+   *  two that can be compared against a benchmark. Annualised on the same >1yr rule. */
+  twr_pct: number | null
+  twr_years: number
+  twr_annualised: boolean
   /** Lifetime realised gain, average-cost basis, including closed positions. */
   realised_gain: number
   income_total: number

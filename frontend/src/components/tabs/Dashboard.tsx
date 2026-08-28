@@ -671,6 +671,10 @@ export default function Dashboard() {
 
   // A theme is a seed pair (neutral hue, accent hue) — see index.css. Presets set
   // data-theme; a custom hue writes the seeds inline, which outranks the preset rule.
+  // Money-weighted by default: it is the honest answer for someone who chooses their
+  // own contribution dates. TWR exists for the one question MWR cannot answer — how did
+  // this do against an index — because an index has no contributions to weight.
+  const [returnBasis, setReturnBasis] = useLocalStorage<'mwr' | 'twr'>('dash_return_basis', 'mwr')
   const [theme, setThemeRaw] = useLocalStorage<string>('dash_theme', 'indigo')
   const [customHue, setCustomHueRaw] = useLocalStorage<number | null>('dash_hue', null)
 
@@ -719,7 +723,7 @@ export default function Dashboard() {
   const perfRange = migrateRange(perfRangeRaw)
   const [benchmark, setBenchmark] = useLocalStorage<string>('dash_benchmark', 'IVV.AX')
   const [benchEdit, setBenchEdit] = useState<string | null>(null)
-  const { data: perf } = usePerformance(perfRange, benchmark)
+  const { data: perf } = usePerformance(perfRange, benchmark, returnBasis)
   const { data: ext } = useExtendedHours()
 
   type NWLine = 'Net Worth' | 'Portfolio' | 'Cash' | 'Super'
@@ -923,6 +927,7 @@ export default function Dashboard() {
     // widgets whose config only existed in one browser's localStorage, so they were
     // filtered out and appeared to have been deleted.
     if (remoteLayout.alloc_widgets) setAllocWidgets(remoteLayout.alloc_widgets as AllocWidgetConfig[])
+    if (remoteLayout.return_basis) setReturnBasis(remoteLayout.return_basis)
     if (remoteLayout.widget_spans) setSpans(remoteLayout.widget_spans as Record<string, number>)
     setLayoutLoadedFromAccount(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -933,9 +938,10 @@ export default function Dashboard() {
     saveLayout.mutate({
       widget_order: order, widget_visible: visible,
       stat_keys: statKeys, alloc_widgets: allocWidgets, widget_spans: spans,
+      return_basis: returnBasis,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order, visible, statKeys, allocWidgets, spans, layoutLoadedFromAccount])
+  }, [order, visible, statKeys, allocWidgets, spans, returnBasis, layoutLoadedFromAccount])
 
   // One-time migration. A layout saved before the hero and ledger existed still lists
   // net_worth, portfolio, cash, day_pl, total_return and so on, which would now print
@@ -1111,18 +1117,22 @@ export default function Dashboard() {
         return { label: 'Total Return (all)', value: fmtCurrencySigned(t), sub: 'unrealised + realised + income + franking', color: t >= 0 ? '#10b981' : '#ef4444' }
       }
       case 'cagr': {
-        // Money-weighted (XIRR) over the real dated cash flows. The old CAGR here
-        // divided by the cost of units still held and ignored sales and dividends
-        // entirely, reading +4.0% where the money-weighted rate is +16.0%.
-        const mwr = stats?.mwr_pct
-        const ann = stats?.mwr_annualised ?? true
-        const yrs = stats?.mwr_years ?? 0
-        if (mwr == null) return { label: 'Return p.a.', value: '—', sub: 'not enough history' }
+        // The label carries the basis. Two different rates under a bare "Return p.a."
+        // is exactly the ambiguity this app has spent its life removing — the number is
+        // useless if the reader has to remember which mode they left it in.
+        const twr = returnBasis === 'twr'
+        const pct = twr ? stats?.twr_pct : stats?.mwr_pct
+        const ann = (twr ? stats?.twr_annualised : stats?.mwr_annualised) ?? true
+        const yrs = (twr ? stats?.twr_years : stats?.mwr_years) ?? 0
+        const basisLabel = twr ? 'time-weighted' : 'money-weighted'
+        if (pct == null) return { label: ann ? 'Return p.a.' : 'Return to date', value: '—', sub: 'not enough history' }
         return {
-          label: ann ? 'Return p.a.' : 'Return to date',
-          value: `${mwr >= 0 ? '+' : ''}${mwr.toFixed(1)}%`,
-          sub: ann ? `money-weighted · over ${yrs.toFixed(1)} yrs` : `over ${yrs.toFixed(1)} yrs — not annualised`,
-          color: mwr >= 0 ? '#10b981' : '#ef4444',
+          label: `${ann ? 'Return p.a.' : 'Return to date'} · ${twr ? 'TWR' : 'MWR'}`,
+          value: `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`,
+          sub: ann
+            ? `${basisLabel} · over ${yrs.toFixed(1)} yrs`
+            : `${basisLabel} · over ${yrs.toFixed(1)} yrs — not annualised`,
+          color: pct >= 0 ? '#10b981' : '#ef4444',
         }
       }
       case 'dividends': {
@@ -1891,6 +1901,24 @@ export default function Dashboard() {
 
           {/* Theme */}
           <div>
+            <p className="text-xs text-slate-400 mb-2">
+              Return basis <span className="text-slate-600">(headline rate and the performance chart)</span>
+            </p>
+            <div className="flex gap-1 mb-1">
+              {([['mwr', 'Money-weighted'], ['twr', 'Time-weighted']] as const).map(([k, label]) => (
+                <button key={k} onClick={() => setReturnBasis(k)}
+                  className={`px-3 py-1 text-xs rounded-full border transition-colors ${
+                    returnBasis === k ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
+                                      : 'border-[#20264b] text-slate-400 hover:border-slate-500'}`}
+                >{label}</button>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-500 mb-4 leading-relaxed">
+              {returnBasis === 'mwr'
+                ? 'How your money actually did — counts when you bought, so it rewards good timing. The honest personal number, but it cannot be compared against an index, which has no contributions.'
+                : 'How the investments did, with contribution timing stripped out. The only basis comparable against a benchmark — and it makes the Max range like-for-like too.'}
+            </p>
+
             <p className="text-xs text-slate-400 mb-2">Theme</p>
             <div className="flex gap-3 flex-wrap">
               {THEMES.map(t => {

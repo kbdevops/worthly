@@ -472,6 +472,16 @@ def db():
     except:
         pass
 
+    # Which return basis the headline rate and the performance chart report:
+    # 'mwr' (money-weighted, the default and the honest personal number) or 'twr'
+    # (time-weighted, the only one comparable against a benchmark). Server-side because
+    # it changes what a number MEANS, and a meaning that lives in one browser's
+    # localStorage is worse than no setting at all.
+    try:
+        conn.execute("ALTER TABLE dashboard_layout ADD COLUMN return_basis TEXT")
+    except:
+        pass
+
     # Migrate transactions to track where a row came from (manual entry vs IBKR import)
     # and a stable per-broker-execution key so re-syncing IBKR updates existing rows
     # instead of duplicating them. external_id is NULL for every manual row — SQLite
@@ -760,20 +770,22 @@ def change_password():
 def get_dashboard_layout():
     conn = db()
     row = conn.execute(
-        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans "
-        "FROM dashboard_layout WHERE user_id = ?",
+        "SELECT widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans, "
+        "return_basis FROM dashboard_layout WHERE user_id = ?",
         (current_user_id(),),
     ).fetchone()
     conn.close()
     if not row:
-        return jsonify({"widget_order": None, "widget_visible": None,
-                        "stat_keys": None, "alloc_widgets": None, "widget_spans": None})
+        return jsonify({"widget_order": None, "widget_visible": None, "stat_keys": None,
+                        "alloc_widgets": None, "widget_spans": None, "return_basis": None})
     return jsonify({
         "widget_order": json.loads(row[0]) if row[0] else None,
         "widget_visible": json.loads(row[1]) if row[1] else None,
         "stat_keys": json.loads(row[2]) if row[2] else None,
         "alloc_widgets": json.loads(row[3]) if row[3] else None,
         "widget_spans": json.loads(row[4]) if row[4] else None,
+        # Plain string, not JSON — an enum of two values needs no encoding.
+        "return_basis": row[5] if row[5] in ("mwr", "twr") else None,
     })
 
 @app.route("/api/dashboard-layout", methods=["POST"])
@@ -782,14 +794,16 @@ def save_dashboard_layout():
     data = request.json or {}
     conn = db()
     conn.execute(
-        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+        "INSERT INTO dashboard_layout (user_id, widget_order, widget_visible, stat_keys, alloc_widgets, widget_spans, return_basis, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
         "widget_order=excluded.widget_order, widget_visible=excluded.widget_visible, "
         "stat_keys=excluded.stat_keys, alloc_widgets=excluded.alloc_widgets, "
-        "widget_spans=excluded.widget_spans, updated_at=excluded.updated_at",
+        "widget_spans=excluded.widget_spans, return_basis=excluded.return_basis, "
+        "updated_at=excluded.updated_at",
         (current_user_id(), json.dumps(data.get("widget_order")), json.dumps(data.get("widget_visible")),
          json.dumps(data.get("stat_keys")), json.dumps(data.get("alloc_widgets")),
          json.dumps(data.get("widget_spans")),
+         data.get("return_basis") if data.get("return_basis") in ("mwr", "twr") else None,
          datetime.now().isoformat()),
     )
     conn.commit()
@@ -3116,7 +3130,13 @@ def get_performance():
         # growing, not a year of flat performance. Windows therefore use the
         # time-weighted return, which is immune to contributions by construction.
         windowed = rng in RANGE_DAYS or rng in ("YTD", "FY", "Today")
-        twr = (_build_twr_series(conn, uid) if windowed
+        # Max fell back to the holdings-basis series to keep one "return" on screen,
+        # accepting a looser benchmark comparison as the price of consistency. With an
+        # explicit basis toggle that trade-off is the user's to make: asking for TWR
+        # means asking for the comparable figure, so Max stops being a special case.
+        basis = (request.args.get("basis") or "").strip().lower()
+        use_twr = windowed or basis == "twr"
+        twr = (_build_twr_series(conn, uid) if use_twr
                else _build_holding_return_series(conn, uid))
         if twr is None or twr.empty:
             return jsonify({"dates": [], "portfolio": [], "benchmark": [],
@@ -3173,7 +3193,7 @@ def get_performance():
         "portfolio_return": round(float(port.iloc[-1]), 2),
         "benchmark_return": bench_ret,
         "range": rng,
-        "basis": "twr" if windowed else "holding",
+        "basis": "twr" if use_twr else "holding",
     })
 
 
@@ -3814,11 +3834,28 @@ def _build_twr_series(conn, user_id):
     if value is None or len(value) < 2:
         return None
     prev = value.shift(1)
-    daily = (value - flows) / prev - 1.0
-    # Before the first buy prev is 0 (or the position is empty) — no capital at work,
-    # so no return to record. inf/NaN here would poison the whole cumulative product.
+
+    # Modified Dietz: the flow is half-weighted on both sides rather than assumed to
+    # land after the close. (value - flow) / prev credits a deposit with none of the
+    # day's return while counting the units it bought in `value`, which on a small base
+    # is not a rounding difference but a fabricated loss — a $4,672 buy onto a $250
+    # balance printed -4.50% on a day the portfolio actually moved about -0.2%. Eight
+    # such days cost 10.8 percentage points of cumulative return and dragged the
+    # annualised figure from 6.0% to 4.6%.
+    #
+    # Half-weighting is the GIPS treatment when the intraday timing of a flow is
+    # unknown, which it is here: transactions carry a date, not a time. Weighting the
+    # flow fully into the opening base (value / (prev + flow) - 1) reads 6.33% and is
+    # arguably closer for this data — a buy converts to units immediately at a known
+    # price — but it credits the money with a whole day's return it did not earn.
+    # The conservative middle is the defensible one to put on a dashboard.
+    base = prev + 0.5 * flows
+    daily = (value - 0.5 * flows) / base - 1.0
+
+    # Before the first buy the base is 0 (or the position is empty) — no capital at
+    # work, so no return to record. inf/NaN here would poison the cumulative product.
     daily = daily.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
-    daily[prev <= 0] = 0.0
+    daily[base <= 0] = 0.0
     return ((1.0 + daily).cumprod() - 1.0) * 100.0
 
 
@@ -4028,6 +4065,31 @@ def _xirr(flows, tol=1e-7, max_iter=300):
         else:
             lo, n_lo = mid, n_mid
     return (lo + hi) / 2
+
+
+def _calc_twr_stat(conn, user_id, years: float):
+    """Time-weighted return as a headline rate, shaped like _calc_mwr's result.
+
+    Annualised only past a year, matching _calc_mwr exactly. Two rates offered under one
+    "Return p.a." label have to agree on what the label means, or the toggle turns a
+    comparison into a trap: a sub-year TWR compounded to a yearly rate is arithmetically
+    true and completely meaningless, the same reason the Compounder refuses to do it.
+    """
+    empty = {"pct": None, "years": round(years or 0.0, 2), "annualised": False}
+    try:
+        series = _build_twr_series(conn, user_id)
+    except Exception as e:
+        print(f"[stats] twr calc failed (non-fatal): {e}")
+        return empty
+    if series is None or series.empty:
+        return empty
+
+    cumulative = float(series.iloc[-1])
+    if not years or years <= 1.0:
+        return {"pct": round(cumulative, 2), "years": round(years or 0.0, 2),
+                "annualised": False}
+    annual = ((1.0 + cumulative / 100.0) ** (1.0 / years) - 1.0) * 100.0
+    return {"pct": round(annual, 2), "years": round(years, 2), "annualised": True}
 
 
 def _calc_mwr(txns: list, div_rows: list, total_value: float):
@@ -4258,6 +4320,8 @@ def get_stats():
     # keeps it outside the return by default; this app deliberately doesn't.
     total_return_all = round(total_return + realised_gain + income_total + franking_total, 2)
     mwr = _calc_mwr(txns, div_rows, total_value)
+    twr_stat = _calc_twr_stat(conn2b := db(), uid, mwr["years"])
+    conn2b.close()
 
     return jsonify({
         "total_value": round(total_value, 2),
@@ -4275,6 +4339,12 @@ def get_stats():
         "mwr_years": mwr["years"],
         "mwr_annualised": mwr["annualised"],
         "mwr_pct_ex_income": mwr["pct_ex_income"],
+        # The same portfolio on the other basis, so the headline card can offer both.
+        # Reported on the identical annualise-only-past-a-year rule as mwr_pct, because
+        # two rates sitting under one label must at least agree on what they mean.
+        "twr_pct": twr_stat["pct"],
+        "twr_years": twr_stat["years"],
+        "twr_annualised": twr_stat["annualised"],
         "best_performer": f"{best_h['ticker']} ({best_h['return_pct']:+.1f}%)",
         "best_performer_pct": round(best_h["return_pct"], 2),
         "worst_performer": f"{worst_h['ticker']} ({worst_h['return_pct']:+.1f}%)",

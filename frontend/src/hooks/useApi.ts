@@ -104,6 +104,7 @@ export const useDashboardLayout = () =>
       alloc_widgets: unknown[] | null
       /** Per-widget column span overrides, keyed by widget id. */
       widget_spans: Record<string, number> | null
+      return_basis: 'mwr' | 'twr' | null
     }>('/api/dashboard-layout'),
   })
 
@@ -116,6 +117,7 @@ export const useSaveDashboardLayout = () => {
       stat_keys?: string[]
       alloc_widgets?: unknown[]
       widget_spans?: Record<string, number>
+      return_basis?: 'mwr' | 'twr'
     }) => post('/api/dashboard-layout', data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard-layout'] }),
   })
@@ -130,11 +132,14 @@ export const useStats = () =>
 export const useNetworth = () =>
   useQuery({ queryKey: ['networth'], queryFn: () => get<NetworthData>('/api/networth') })
 
-export const usePerformance = (range: string, benchmark: string) =>
+export const usePerformance = (range: string, benchmark: string, basis?: string) =>
   useQuery({
-    queryKey: ['performance', range, benchmark],
+    // basis is in the key: switching it changes the portfolio line, so a cached
+    // response from the other basis would draw the wrong series until refetch.
+    queryKey: ['performance', range, benchmark, basis ?? 'mwr'],
     queryFn: () => get<PerformanceData>(
-      `/api/performance?range=${encodeURIComponent(range)}&benchmark=${encodeURIComponent(benchmark)}`),
+      `/api/performance?range=${encodeURIComponent(range)}&benchmark=${encodeURIComponent(benchmark)}`
+      + (basis ? `&basis=${encodeURIComponent(basis)}` : '')),
   })
 
 export const useMonthlyChange = () =>
