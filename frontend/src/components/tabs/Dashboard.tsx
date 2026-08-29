@@ -264,9 +264,12 @@ const dayMonth = (iso: string): string => {
 }
 
 /** "2026-08-01" -> "Aug 26" */
+/** "May '26", not "May 26" — the bare two digits read as a day of the month, so a bar
+ *  covering May 2026 looked like it was dated the 26th and invited the obvious question
+ *  of why a monthly snapshot was not on the 1st. The apostrophe is the whole fix. */
 const monthLabel = (iso: string): string => {
   const [y, m] = iso.split('-').map(Number)
-  return y && m ? `${MONTHS[m - 1]} ${String(y).slice(2)}` : iso
+  return y && m ? `${MONTHS[m - 1]} '${String(y).slice(2)}` : iso
 }
 // Everything in DEFAULT_ORDER, on. A key missing here reads as visible anyway
 // (visible[id] !== false), but listing them keeps the two in step when either moves.
@@ -968,15 +971,17 @@ export default function Dashboard() {
         // The final bar covers a month still in progress, so it is not comparable with
         // the completed ones and must never win "best" or "worst" on a part-month.
         mtd: mc.is_mtd?.[i] ?? false,
-        // Labelled by the CLOSING date, which is how a net-worth sheet recorded on the
-        // 1st files it: the row written on 1 May holds the change since 1 April, so it is
-        // the "May" figure. Reconciling against that sheet is then a straight read-across.
+        // Labelled by the month the change happened IN, which is what the label is
+        // read as. This used to use the closing boundary — the row written on 1 May
+        // holds April's change, so it was called "May" — which reconciles neatly
+        // against a sheet dated the 1st and confuses everyone else: a tall bar under
+        // "May 26" is April's gain, and the axis gives no hint of that.
         //
-        // Labelling by closing date is only viable because the in-progress bar is named
-        // separately: it also closes in the current month, so both would otherwise be
-        // "Aug" — one holding July's change, which is exactly the collision that had
-        // August reading -$9,473 while the month was up $23k.
-        label: (mc.is_mtd?.[i] ?? false) ? 'MTD' : monthLabel(mc.period_end?.[i] ?? m),
+        // Opening-date labels also drop a special case. Closing-date labels put the
+        // in-progress bar and the completed one before it in the same month, which is
+        // why MTD had to be named separately to avoid the collision. Opening dates
+        // never collide: the last completed bar opens 1 Jul, MTD opens 1 Aug.
+        label: (mc.is_mtd?.[i] ?? false) ? 'MTD' : monthLabel(m),
       }))
     : []
 
