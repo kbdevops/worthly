@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useBreakdown } from '../hooks/useApi'
 import { BALANCE_METRICS, balanceValue, metricLabel } from '../lib/metrics'
+import type { BalanceMetricId } from '../lib/metrics'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from 'recharts'
@@ -159,6 +160,11 @@ const INPUT_STYLE = {
 export default function CompoundCalculator() {
   const { data: bd } = useBreakdown()
   const [initial, setInitial] = useState(260000)
+  // Which balances the opening figure was seeded from. Tracked explicitly rather than
+  // inferred by comparing the field to each amount: once they combine, several
+  // different selections can produce the same total, and two of them summing to a third
+  // by coincidence would light up the wrong pills.
+  const [seeds, setSeeds] = useState<BalanceMetricId[]>([])
   const [deposit, setDeposit] = useState(2500)
   const [depositFreq, setDepositFreq] = useState<DepositFreq>('Monthly')
   const [compoundFreq, setCompoundFreq] = useState<CompoundFreq>('Monthly')
@@ -177,6 +183,23 @@ export default function CompoundCalculator() {
   const clamp = (v: number, lo: number, hi: number) =>
     Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : lo
 
+  /** Add or remove a balance from the opening figure, keeping Net Worth exclusive.
+   *  Deselecting everything leaves the amount alone rather than zeroing the field —
+   *  clearing the pills is undoing the shortcut, not asking to start from nothing. */
+  function toggleSeed(id: BalanceMetricId) {
+    const next: BalanceMetricId[] = id === 'networth'
+      ? (seeds.includes('networth') ? [] : ['networth'])
+      : (() => {
+          const rest = seeds.filter(x => x !== 'networth')
+          return rest.includes(id) ? rest.filter(x => x !== id) : [...rest, id]
+        })()
+    setSeeds(next)
+    if (next.length) {
+      const total = next.reduce((sum, m) => sum + (balanceValue(m, bd) ?? 0), 0)
+      setInitial(clamp(Math.round(total), 0, 1e9))
+    }
+  }
+
   return (
     <div className="rounded-xl p-5" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
       <div className="flex items-baseline justify-between gap-3 flex-wrap mb-4">
@@ -188,9 +211,10 @@ export default function CompoundCalculator() {
         </span>
       </div>
 
-      {/* Seed the opening figure from a real balance. Each pill shows the amount it
-          will insert, so the click is never a surprise, and highlights while the field
-          still matches it — drop the highlight the moment you type something else. */}
+      {/* Seed the opening figure from real balances. They add up, so Portfolio + Cash +
+          Super is a valid selection — but Net Worth is exactly those three summed, so it
+          is exclusive: combining it with any leg would count that leg twice. Picking it
+          clears the others and picking any other clears it. */}
       {bd && (
         <div className="flex items-center gap-2 flex-wrap mb-3">
           <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
@@ -199,24 +223,31 @@ export default function CompoundCalculator() {
           {BALANCE_METRICS.map(id => {
             const amount = balanceValue(id, bd)
             if (amount == null) return null
-            const active = Math.round(amount) === Math.round(initial)
+            const on = seeds.includes(id)
             return (
               <button key={id} type="button"
-                onClick={() => setInitial(clamp(Math.round(amount), 0, 1e9))}
-                title={`Set the initial deposit to ${money(amount)}`}
+                onClick={() => toggleSeed(id)}
+                title={id === 'networth'
+                  ? `Set the initial deposit to ${money(amount)} — net worth already includes cash and super`
+                  : `${on ? 'Remove' : 'Add'} ${metricLabel(id)} (${money(amount)})`}
                 className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors tabular-nums ${
-                  active ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
-                         : 'border-[var(--border)] text-slate-400 hover:border-slate-500 hover:text-slate-200'}`}
+                  on ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
+                     : 'border-[var(--border)] text-slate-400 hover:border-slate-500 hover:text-slate-200'}`}
               >{metricLabel(id)} <span className="opacity-60">{moneyCompact(amount)}</span></button>
             )
           })}
+          {seeds.length > 1 && (
+            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+              = {money(initial)}
+            </span>
+          )}
         </div>
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
         <Field label="Initial deposit">
           <input type="number" min={0} step={1000} value={initial}
-            onChange={e => setInitial(clamp(Number(e.target.value), 0, 1e9))}
+            onChange={e => { setSeeds([]); setInitial(clamp(Number(e.target.value), 0, 1e9)) }}
             className={INPUT_CLASS} style={INPUT_STYLE} />
         </Field>
         <Field label="Regular deposit">
