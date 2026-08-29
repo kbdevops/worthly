@@ -34,6 +34,7 @@ export interface CompoundYear {
   initial: number    // flat — the opening deposit, never changes
   regular: number    // cumulative regular deposits, initial excluded
   deposits: number   // initial + regular
+  yearInterest: number  // interest earned in THIS year alone, not cumulative
   interest: number   // balance - deposits
 }
 
@@ -66,11 +67,16 @@ export function projectCompound(input: CompoundInputs): CompoundYear[] {
   const periodRate = ratePct / 100 / cpy
   const depositsPerPeriod = dpy / cpy
 
+  // Year 0 is kept in the data — the summary cards and any caller reading rows[0] rely
+  // on the opening state existing — but it is dropped from the chart, where a bar of
+  // pure deposit with nothing compounded yet just shifts every real year one place right.
   const rows: CompoundYear[] = [
-    { year: 0, balance: initial, initial, regular: 0, deposits: initial, interest: 0 },
+    { year: 0, balance: initial, initial, regular: 0, deposits: initial,
+      interest: 0, yearInterest: 0 },
   ]
   let balance = initial
   let paidIn = initial
+  let prevInterest = 0
 
   for (let y = 1; y <= years; y++) {
     for (let p = 0; p < cpy; p++) {
@@ -79,14 +85,20 @@ export function projectCompound(input: CompoundInputs): CompoundYear[] {
       balance += added
       paidIn += added
     }
+    const interest = balance - paidIn
     rows.push({
       year: y,
       balance,
       initial,
       regular: paidIn - initial,
       deposits: paidIn,
-      interest: balance - paidIn,
+      interest,
+      // The step in cumulative interest, which is what "what did this year earn me"
+      // means once deposits are still arriving — balance growth would also count the
+      // money you just paid in, which is not compounding.
+      yearInterest: interest - prevInterest,
     })
+    prevInterest = interest
   }
   return rows
 }
@@ -118,11 +130,14 @@ function StrategyTooltip({ active, payload, label }: {
     <div className="rounded-lg px-3 py-2.5 text-xs"
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}>
       <div className="flex justify-between gap-8 mb-1.5">
-        <span style={{ color: 'var(--text-primary)' }}>After {label} years</span>
+        <span style={{ color: 'var(--text-primary)' }}>
+          After {label} {Number(label) === 1 ? 'year' : 'years'}
+        </span>
         <span style={{ color: 'var(--text-muted)' }}>Your strategy</span>
       </div>
       <Row k="Initial deposit" v={money(r.initial)} />
       <Row k="Regular deposits" v={money(r.regular)} />
+      <Row k={`Interest in year ${r.year}`} v={'+' + money(r.yearInterest)} />
       <Row k="Total interest" v={money(r.interest)} />
       <Row k="Total" v={money(r.balance)} bold />
     </div>
@@ -176,6 +191,10 @@ export default function CompoundCalculator() {
     [initial, deposit, depositFreq, compoundFreq, years, ratePct],
   )
   const final = rows[rows.length - 1]
+  // Year 0 is the opening deposit before anything has compounded — a bar of pure
+  // principal that earns nothing and pushes every real year one column right. The
+  // summary cards still read the full series; only the chart drops it.
+  const chartRows = useMemo(() => rows.slice(1), [rows])
   const eff = effectiveRate(ratePct, compoundFreq)
 
   // Caps match MoneySmart's, and are enforced on the value rather than only on the
@@ -312,7 +331,7 @@ export default function CompoundCalculator() {
           point of the exercise. */}
       <div style={{ height: 360 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={rows} margin={{ top: 4, right: 8, left: 4, bottom: 18 }}>
+          <BarChart data={chartRows} margin={{ top: 4, right: 8, left: 4, bottom: 18 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
             <XAxis dataKey="year" tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
               tickLine={false} axisLine={false} minTickGap={16}
