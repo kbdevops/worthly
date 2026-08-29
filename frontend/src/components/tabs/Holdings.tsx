@@ -15,6 +15,16 @@ import { LogoBadge } from '../ui/LogoBadge'
 
 const CARD = 'rounded-xl border border-[var(--border)] overflow-hidden'
 const CARD_BG = { background: 'var(--bg-card)' }
+/** Today in the viewer's own timezone.
+ *
+ *  Not toISOString().slice(0,10), which is UTC: from anywhere west of Greenwich that
+ *  turns into tomorrow's date late in the day, and the API rejects future-dated
+ *  snapshots outright — so an evening edit would fail with a confusing error. */
+function localToday(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 const TH = 'px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider'
 const TD = 'px-4 py-3 text-sm text-slate-300'
 const TH2 = 'px-3 py-2.5 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap'
@@ -717,12 +727,18 @@ export default function Holdings() {
   }
 
   const autoSnapshot = (accounts: CashAccount[]) => {
-    const now = new Date()
-    const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-    if (snapshots.some(s => s.date === monthStart)) return
+    // Dated TODAY, not the 1st of the month. Back-dating meant a balance changed on the
+    // 29th was recorded as though it had been that way since the 1st, so the net worth
+    // timeline redrew four weeks of history from one edit.
+    //
+    // No "already snapshotted this month" guard either. That guard made only the FIRST
+    // cash edit of each month count — every later one silently did nothing, which is
+    // indistinguishable from the save failing. It was also unnecessary: the API upserts
+    // (INSERT OR REPLACE on date + user), so repeat edits on one day just update that
+    // day's row rather than piling up.
     const cashTotal = accounts.reduce((s, a) => s + a.balance, 0)
     const lastSuper = [...snapshots].sort((a, b) => a.date < b.date ? 1 : -1)[0]?.super ?? 0
-    addSnapshot.mutate({ date: monthStart, super: lastSuper, cash: cashTotal })
+    addSnapshot.mutate({ date: localToday(), super: lastSuper, cash: cashTotal })
   }
 
   const startEditSuperBalance = () => {
@@ -733,9 +749,8 @@ export default function Holdings() {
   const confirmEditSuperBalance = () => {
     const newSuper = parseFloat(superBalanceInput)
     if (isNaN(newSuper)) { setEditingSuperBalance(false); return }
-    const today = new Date().toISOString().slice(0, 10)
     const cashTotal = cashAccounts.reduce((s, a) => s + a.balance, 0)
-    addSnapshot.mutate({ date: today, super: newSuper, cash: cashTotal })
+    addSnapshot.mutate({ date: localToday(), super: newSuper, cash: cashTotal })
     setEditingSuperBalance(false)
   }
 
