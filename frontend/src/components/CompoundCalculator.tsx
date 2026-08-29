@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useBreakdown } from '../hooks/useApi'
 import { COMPONENT_METRICS, TOTAL_METRIC, balanceValue, metricLabel } from '../lib/metrics'
 import type { BalanceMetricId } from '../lib/metrics'
@@ -145,6 +145,44 @@ function StrategyTooltip({ active, payload, label }: {
   )
 }
 
+/** A number field you can actually empty.
+ *
+ *  Binding value straight to a number makes the field impossible to clear: deleting
+ *  everything hands onChange an empty string, Number('') is 0, and 0 is written
+ *  straight back — so the box refills with a zero your next keystroke lands after, and
+ *  "1" becomes "01". Holding an optional string draft lets the input be empty or
+ *  half-typed while the committed number stays the last valid one, so the projection
+ *  never flickers through a garbage state. Blur drops the draft, which also normalises
+ *  "007" to 7 and snaps a cleared box back to the value still driving the chart.
+ */
+function NumberInput({ value, onChange, min, max, step, integer }: {
+  value: number
+  onChange: (v: number) => void
+  min: number
+  max: number
+  step?: number
+  integer?: boolean
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  return (
+    <input
+      type="number" min={min} max={max} step={step}
+      value={draft ?? String(value)}
+      onChange={e => {
+        const raw = e.target.value
+        setDraft(raw)
+        if (raw === '' || raw === '-') return          // mid-edit, nothing to commit yet
+        const n = Number(raw)
+        if (!Number.isFinite(n)) return
+        // Clamped on the value, not just via the max attribute — typing past a max
+        // still sets state in every browser.
+        onChange(Math.min(Math.max(integer ? Math.round(n) : n, min), max))
+      }}
+      onBlur={() => setDraft(null)}
+      className={INPUT_CLASS} style={INPUT_STYLE} />
+  )
+}
+
 function Field({ label, children, hint }: {
   label: string; children: React.ReactNode; hint?: string
 }) {
@@ -276,14 +314,11 @@ export default function CompoundCalculator() {
 
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
         <Field label="Initial deposit">
-          <input type="number" min={0} step={1000} value={initial}
-            onChange={e => { setSeeds([]); setInitial(clamp(Number(e.target.value), 0, 1e9)) }}
-            className={INPUT_CLASS} style={INPUT_STYLE} />
+          <NumberInput value={initial} min={0} max={1e9} step={1000}
+            onChange={v => { setSeeds([]); setInitial(v) }} />
         </Field>
         <Field label="Regular deposit">
-          <input type="number" min={0} step={100} value={deposit}
-            onChange={e => setDeposit(clamp(Number(e.target.value), 0, 1e7))}
-            className={INPUT_CLASS} style={INPUT_STYLE} />
+          <NumberInput value={deposit} min={0} max={1e7} step={100} onChange={setDeposit} />
         </Field>
         <Field label="Deposit frequency">
           <select value={depositFreq} onChange={e => setDepositFreq(e.target.value as DepositFreq)}
@@ -298,14 +333,10 @@ export default function CompoundCalculator() {
           </select>
         </Field>
         <Field label="Number of years" hint="max 50">
-          <input type="number" min={1} max={50} step={1} value={years}
-            onChange={e => setYears(clamp(Math.round(Number(e.target.value)), 1, 50))}
-            className={INPUT_CLASS} style={INPUT_STYLE} />
+          <NumberInput value={years} min={1} max={50} step={1} integer onChange={setYears} />
         </Field>
         <Field label="Annual interest rate (%)" hint="max 20%">
-          <input type="number" min={0} max={20} step={0.1} value={ratePct}
-            onChange={e => setRatePct(clamp(Number(e.target.value), 0, 20))}
-            className={INPUT_CLASS} style={INPUT_STYLE} />
+          <NumberInput value={ratePct} min={0} max={20} step={0.1} onChange={setRatePct} />
         </Field>
       </div>
 
