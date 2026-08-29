@@ -1,22 +1,14 @@
 import { useState } from 'react'
 import { Plus, Trash2, X, Edit2, TrendingUp, Award, Star, Trophy, Zap, Flame } from 'lucide-react'
 import { useMilestones, useAddMilestone, useUpdateMilestone, useDeleteMilestone } from '../../hooks/useApi'
-import { fmtCurrency, fmtPct } from '../../lib/utils'
+import { METRICS } from '../../lib/metrics'
+import { fmtCurrency } from '../../lib/utils'
 import type { Milestone } from '../../types'
 
 const CATEGORIES = [
   { id: 'financial', label: 'Financial', icon: TrendingUp, color: '#6366f1' },
   { id: 'personal',  label: 'Personal',  icon: Award,      color: '#f59e0b' },
   { id: 'other',     label: 'Other',     icon: Star,       color: '#a855f7' },
-]
-
-const METRICS = [
-  { id: 'portfolio',  label: 'Portfolio Value',  fmt: (v: number) => fmtCurrency(v) },
-  { id: 'networth',   label: 'Net Worth',         fmt: (v: number) => fmtCurrency(v) },
-  { id: 'cash',       label: 'Cash',              fmt: (v: number) => fmtCurrency(v) },
-  { id: 'super',      label: 'Super',             fmt: (v: number) => fmtCurrency(v) },
-  { id: 'return_aud', label: 'Total Return ($)',  fmt: (v: number) => fmtCurrency(v) },
-  { id: 'return_pct', label: 'Total Return (%)',  fmt: (v: number) => fmtPct(v) },
 ]
 
 type Filter = 'all' | 'goals' | 'achievements'

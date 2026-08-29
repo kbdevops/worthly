@@ -1,4 +1,6 @@
 import { useState, useMemo } from 'react'
+import { useBreakdown } from '../hooks/useApi'
+import { BALANCE_METRICS, balanceValue, metricLabel } from '../lib/metrics'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from 'recharts'
@@ -148,9 +150,14 @@ const INPUT_STYLE = {
   color: 'var(--text-primary)',
 } as const
 
-/** Compound interest projection, mirroring moneysmart.gov.au's calculator. Purely a
- *  what-if: it reads nothing from the portfolio and writes nothing back. */
+/** Compound interest projection, mirroring moneysmart.gov.au's calculator.
+ *
+ *  Still a what-if — it writes nothing back, and the seed buttons COPY a balance rather
+ *  than binding to it. A live-bound opening figure would quietly redraw the projection
+ *  every time the market moved, so a scenario you set up on Monday would answer a
+ *  different question on Friday. Click to fill, then type over it freely. */
 export default function CompoundCalculator() {
+  const { data: bd } = useBreakdown()
   const [initial, setInitial] = useState(260000)
   const [deposit, setDeposit] = useState(2500)
   const [depositFreq, setDepositFreq] = useState<DepositFreq>('Monthly')
@@ -177,9 +184,34 @@ export default function CompoundCalculator() {
           Compound Interest Calculator
         </h3>
         <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-          a what-if — reads nothing from your portfolio
+          a what-if — nothing here changes your portfolio
         </span>
       </div>
+
+      {/* Seed the opening figure from a real balance. Each pill shows the amount it
+          will insert, so the click is never a surprise, and highlights while the field
+          still matches it — drop the highlight the moment you type something else. */}
+      {bd && (
+        <div className="flex items-center gap-2 flex-wrap mb-3">
+          <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
+            Start from
+          </span>
+          {BALANCE_METRICS.map(id => {
+            const amount = balanceValue(id, bd)
+            if (amount == null) return null
+            const active = Math.round(amount) === Math.round(initial)
+            return (
+              <button key={id} type="button"
+                onClick={() => setInitial(clamp(Math.round(amount), 0, 1e9))}
+                title={`Set the initial deposit to ${money(amount)}`}
+                className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors tabular-nums ${
+                  active ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
+                         : 'border-[var(--border)] text-slate-400 hover:border-slate-500 hover:text-slate-200'}`}
+              >{metricLabel(id)} <span className="opacity-60">{moneyCompact(amount)}</span></button>
+            )
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
         <Field label="Initial deposit">
