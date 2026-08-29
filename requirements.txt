@@ -5,3 +5,4 @@ pandas
 APScheduler
 requests
 gunicorn
+pytest

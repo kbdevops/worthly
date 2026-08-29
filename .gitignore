@@ -37,3 +37,7 @@ frontend/node_modules/
 # Trailing glob matters: a bare `*.db.bak` misses prices.db.bak-preadjust-20260808,
 # which would then be committed as untracked financial data.
 *.db.bak*
+
+# pytest
+.pytest_cache/
+__pycache__/

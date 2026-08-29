@@ -4428,6 +4428,19 @@ def _get_latest_portfolio_value(user_id):
 CGT_DISCOUNT_RATES = {"individual": 0.5, "trust": 0.5, "smsf": 1.0 / 3.0, "company": 0.0}
 
 
+def _cgt_anniversary(d):
+    """The date twelve months after `d`, for the CGT discount's holding test.
+
+    29 February has no anniversary, so it falls back to 28 February — which makes 1 March
+    the first qualifying disposal date, the same one-day-after-the-anniversary rule that
+    applies to every other date.
+    """
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:
+        return d.replace(year=d.year + 1, month=2, day=28)
+
+
 def _get_tax_settings(user_id):
     conn = db()
     row = conn.execute(
@@ -4623,8 +4636,15 @@ def get_cgt():
                 sell_dt = pd.Timestamp(t["date"])
                 # MORE than 12 months, not "at least 365 days". The ATO test excludes the
                 # acquisition day: bought 1 Jul 2020, the earliest qualifying disposal is
-                # 2 Jul 2021 — 366 days. `>= 365` granted the 50% discount a day early.
-                held_12m = (sell_dt - buy_dt).days > 365
+                # 2 Jul 2021.
+                #
+                # Compared against the calendar anniversary rather than a day count.
+                # `.days > 365` is right in a common year and wrong across a leap one: a
+                # parcel bought 1 Jan 2024 and sold 1 Jan 2025 is 366 days, so it was
+                # granted the discount for holding exactly twelve months, while the
+                # identical 2023 -> 2024 pair was correctly refused at 365. 12 of this
+                # ledger's parcels sit on a leap span.
+                held_12m = sell_dt.date() > _cgt_anniversary(buy_dt.date())
 
                 if in_range:
                     gains.append({
