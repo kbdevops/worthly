@@ -1,7 +1,8 @@
-import { useState, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useBreakdown } from '../hooks/useApi'
-import { BALANCE_METRICS, balanceValue, metricLabel } from '../lib/metrics'
+import { COMPONENT_METRICS, TOTAL_METRIC, balanceValue, metricLabel } from '../lib/metrics'
 import type { BalanceMetricId } from '../lib/metrics'
+import { useLocalStorage } from '../lib/useLocalStorage'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from 'recharts'
@@ -174,17 +175,20 @@ const INPUT_STYLE = {
  *  different question on Friday. Click to fill, then type over it freely. */
 export default function CompoundCalculator() {
   const { data: bd } = useBreakdown()
-  const [initial, setInitial] = useState(260000)
+  // Persisted, not useState: a projection you spent a minute setting up should still
+  // be there after a reload. Namespaced under calc_ so it cannot collide with the
+  // dashboard's own keys.
+  const [initial, setInitial] = useLocalStorage<number>('calc_initial', 260000)
   // Which balances the opening figure was seeded from. Tracked explicitly rather than
   // inferred by comparing the field to each amount: once they combine, several
   // different selections can produce the same total, and two of them summing to a third
   // by coincidence would light up the wrong pills.
-  const [seeds, setSeeds] = useState<BalanceMetricId[]>([])
-  const [deposit, setDeposit] = useState(2500)
-  const [depositFreq, setDepositFreq] = useState<DepositFreq>('Monthly')
-  const [compoundFreq, setCompoundFreq] = useState<CompoundFreq>('Monthly')
-  const [years, setYears] = useState(50)
-  const [ratePct, setRatePct] = useState(10)
+  const [seeds, setSeeds] = useLocalStorage<BalanceMetricId[]>('calc_seeds', [])
+  const [deposit, setDeposit] = useLocalStorage<number>('calc_deposit', 2500)
+  const [depositFreq, setDepositFreq] = useLocalStorage<DepositFreq>('calc_deposit_freq', 'Monthly')
+  const [compoundFreq, setCompoundFreq] = useLocalStorage<CompoundFreq>('calc_compound_freq', 'Monthly')
+  const [years, setYears] = useLocalStorage<number>('calc_years', 50)
+  const [ratePct, setRatePct] = useLocalStorage<number>('calc_rate_pct', 10)
 
   const rows = useMemo(
     () => projectCompound({ initial, deposit, depositFreq, compoundFreq, years, ratePct }),
@@ -206,10 +210,10 @@ export default function CompoundCalculator() {
    *  Deselecting everything leaves the amount alone rather than zeroing the field —
    *  clearing the pills is undoing the shortcut, not asking to start from nothing. */
   function toggleSeed(id: BalanceMetricId) {
-    const next: BalanceMetricId[] = id === 'networth'
-      ? (seeds.includes('networth') ? [] : ['networth'])
+    const next: BalanceMetricId[] = id === TOTAL_METRIC
+      ? (seeds.includes(TOTAL_METRIC) ? [] : [TOTAL_METRIC])
       : (() => {
-          const rest = seeds.filter(x => x !== 'networth')
+          const rest = seeds.filter(x => x !== TOTAL_METRIC)
           return rest.includes(id) ? rest.filter(x => x !== id) : [...rest, id]
         })()
     setSeeds(next)
@@ -230,38 +234,45 @@ export default function CompoundCalculator() {
         </span>
       </div>
 
-      {/* Seed the opening figure from real balances. They add up, so Portfolio + Cash +
-          Super is a valid selection — but Net Worth is exactly those three summed, so it
-          is exclusive: combining it with any leg would count that leg twice. Picking it
-          clears the others and picking any other clears it. */}
-      {bd && (
-        <div className="flex items-center gap-2 flex-wrap mb-3">
-          <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
-            Start from
-          </span>
-          {BALANCE_METRICS.map(id => {
-            const amount = balanceValue(id, bd)
-            if (amount == null) return null
-            const on = seeds.includes(id)
-            return (
-              <button key={id} type="button"
-                onClick={() => toggleSeed(id)}
-                title={id === 'networth'
-                  ? `Set the initial deposit to ${money(amount)} — net worth already includes cash and super`
-                  : `${on ? 'Remove' : 'Add'} ${metricLabel(id)} (${money(amount)})`}
-                className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors tabular-nums ${
-                  on ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
-                     : 'border-[var(--border)] text-slate-400 hover:border-slate-500 hover:text-slate-200'}`}
-              >{metricLabel(id)} <span className="opacity-60">{moneyCompact(amount)}</span></button>
-            )
-          })}
-          {seeds.length > 1 && (
-            <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-              = {money(initial)}
+      {/* Net worth sits alone on the left of a divider; its three parts sit on the
+          right. The rule — that the total cannot combine with its own components — is
+          then visible in the layout instead of something you discover by clicking and
+          watching your other selections disappear. */}
+      {bd && (() => {
+        const Pill = ({ id }: { id: BalanceMetricId }) => {
+          const amount = balanceValue(id, bd)
+          if (amount == null) return null
+          const on = seeds.includes(id)
+          return (
+            <button type="button" onClick={() => toggleSeed(id)}
+              title={id === TOTAL_METRIC
+                ? `Start from ${money(amount)} — net worth already includes cash and super`
+                : `${on ? 'Remove' : 'Add'} ${metricLabel(id)} (${money(amount)})`}
+              className={`px-2.5 py-1 text-[11px] rounded-full border transition-colors tabular-nums ${
+                on ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300'
+                   : 'border-[var(--border)] text-slate-400 hover:border-slate-500 hover:text-slate-200'}`}
+            >{metricLabel(id)} <span className="opacity-60">{moneyCompact(amount)}</span></button>
+          )
+        }
+        return (
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
+              Start from
             </span>
-          )}
-        </div>
-      )}
+            <Pill id={TOTAL_METRIC} />
+            <span className="h-4 w-px shrink-0" style={{ background: 'var(--border)' }} aria-hidden />
+            <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>
+              or combine
+            </span>
+            {COMPONENT_METRICS.map(id => <Pill key={id} id={id} />)}
+            {seeds.length > 1 && (
+              <span className="text-[11px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                = {money(initial)}
+              </span>
+            )}
+          </div>
+        )
+      })()}
 
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
         <Field label="Initial deposit">

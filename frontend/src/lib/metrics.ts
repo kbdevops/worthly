@@ -21,11 +21,18 @@ export const METRICS = [
 
 export type MetricId = (typeof METRICS)[number]['id']
 
-/** The subset that is a balance you currently hold, so it can seed an opening amount.
- *  Total Return is excluded on purpose: as a percentage it is not an amount at all, and
- *  as dollars it is a result rather than a balance — projecting growth from it would be
- *  compounding a gain you have already counted. */
-export const BALANCE_METRICS = ['portfolio', 'networth', 'cash', 'super'] as const
+/* Balances you currently hold, so they can seed an opening amount. Total Return is
+ * excluded on purpose: as a percentage it is not an amount at all, and as dollars it is
+ * a result rather than a balance — projecting growth from it would compound a gain you
+ * have already counted.
+ *
+ * Split into a total and its parts rather than one flat list, because the two behave
+ * differently and the difference should be expressible in data instead of an `id ===
+ * 'networth'` check buried in a click handler. The parts add together; the total is
+ * exactly their sum, so pairing it with any part would count that part twice. */
+export const COMPONENT_METRICS = ['portfolio', 'cash', 'super'] as const
+export const TOTAL_METRIC = 'networth' as const
+export const BALANCE_METRICS = [TOTAL_METRIC, ...COMPONENT_METRICS] as const
 export type BalanceMetricId = (typeof BALANCE_METRICS)[number]
 
 /** Current AUD value of a balance metric. Returns null when the breakdown hasn't

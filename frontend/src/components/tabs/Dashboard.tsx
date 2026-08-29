@@ -19,6 +19,7 @@ import { GripVertical, Settings, X, Eye, EyeOff, Pencil, Plus, Trash2, Check } f
 import { useBreakdown, useStats, useNetworth, useMonthlyChange, useAllocation, usePortfolio, useSyncStatus, useDashboardLayout, useSaveDashboardLayout, useCountryOverrides, useSaveCountryOverrides, useRangePerformance, useExtendedHours, usePerformance } from '../../hooks/useApi'
 import { fmtCurrency, fmtCurrencySigned, fmtCurrencyCompact, fmtPct, fmtDate } from '../../lib/utils'
 import { SERIES_COLORS } from '../../lib/chartColors'
+import { useLocalStorage } from '../../lib/useLocalStorage'
 import { DonutBreakdown } from '../ui/DonutBreakdown'
 import { LogoBadge } from '../ui/LogoBadge'
 
@@ -107,21 +108,6 @@ function hueClash(hue: number): string | null {
   if (gap(hue, 158) < 22) return 'the gain green'
   if (gap(hue, 22) < 22) return 'the loss red'
   return null
-}
-
-// ── localStorage helpers ──────────────────────────────────────────────────────
-function useLocalStorage<T>(key: string, initial: T): [T, (v: T) => void] {
-  const [val, setVal] = useState<T>(() => {
-    try {
-      const s = localStorage.getItem(key)
-      return s ? JSON.parse(s) : initial
-    } catch { return initial }
-  })
-  const set = useCallback((v: T) => {
-    setVal(v)
-    localStorage.setItem(key, JSON.stringify(v))
-  }, [key])
-  return [val, set]
 }
 
 // ── Stat card config ──────────────────────────────────────────────────────────
