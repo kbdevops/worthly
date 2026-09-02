@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react'
+import { useMemo } from 'react'
+import { useLocalStorage } from '../../lib/useLocalStorage'
 import {
   BarChart, Bar, Cell, XAxis, YAxis, Tooltip,
   ResponsiveContainer, ReferenceLine, CartesianGrid, LabelList,
@@ -206,29 +207,51 @@ function CAGRCalculator({
   monthly: { date: string; nw: number }[]
   fyRows: CompounterFYRow[]
 }) {
-  // Default to all-time (first → last)
-  const [startIdx, setStartIdx] = useState(0)
-  const [endIdx, setEndIdx] = useState(monthly.length > 0 ? monthly.length - 1 : 0)
-  const [activePreset, setActivePreset] = useState<string>('all')
+  // What is persisted is the INTENT — a preset name, or a pair of month dates — never
+  // the indices. An index is a position in a series that grows every month, so storing
+  // 5 today and restoring it in October silently selects a different month. Storing
+  // dates and resolving them on read keeps the selection meaning what it meant.
+  const [activePreset, setActivePreset] = useLocalStorage<string>('cagr_preset', 'all')
+  const [customRange, setCustomRange] =
+    useLocalStorage<{ start: string; end: string } | null>('cagr_custom_range', null)
+
+  const { startIdx, endIdx } = useMemo(() => {
+    const last = Math.max(0, monthly.length - 1)
+    const all = { startIdx: 0, endIdx: last }
+    if (!monthly.length) return all
+
+    if (activePreset === 'custom' && customRange) {
+      const s = monthly.findIndex(m => m.date === customRange.start)
+      const e = monthly.findIndex(m => m.date === customRange.end)
+      // A stored month can disappear — the series is rebuilt from snapshots, and one
+      // can be deleted. Falling back to all-time beats resolving to index -1 and
+      // rendering a blank calculator with no hint why.
+      return s >= 0 && e >= 0 ? { startIdx: s, endIdx: e } : all
+    }
+    if (activePreset !== 'all') {
+      const row = fyRows.find(r => r.fy === activePreset)
+      if (row) {
+        const { firstIdx, lastIdx } = fyBoundsForRow(row, monthly)
+        return { startIdx: firstIdx, endIdx: lastIdx }
+      }
+      // The stored financial year is no longer in the data.
+      return all
+    }
+    return all
+  }, [activePreset, customRange, monthly, fyRows])
 
   const applyPreset = (preset: string) => {
     setActivePreset(preset)
-    if (preset === 'all') {
-      setStartIdx(0)
-      setEndIdx(monthly.length - 1)
-      return
-    }
-    const row = fyRows.find(r => r.fy === preset)
-    if (!row) return
-    const { firstIdx, lastIdx } = fyBoundsForRow(row, monthly)
-    setStartIdx(firstIdx)
-    setEndIdx(lastIdx)
+    if (preset !== 'custom') setCustomRange(null)
   }
 
   const handleManualChange = (which: 'start' | 'end', idx: number) => {
+    const picked = monthly[idx]
+    if (!picked) return
+    const start = which === 'start' ? picked.date : (monthly[startIdx]?.date ?? picked.date)
+    const end = which === 'end' ? picked.date : (monthly[endIdx]?.date ?? picked.date)
     setActivePreset('custom')
-    if (which === 'start') setStartIdx(idx)
-    else setEndIdx(idx)
+    setCustomRange({ start, end })
   }
 
   const startPoint = monthly[startIdx]

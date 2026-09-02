@@ -12,6 +12,7 @@ import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils
 import type { CashAccount, SuperHolding, Snapshot, Holding, Transaction } from '../../types'
 import HistorySlideout from '../layout/HistorySlideout'
 import { LogoBadge } from '../ui/LogoBadge'
+import { useLocalStorage } from '../../lib/useLocalStorage'
 
 const CARD = 'rounded-xl border border-[var(--border)] overflow-hidden'
 const CARD_BG = { background: 'var(--bg-card)' }
@@ -197,8 +198,8 @@ function HoldingsTable({
   onSelect: (h: Holding) => void
   unit: Unit
 }) {
-  const [sortKey, setSortKey] = useState<HoldingSort>('value_aud')
-  const [sortDir, setSortDir] = useState<1 | -1>(-1)
+  const [sortKey, setSortKey] = useLocalStorage<HoldingSort>('holdings_sort_key', 'value_aud')
+  const [sortDir, setSortDir] = useLocalStorage<1 | -1>('holdings_sort_dir', -1)
 
   const total = holdings.reduce((s, h) => s + h.value_aud, 0)
 
@@ -417,9 +418,15 @@ function TickerSlideout({ holding, onClose }: { holding: Holding; onClose: () =>
   const deleteTxn = useDeleteTransaction()
 
   const [search, setSearch] = useState('')
+  // Transient — a modal that reopened itself on load would be a bug, not a preference.
   const [showAdd, setShowAdd] = useState(false)
   const [editingTxn, setEditingTxn] = useState<Transaction | null>(null)
-  const [cols, setCols] = useState<ColKey[]>(DEFAULT_COLS)
+  // Persisted, and under ONE key for every ticker — not per-holding. The picker lives
+  // inside the slide-out, which unmounts on close, so useState meant the choice lasted
+  // exactly as long as the panel was open. Keying it per ticker would be worse: you
+  // would set up the columns you want and find them gone on the next holding, having
+  // apparently configured nothing.
+  const [cols, setCols] = useLocalStorage<ColKey[]>('holdings_txn_cols', DEFAULT_COLS)
   const [showColPicker, setShowColPicker] = useState(false)
   const colPickerRef = useRef<HTMLDivElement>(null)
 
@@ -682,10 +689,10 @@ export default function Holdings() {
   const updateGroup = useUpdateHoldingGroup()
   const deleteGroup = useDeleteHoldingGroup()
 
-  const [showCash, setShowCash] = useState(false)
-  const [showSuper, setShowSuper] = useState(false)
-  const [showGroups, setShowGroups] = useState(true)
-  const [showClosed, setShowClosed] = useState(true)
+  const [showCash, setShowCash] = useLocalStorage<boolean>('holdings_show_cash', false)
+  const [showSuper, setShowSuper] = useLocalStorage<boolean>('holdings_show_super', false)
+  const [showGroups, setShowGroups] = useLocalStorage<boolean>('holdings_show_groups', true)
+  const [showClosed, setShowClosed] = useLocalStorage<boolean>('holdings_show_closed', true)
   const { data: closed } = useClosedPositions()
   const [editingSuperBalance, setEditingSuperBalance] = useState(false)
   const [superBalanceInput, setSuperBalanceInput] = useState('')
@@ -759,7 +766,7 @@ export default function Holdings() {
   // One switch for both tables — two independent toggles would let the page show
   // dollars in one and percentages in the other, which is exactly the kind of
   // silent mismatch this tab has been cleaned up to stop doing.
-  const [unit, setUnit] = useState<Unit>('aud')
+  const [unit, setUnit] = useLocalStorage<Unit>('holdings_unit', 'aud')
   const gTone = (v: number) => (v >= 0 ? 'text-emerald-400' : 'text-red-400')
   const gVal = (aud: number, pct: number) => (unit === 'aud' ? fmtCurrencySigned(aud) : fmtPct(pct))
 
