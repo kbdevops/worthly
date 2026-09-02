@@ -19,6 +19,7 @@ import time
 import threading
 import uuid
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -4425,6 +4426,11 @@ def _get_latest_portfolio_value(user_id):
 
 # CGT discount by entity type. 50% is the individual/trust rate; a complying super fund
 # gets one third; companies get no discount at all. Previously hardcoded to 0.5.
+# One definition for the monthly-boundary timezone, used by both the cron trigger and
+# the date it stamps. Two sources for that pair is what let them disagree.
+SNAPSHOT_TZ = ZoneInfo("Australia/Melbourne")
+
+
 CGT_DISCOUNT_RATES = {"individual": 0.5, "trust": 0.5, "smsf": 1.0 / 3.0, "company": 0.0}
 
 
@@ -5975,7 +5981,13 @@ def _scheduled_monthly_snapshot():
     conn = db()
     user_ids = [r[0] for r in conn.execute("SELECT id FROM users").fetchall()]
     conn.close()
-    today_str = date.today().isoformat()
+    # Stamped in the SAME zone the job is scheduled in, not the server's. The trigger
+    # fires at 1 Sep 13:00 Melbourne, which is 31 Aug 22:00 in US Central — so a server
+    # running there recorded the monthly boundary as 31 August, September got no 1st, and
+    # /api/monthly-change never closed August: its bar ran 1 Aug -> 2 Sep and stayed
+    # month-to-date. The mismatch is invisible while the server sits in Melbourne, which
+    # is why it survived until the app moved.
+    today_str = datetime.now(SNAPSHOT_TZ).date().isoformat()
     for uid in user_ids:
         try:
             cash_total = get_total_cash(uid)
@@ -6004,7 +6016,7 @@ _scheduler.add_job(_scheduled_intraday_refresh, "interval",
                    minutes=int(os.environ.get("INTRADAY_REFRESH_MINUTES", "5")),
                    id="intraday_refresh")
 _scheduler.add_job(_scheduled_monthly_snapshot, "cron", day=1, hour=13, minute=0,
-                    timezone="Australia/Melbourne", id="monthly_snapshot")  # 1pm Melbourne time, 1st of month, DST-aware
+                    timezone=SNAPSHOT_TZ, id="monthly_snapshot")  # 1pm Melbourne time, 1st of month, DST-aware
 _scheduler.start()
 print(f"[scheduler] Auto-sync 06:15 UTC (ASX) + 21:15 UTC (US); intraday every "
       f"{os.environ.get('INTRADAY_REFRESH_MINUTES', '5')}min during extended hours; "

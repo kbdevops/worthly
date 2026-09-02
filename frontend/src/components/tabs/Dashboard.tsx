@@ -1550,12 +1550,16 @@ export default function Dashboard() {
                       const d = payload[0].payload as typeof mcVisible[0]
                       return (
                         <div style={{ ...tooltipStyle.contentStyle, padding: '8px 12px' }}>
+                          {/* Same label as the axis. This read monthLabel(d.end) while
+                              the axis used the opening month, so a bar sat under "Aug"
+                              and its own tooltip called it "Sep" — the two disagreeing
+                              about one bar is worse than either convention alone. */}
                           <p className="text-slate-400 text-[11px]">
-                            {d.mtd ? 'Month to date' : monthLabel(d.end)}
+                            {d.mtd ? 'Month to date' : d.label}
                           </p>
-                          {/* The span, spelled out. A month name alone is ambiguous: a
-                              spreadsheet written on the 1st files this under the closing
-                              date, the chart labels it by the month it happened in. */}
+                          {/* The span, spelled out, because a month name alone cannot say
+                              whether a boundary was missed: with no 1 Sep snapshot the
+                              August bar silently ran 1 Aug -> 2 Sep. */}
                           {d.end && (
                             <p className="text-slate-500 text-[10px] mb-1.5">
                               {dayMonth(d.month)} → {d.mtd ? 'today' : dayMonth(d.end)}
