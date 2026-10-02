@@ -8,7 +8,7 @@ import {
   useDividends, useSparklines, useClosedPositions,
   exportTransactionsCsv,
 } from '../../hooks/useApi'
-import { fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
+import { cn, fmtCurrency, fmtCurrencySigned, fmtPct, fmtDate } from '../../lib/utils'
 import type { CashAccount, SuperHolding, Snapshot, Holding, Transaction } from '../../types'
 import HistorySlideout from '../layout/HistorySlideout'
 import { LogoBadge } from '../ui/LogoBadge'
@@ -844,7 +844,9 @@ export default function Holdings() {
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
           <div>
             <p className="text-xs text-slate-400">Total Cash</p>
-            <p className="text-2xl font-bold text-white">{fmtCurrency(bd?.cash ?? 0)}</p>
+            <p className={cn('text-2xl font-bold', (bd?.cash ?? 0) < 0 ? 'text-red-400' : 'text-white')}>
+              {fmtCurrencySigned(bd?.cash ?? 0)}
+            </p>
           </div>
           <div className="flex gap-2">
             <button onClick={() => setHistoryType('cash')} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10">

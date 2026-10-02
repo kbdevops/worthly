@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { X, Plus, Trash2, Pencil, Check } from 'lucide-react'
 import type { Snapshot } from '../../types'
 import { useAddSnapshot, useDeleteSnapshot } from '../../hooks/useApi'
-import { fmtCurrency, fmtDate } from '../../lib/utils'
+import { cn, fmtCurrency, fmtCurrencySigned, fmtDate } from '../../lib/utils'
 
 interface Props {
   type: 'cash' | 'super' | null
@@ -127,7 +127,7 @@ export default function HistorySlideout({ type, snapshots, onClose }: Props) {
                     </>
                   ) : (
                     <>
-                      <td className="px-3 py-2.5 text-sm text-white text-right font-medium">{fmtCurrency(s.cash)}</td>
+                      <td className={cn('px-3 py-2.5 text-sm text-right font-medium', s.cash < 0 ? 'text-red-400' : 'text-white')}>{fmtCurrencySigned(s.cash)}</td>
                       <td className="px-3 py-2.5 text-sm text-white text-right font-medium">{fmtCurrency(s.super)}</td>
                       <td className="px-3 py-2.5">
                         <div className="flex items-center gap-2 justify-end">

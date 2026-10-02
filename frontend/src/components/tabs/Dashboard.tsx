@@ -399,7 +399,7 @@ function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
     <div>
       <p className="text-xs uppercase tracking-wider text-slate-400">Net worth</p>
       <p className="text-3xl sm:text-4xl font-semibold text-white tabular-nums mt-1 leading-none">
-        {fmtCurrency(netWorth)}
+        {fmtCurrencySigned(netWorth)}
       </p>
       <span
         className="inline-block mt-2 px-2 py-1 rounded-md text-xs font-semibold tabular-nums"
@@ -412,7 +412,10 @@ function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
       </span>
       <div className="flex h-2 rounded-full overflow-hidden mt-4">
         {legs.map(l => (
-          <div key={l.label} style={{ width: `${pct(l.value)}%`, background: l.color }} />
+          // Negative cash (a margin loan) has negative width here — clamp to 0 so it
+          // never renders as a positive-looking segment; its true value still shows
+          // in the legend below.
+          <div key={l.label} style={{ width: `${Math.max(0, pct(l.value))}%`, background: l.color }} />
         ))}
       </div>
       <div className="grid grid-cols-3 gap-3 mt-3">
@@ -422,8 +425,11 @@ function NetWorthHero({ netWorth, portfolio, superAnn, cash, dayPl }: {
               <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: l.color }} />
               <span className="truncate">{l.label} {pct(l.value).toFixed(1)}%</span>
             </p>
-            <p className="text-sm font-semibold text-white tabular-nums mt-0.5 truncate">
-              {fmtCurrency(l.value)}
+            <p
+              className="text-sm font-semibold tabular-nums mt-0.5 truncate"
+              style={{ color: l.value < 0 ? '#ef4444' : 'white' }}
+            >
+              {fmtCurrencySigned(l.value)}
             </p>
           </div>
         ))}
@@ -1083,10 +1089,10 @@ export default function Dashboard() {
 
   function resolveStatCard(key: StatKey): { label: string; value: string; sub?: string; color?: string } {
     switch (key) {
-      case 'net_worth':    return { label: 'Total Net Worth',   value: fmtCurrency(bd?.total ?? 0) }
+      case 'net_worth':    return { label: 'Total Net Worth',   value: fmtCurrencySigned(bd?.total ?? 0), color: (bd?.total ?? 0) < 0 ? '#ef4444' : undefined }
       case 'portfolio':    return { label: 'Portfolio Value',   value: fmtCurrency(bd?.portfolio ?? 0), sub: `Return: ${fmtCurrencySigned(totalReturn)} (${fmtPct(returnPct)})`, color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
       case 'super':        return { label: 'Superannuation',    value: fmtCurrency(bd?.super ?? 0) }
-      case 'cash':         return { label: 'Cash',              value: fmtCurrency(bd?.cash ?? 0) }
+      case 'cash':         return { label: 'Cash',              value: fmtCurrencySigned(bd?.cash ?? 0), color: (bd?.cash ?? 0) < 0 ? '#ef4444' : undefined }
       // Renamed from "Total Return" — it is market value less the cost of units still
       // held, i.e. unrealised only. The lifetime figure is 'total_all'.
       case 'total_return': return { label: 'Return',            value: fmtCurrencySigned(totalReturn), sub: 'on current holdings', color: totalReturn >= 0 ? '#10b981' : '#ef4444' }
@@ -1403,6 +1409,14 @@ export default function Dashboard() {
         const latest = nwData[nwData.length - 1]
         const gridColor = themeColors['--border'] ?? '#262d5c'
         const axisColor = themeColors['--text-muted'] ?? '#64748b'
+        // A margin loan can put Cash below zero. If that band is on-screen, the stack
+        // can't be honestly anchored at zero (see domain comment below) and the x-axis
+        // tick format switches on how wide a window is actually showing.
+        const hasNegativeBand = bands.some(b => nwData.some(d => Number(d[b as keyof typeof d]) < 0))
+        const spanDays = nwData.length > 1
+          ? (new Date(nwData[nwData.length - 1].date).getTime() - new Date(nwData[0].date).getTime()) / 86_400_000
+          : 0
+        const shortRange = spanDays <= 92
         return (
           <div className={CARD + ' flex flex-col'} style={{ ...CARD_BG, height: FULL_WIDGET_H }}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -1436,7 +1450,7 @@ export default function Dashboard() {
             {latest && (
               <div className="flex items-baseline gap-2.5 mb-3">
                 <span className="text-2xl font-semibold text-white tabular-nums">
-                  {fmtCurrency(latest['Net Worth'])}
+                  {fmtCurrencySigned(latest['Net Worth'])}
                 </span>
                 <span className="text-xs text-slate-500">now · {fmtDate(latest.date)}</span>
               </div>
@@ -1451,15 +1465,18 @@ export default function Dashboard() {
                   tick={{ fill: axisColor, fontSize: 11 }}
                   tickLine={false} axisLine={false}
                   interval="preserveStartEnd" minTickGap={48}
-                  tickFormatter={d => new Date(d + 'T00:00:00').toLocaleDateString('en-AU', { month: 'short', year: '2-digit' })}
+                  tickFormatter={d => new Date(d + 'T00:00:00').toLocaleDateString('en-AU',
+                    shortRange ? { day: 'numeric', month: 'short' } : { month: 'short', year: '2-digit' })}
                 />
                 <YAxis
                   tick={{ fill: axisColor, fontSize: 11 }}
                   tickLine={false} axisLine={false} width={52}
-                  // A stack is only honest anchored at zero. Return shows alone, where
-                  // there is no stack to mislead, so let it fit its own range including
-                  // the negative stretch.
-                  domain={bands.length ? [0, 'auto'] : ['auto', 'auto']}
+                  // A stack is only honest anchored at zero — unless a band actually
+                  // goes negative (a margin loan), in which case zero-anchoring would
+                  // clip it and misrepresent the stack as never dipping below zero.
+                  // Return shows alone, where there is no stack to mislead, so let it
+                  // fit its own range including the negative stretch.
+                  domain={bands.length && !hasNegativeBand ? [0, 'auto'] : ['auto', 'auto']}
                   tickFormatter={v => '$' + (v / 1000).toFixed(0) + 'k'}
                 />
                 <Tooltip
@@ -1475,15 +1492,22 @@ export default function Dashboard() {
                         <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">
                           {fmtDate(String(label))}
                         </p>
-                        {rows.map(p => (
-                          <div key={String(p.name)} className="flex items-center gap-2 text-xs py-0.5">
-                            <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: p.color }} />
-                            <span className="text-slate-400 flex-1">{p.name}</span>
-                            <span className="text-white font-medium tabular-nums">
-                              {fmtCurrency(Number(p.value))}
-                            </span>
-                          </div>
-                        ))}
+                        {rows.map(p => {
+                          const v = Number(p.value)
+                          const isCash = String(p.name) === 'Cash'
+                          return (
+                            <div key={String(p.name)} className="flex items-center gap-2 text-xs py-0.5">
+                              <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: p.color }} />
+                              <span className="text-slate-400 flex-1">{p.name}</span>
+                              <span
+                                className="font-medium tabular-nums"
+                                style={{ color: isCash && v < 0 ? '#ef4444' : 'white' }}
+                              >
+                                {isCash ? fmtCurrencySigned(v) : fmtCurrency(v)}
+                              </span>
+                            </div>
+                          )
+                        })}
                       </div>
                     )
                   }}
