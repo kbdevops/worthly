@@ -151,3 +151,63 @@ class TestUserScoping:
                "units": 999, "price": 50.0}], user_id=OTHER_USER_ID)
         prices("NDQ.AX", [("2024-06-01", 60.0)])
         assert holdings(client) == {}
+
+
+class TestWindowedMoneyWeightedReturn:
+    """The chart's MWR line is the period growth that reconciles dated flows to the end
+    value. These pin the solver against figures worked out by hand."""
+
+    def test_single_deposit_is_the_plain_return(self):
+        from app import _period_growth
+        g = _period_growth([100.0], [0.0], 110.0)
+        assert g == pytest.approx(1.10, abs=1e-6)
+
+    def test_money_added_midway_counts_for_less_time(self):
+        # 100 in at the start, another 100 halfway, worth 230 at the end:
+        # 100*g + 100*g**0.5 = 230  ->  g = 1.2032
+        from app import _period_growth
+        g = _period_growth([100.0, 100.0], [0.0, 0.5], 230.0)
+        assert g == pytest.approx(1.2032, abs=1e-3)
+
+    def test_timing_is_what_separates_it_from_a_flat_return(self):
+        # Same flows, deposit moved late: less time earning, so the same end value
+        # implies a higher rate on the money that was actually there.
+        from app import _period_growth
+        early = _period_growth([100.0, 100.0], [0.0, 0.1], 230.0)
+        late = _period_growth([100.0, 100.0], [0.0, 0.9], 230.0)
+        assert late > early
+
+    def test_no_positive_ending_value_gives_no_answer(self):
+        from app import _period_growth
+        assert _period_growth([100.0], [0.0], 0.0) is None
+        assert _period_growth([], [], 50.0) is None
+
+
+class TestPerformanceEndpointBasis:
+    """/api/performance on a bounded window: basis=mwr must differ from twr when money
+    went in after the gains, and must say which one it returned."""
+
+    @pytest.fixture
+    def late_deposit(self, seed, prices):
+        from datetime import date, timedelta
+        today = date.today()
+        d = lambda n: (today - timedelta(days=n)).isoformat()
+        seed([
+            {**AUD, "action": "buy", "ticker": "VAS", "date": d(60), "units": 100, "price": 100.0},
+            {**AUD, "action": "buy", "ticker": "VAS", "date": d(3), "units": 900, "price": 120.0},
+        ])
+        # Price rises 20% early, then goes flat while the big deposit sits in.
+        prices("VAS.AX", [(d(60), 100.0), (d(30), 120.0), (d(3), 120.0), (d(0), 120.0)])
+        prices("AUDUSD=X", [(d(60), 0.65), (d(0), 0.65)])
+
+    def test_basis_is_reported_and_values_differ(self, client, late_deposit):
+        twr = client.get("/api/performance?range=3M&basis=twr").get_json()
+        mwr = client.get("/api/performance?range=3M&basis=mwr").get_json()
+        assert twr["basis"] == "twr" and mwr["basis"] == "mwr"
+        # TWR credits the full 20%; MWR is diluted by the big deposit that earned nothing.
+        assert twr["portfolio_return"] == pytest.approx(20.0, abs=1.0)
+        assert 0.0 < mwr["portfolio_return"] < twr["portfolio_return"] - 5.0
+
+    def test_missing_basis_still_means_twr_on_a_window(self, client, late_deposit):
+        r = client.get("/api/performance?range=3M").get_json()
+        assert r["basis"] == "twr"

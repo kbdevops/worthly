@@ -7,6 +7,7 @@ and detailed portfolio analytics. All data stored in prices.db.
 
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 import yfinance as yf
+import numpy as np
 import pandas as pd
 import requests
 import csv
@@ -3136,9 +3137,18 @@ def get_performance():
         # explicit basis toggle that trade-off is the user's to make: asking for TWR
         # means asking for the comparable figure, so Max stops being a special case.
         basis = (request.args.get("basis") or "").strip().lower()
-        use_twr = windowed or basis == "twr"
-        twr = (_build_twr_series(conn, uid) if use_twr
-               else _build_holding_return_series(conn, uid))
+        # A window can now be read either way: TWR (the benchmark-comparable figure) or
+        # MWR (how the money actually did, timing included). Max has no windowed MWR —
+        # its money-weighted answer is the holdings-basis series — so it keeps its
+        # existing behaviour.
+        use_mwr = windowed and basis == "mwr"
+        use_twr = (windowed and not use_mwr) or basis == "twr"
+        if use_mwr:
+            twr = _build_mwr_series(conn, uid, range_cutoff(rng))
+        elif use_twr:
+            twr = _build_twr_series(conn, uid)
+        else:
+            twr = _build_holding_return_series(conn, uid)
         if twr is None or twr.empty:
             return jsonify({"dates": [], "portfolio": [], "benchmark": [],
                             "benchmark_symbol": symbol, "benchmark_available": False,
@@ -3194,7 +3204,7 @@ def get_performance():
         "portfolio_return": round(float(port.iloc[-1]), 2),
         "benchmark_return": bench_ret,
         "range": rng,
-        "basis": "twr" if use_twr else "holding",
+        "basis": "mwr" if use_mwr else ("twr" if use_twr else "holding"),
     })
 
 
@@ -3858,6 +3868,83 @@ def _build_twr_series(conn, user_id):
     daily = daily.replace([float("inf"), float("-inf")], 0.0).fillna(0.0)
     daily[base <= 0] = 0.0
     return ((1.0 + daily).cumprod() - 1.0) * 100.0
+
+
+def _period_growth(outflows, fractions, terminal):
+    """Growth factor g over a period such that money put in at `fractions` (0..1 through
+    the period, amounts positive) compounds to `terminal` at the end:
+
+        sum(out_k * g ** (1 - f_k)) = terminal
+
+    This is the money-weighted return for the period itself, not an annualised rate.
+    _xirr is annualised, which is wrong for a chart line: a few percent over five days
+    annualises past any sane bracket and the solver returns nothing. Solving for the
+    period growth directly keeps every day of a window answerable.
+
+    Returns None when no root brackets (e.g. the terminal value is not positive).
+    """
+    if terminal <= 0 or len(outflows) == 0:
+        return None
+    expo = 1.0 - np.asarray(fractions, dtype=float)
+    out = np.asarray(outflows, dtype=float)
+
+    def h(g):
+        return float(np.sum(out * g ** expo)) - terminal
+
+    lo, hi = 1e-6, 100.0
+    h_lo, h_hi = h(lo), h(hi)
+    if h_lo * h_hi > 0:
+        return None
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        h_mid = h(mid)
+        if h_lo * h_mid <= 0:
+            hi = mid
+        else:
+            lo, h_lo = mid, h_mid
+    return (lo + hi) / 2.0
+
+
+def _build_mwr_series(conn, user_id, start):
+    """Cumulative MONEY-weighted return over a window, as a daily % Series rebased to 0
+    at `start`.
+
+    For each day t: the opening position is treated as money put in on day 0, every
+    later buy/sell as a dated flow, and the day-t value as what it all came to. The
+    return is the period growth that reconciles them (see _period_growth), so a dollar
+    that was in for the whole window counts more than one added last week. That is the
+    difference from the TWR line, which weights every day equally whatever was invested.
+
+    Price-only, like the TWR series next to it: dividends are not in the value series.
+    """
+    value, flows = _build_daily_value_and_flows(conn, user_id)
+    if value is None or len(value) < 2:
+        return None
+    first = value.index[0] if start is None else max(pd.Timestamp(start), value.index[0])
+    v = value[value.index >= first]
+    f = flows[flows.index >= first]
+    if len(v) < 2:
+        return None
+
+    days = np.asarray((v.index - v.index[0]).days, dtype=float)
+    vals = v.to_numpy(dtype=float)
+    fl = f.to_numpy(dtype=float)
+    flow_idx = [j for j in range(1, len(fl)) if fl[j] != 0.0]
+
+    out = np.zeros(len(v))
+    for i in range(1, len(v)):
+        amounts = [vals[0]]            # the opening position, put in on day 0
+        times = [0.0]
+        for j in flow_idx:
+            if j > i:
+                break
+            amounts.append(fl[j])       # +buy / -sell, both AUD
+            times.append(days[j])
+        if amounts[0] <= 0 and len(amounts) == 1:
+            continue                    # nothing invested yet: no return to record
+        g = _period_growth(amounts, np.asarray(times) / days[i], vals[i])
+        out[i] = (g - 1.0) * 100.0 if g is not None else np.nan
+    return pd.Series(out, index=v.index).ffill().fillna(0.0)
 
 
 def _benchmark_series(conn, symbol, index):

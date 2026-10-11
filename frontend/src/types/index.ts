@@ -555,6 +555,7 @@ export interface PerformanceData {
   benchmark_return: number | null
   range: string
   /** 'holding' = return on cost, matches the Holdings tab (Max only).
-   *  'twr' = time-weighted over the window, immune to contributions. */
-  basis: 'holding' | 'twr'
+   *  'twr' = time-weighted over the window, immune to contributions.
+   *  'mwr' = money-weighted over the window, so contribution timing counts. */
+  basis: 'holding' | 'twr' | 'mwr'
 }

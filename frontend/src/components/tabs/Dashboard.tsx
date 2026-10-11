@@ -1679,6 +1679,17 @@ export default function Dashboard() {
               <p className="text-sm font-medium text-slate-300">Performance</p>
               <div className="flex items-center gap-2 flex-wrap">
                 <RangeDial options={PERF_RANGES} value={perfRange} onChange={setPerfRange} narrow={narrow} />
+                {/* Same state as the Settings toggle, so the headline Return card and this
+                    chart can never disagree about which basis they are showing. */}
+                <div className="flex rounded-md border border-[var(--border)] overflow-hidden" role="group" aria-label="Return basis">
+                  {([['twr', 'TWR', 'Time-weighted: strips out when money went in. Comparable to the index.'],
+                     ['mwr', 'MWR', 'Money-weighted: how your dollars did, so deposit timing counts.']] as const).map(([k, label, tip]) => (
+                    <button key={k} onClick={() => setReturnBasis(k)} title={tip}
+                      className={`px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                        returnBasis === k ? 'bg-indigo-500/25 text-indigo-300' : 'text-slate-400 hover:text-slate-200'}`}
+                    >{label}</button>
+                  ))}
+                </div>
                 {benchEdit === null ? (
                   <button onClick={() => setBenchEdit(benchmark)}
                     className="px-2 py-0.5 text-[11px] rounded-md font-semibold border border-[var(--border)] text-slate-300 hover:border-indigo-500"
@@ -1730,8 +1741,10 @@ export default function Dashboard() {
             <p className="text-[11px] text-slate-500 mb-3 -mt-1">
               {perf?.basis === 'twr'
                 ? 'Return over this period, excluding the effect of money added or withdrawn.'
-                : 'Return on what you hold — price, currency and dividends — the same figure as the Holdings tab.'}
-              {perf?.benchmark_available && ` ${perf.benchmark_symbol} is a price-only index for reference; it excludes its own distributions.`}
+                : perf?.basis === 'mwr'
+                  ? 'Return on your actual dollars over this period — money in for longer counts for more, so deposit timing moves it. Price only.'
+                  : 'Return on what you hold — price, currency and dividends — the same figure as the Holdings tab.'}
+              {perf?.benchmark_available && ` ${perf.benchmark_symbol} is a price-only index for reference; it excludes its own distributions${perf?.basis === 'mwr' ? ' and has no deposits, so it is not like-for-like with this line' : ''}.`}
             </p>
             {pdata.length === 0 ? (
               <p className="text-xs text-slate-500 text-center py-10">Not enough history yet.</p>
