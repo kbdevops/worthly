@@ -2784,6 +2784,9 @@ def _compute_active_holdings(user_id):
     txns_sorted = sorted(txns, key=lambda x: x["date"])
 
     holdings = {}
+    parcels_by_sym = {}
+    disposal_method = _get_tax_settings(user_id)["allocation_method"]
+    locked_allocs, lock_methods = _load_sale_allocations(user_id)
     for t in txns_sorted:
         sym = yf_symbol(t["ticker"], t["exchange"])
         if sym not in holdings:
@@ -2824,43 +2827,35 @@ def _compute_active_holdings(user_id):
             h["gross_cost_aud"] += t["value"]
             h["cost_local_gross"] += t["value"] * (t.get("exch_rate") or 1.0)
             h["buys_count"] += 1
+            parcels_by_sym.setdefault(sym, []).append(_new_parcel(t))
         elif t["action"].lower() == "split":
             # Stock split: adjust units without changing cost basis
             # split "units" field stores the additional shares from the split
             h["units"] += qty
+            _split_parcels(parcels_by_sym.setdefault(sym, []), qty)
         elif t["action"].lower() == "sell":
             if h["units"] > 0:
-                avg_cost_before = h["cost_aud"] / h["units"]
-                avg_cost_local_before = h["cost_local"] / h["units"]
-                avg_local_gross_before = h["cost_local_gross"] / h["units"]
-                # Realised gain on this sale, average-cost basis: proceeds less the
-                # cost the units carried. `value` is AUD-and-signed (negative for a
-                # sell, brokerage already folded in — see add_transaction), so the
-                # proceeds are -value. Accumulated here rather than derived later
-                # because this is the only place the pre-sale average cost exists.
-                h["realised_aud"] += (-t["value"]) - (qty * avg_cost_before)
-
-                # Split that realised gain the same way the unrealised one is split
-                # below: value the proceeds at the rate the position was BUILT at, and
-                # whatever is left over is the rate having moved since.
-                #   price = proceeds at the old rate − what those units cost
-                #   fx    = proceeds at today's rate − proceeds at the old rate
-                # The two always sum back to the realised gain.
+                taken_cost, taken_local, taken_local_gross, _taken = _take_from_parcels(
+                    parcels_by_sym.setdefault(sym, []), t, disposal_method, locked_allocs, lock_methods)
+                # Realised gain on this sale: proceeds less the cost of the parcels it
+                # actually drew from. `value` is AUD-and-signed (negative for a sell,
+                # brokerage folded in — see add_transaction), so proceeds are -value.
                 proceeds_aud = -t["value"]
-                qty_cost_aud = qty * avg_cost_before
-                fx_avg = (h["cost_local_gross"] / h["cost_aud"]) if h["cost_aud"] > 0 else 1.0
+                h["realised_aud"] += proceeds_aud - taken_cost
+                # Price/rate split: value proceeds at the rate the DISPOSED parcels were
+                # bought at; the remainder is the rate having moved since.
+                fx_avg = (taken_local_gross / taken_cost) if taken_cost > 0 else 1.0
                 if fx_avg > 0:
-                    proceeds_local = proceeds_aud * (t.get("exch_rate") or 1.0)
-                    proceeds_at_buy_fx = proceeds_local / fx_avg
+                    proceeds_at_buy_fx = proceeds_aud * (t.get("exch_rate") or 1.0) / fx_avg
                 else:
                     proceeds_at_buy_fx = proceeds_aud
-                h["realised_price_aud"] += proceeds_at_buy_fx - qty_cost_aud
+                h["realised_price_aud"] += proceeds_at_buy_fx - taken_cost
                 h["realised_fx_aud"] += proceeds_aud - proceeds_at_buy_fx
 
                 h["units"] -= qty
-                h["cost_aud"] -= qty * avg_cost_before
-                h["cost_local"] -= qty * avg_cost_local_before
-                h["cost_local_gross"] -= qty * avg_local_gross_before
+                h["cost_aud"] -= taken_cost
+                h["cost_local"] -= taken_local
+                h["cost_local_gross"] -= taken_local_gross
             else:
                 h["units"] = 0
                 h["cost_aud"] = 0
@@ -3973,8 +3968,9 @@ def _benchmark_series(conn, symbol, index):
     return s
 
 
-def _calc_realised_gain(txns: list) -> float:
-    """Lifetime realised gain in AUD, average-cost basis, across every symbol.
+def _calc_realised_gain(txns: list, user_id=None) -> float:
+    """Lifetime realised gain in AUD across every symbol, on the same per-parcel basis
+    (and the same locked allocations) as /api/cgt and the holdings list.
 
     Deliberately a standalone replay rather than a sum over _compute_active_holdings'
     output: a position sold down to zero is filtered out of that list, so summing it
@@ -3982,24 +3978,22 @@ def _calc_realised_gain(txns: list) -> float:
     signed — positive on a buy, negative on a sell, brokerage already folded in (see
     add_transaction) — so sale proceeds are -value.
     """
-    units, cost, realised = {}, {}, 0.0
+    method, locked, lock_methods = "fifo", {}, {}
+    if user_id is not None:
+        method = _get_tax_settings(user_id)["allocation_method"]
+        locked, lock_methods = _load_sale_allocations(user_id)
+    book, realised = {}, 0.0
     for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
         sym = f"{t['ticker']}:{t.get('exchange', '')}"
+        parcels = book.setdefault(sym, [])
         action = (t.get("action") or "").lower()
-        u = units.get(sym, 0.0)
         if action == "buy":
-            units[sym] = u + t["units"]
-            cost[sym] = cost.get(sym, 0.0) + t["value"]
+            parcels.append(_new_parcel(t))
         elif action == "split":
-            units[sym] = u + t["units"]
+            _split_parcels(parcels, t["units"])
         elif action == "sell":
-            if u > 0:
-                avg = cost.get(sym, 0.0) / u
-                realised += (-t["value"]) - (t["units"] * avg)
-                units[sym] = u - t["units"]
-                cost[sym] = cost.get(sym, 0.0) - t["units"] * avg
-            else:
-                units[sym], cost[sym] = 0.0, 0.0
+            cost, _cl, _clg, _n = _take_from_parcels(parcels, t, method, locked, lock_methods)
+            realised += (-t["value"]) - cost
     return round(realised, 2)
 
 
@@ -4012,7 +4006,7 @@ def _compute_closed_positions(user_id):
     $28,999.22 of dividends from every screen, even though the money still counts in the
     portfolio totals.
 
-    Average-cost basis, matching _calc_realised_gain, so the per-position realised figures
+    Per-parcel basis, matching _calc_realised_gain, so the per-position realised figures
     here sum to the realised_gain reported in /api/stats.
     """
     txns = load_transactions(user_id)
@@ -4031,6 +4025,9 @@ def _compute_closed_positions(user_id):
     conn.close()
 
     pos = {}
+    book = {}
+    method = _get_tax_settings(user_id)["allocation_method"]
+    locked_allocs, lock_methods = _load_sale_allocations(user_id)
     for t in sorted(txns, key=lambda x: (x["date"], x.get("id") or 0)):
         key = t["ticker"]
         p = pos.setdefault(key, {
@@ -4051,21 +4048,23 @@ def _compute_closed_positions(user_id):
             p["invested"] += t["value"]
             p["cost_local"] += t["value"] * (t.get("exch_rate") or 1.0)
             p["buys"] += 1
+            book.setdefault(key, []).append(_new_parcel(t))
         elif action == "split":
             p["units"] += t["units"]
+            _split_parcels(book.setdefault(key, []), t["units"])
         elif action == "sell":
             if p["units"] > 0:
-                avg = p["cost"] / p["units"]
-                avg_local = p["cost_local"] / p["units"]
+                taken_cost, _tl, taken_local_gross, _n = _take_from_parcels(
+                    book.setdefault(key, []), t, method, locked_allocs, lock_methods)
                 proceeds = -t["value"]
-                p["realised"] += proceeds - (t["units"] * avg)
-                fx_avg = (p["cost_local"] / p["cost"]) if p["cost"] > 0 else 1.0
+                p["realised"] += proceeds - taken_cost
+                fx_avg = (taken_local_gross / taken_cost) if taken_cost > 0 else 1.0
                 at_buy_fx = (proceeds * (t.get("exch_rate") or 1.0) / fx_avg) if fx_avg > 0 else proceeds
-                p["realised_price"] += at_buy_fx - (t["units"] * avg)
+                p["realised_price"] += at_buy_fx - taken_cost
                 p["realised_fx"] += proceeds - at_buy_fx
                 p["proceeds"] += proceeds
-                p["cost"] -= t["units"] * avg
-                p["cost_local"] -= t["units"] * avg_local
+                p["cost"] -= taken_cost
+                p["cost_local"] -= taken_local_gross
                 p["units"] -= t["units"]
             p["sells"] += 1
 
@@ -4391,7 +4390,7 @@ def get_stats():
         ).fetchall()
     ]
     inc_conn.close()
-    realised_gain = _calc_realised_gain(txns)
+    realised_gain = _calc_realised_gain(txns, uid)
     income_total = round(sum(r["net_amount_aud"] for r in div_rows), 2)
     franking_total = round(sum(r["franking_credit_aud"] or 0 for r in div_rows), 2)
     # Australian FY window, bounded at BOTH ends — a lower bound alone counted any
@@ -4609,6 +4608,62 @@ def _order_parcels_for_disposal(parcels, method):
     if method == "hifo":
         return sorted(live, key=lambda p: (p["cost_aud"] / p["units"]) if p["units"] > 0 else 0, reverse=True)
     return sorted(live, key=lambda p: p["date"])  # fifo default
+
+def _take_from_parcels(parcels, t, method, locked=None, lock_method=None):
+    """Consume parcels for sell `t` exactly as /api/cgt does (same ordering, same locked
+    replay) and return (cost_aud, cost_local, cost_local_gross, units_taken).
+
+    Holdings, closed positions and /api/stats used to blend every buy into one average
+    cost, so after a partial sale the remaining units kept the blended average while the
+    realised figure used it too. For APP (19 of 65 units sold from the highest-cost
+    parcel) that put unrealised at -$9,336 and realised at -$3,598 when the parcels say
+    -$6,002 and -$6,932. One disposal engine keeps every screen agreeing with the CGT
+    report."""
+    lock = (locked or {}).get(t.get("id"))
+    if lock:
+        by_id = {p.get("buy_id"): p for p in parcels}
+        ordered = [by_id[b] for b, _u in lock if b in by_id]
+        caps = {b: u for b, u in lock}
+    else:
+        ordered = _order_parcels_for_disposal(parcels, method)
+        caps = None
+    remaining = t["units"]
+    cost = cost_local = cost_local_gross = 0.0
+    for p in ordered:
+        if remaining <= 1e-9:
+            break
+        take = min(p["units"], remaining)
+        if caps is not None:
+            take = min(take, caps.get(p.get("buy_id"), 0.0))
+            if take <= 1e-9:
+                continue
+        frac = take / p["units"] if p["units"] > 0 else 0.0
+        c, cl, clg = p["cost_aud"] * frac, p["cost_local"] * frac, p["cost_local_gross"] * frac
+        p["units"] -= take
+        p["cost_aud"] -= c
+        p["cost_local"] -= cl
+        p["cost_local_gross"] -= clg
+        cost += c
+        cost_local += cl
+        cost_local_gross += clg
+        remaining -= take
+    return cost, cost_local, cost_local_gross, t["units"] - remaining
+
+
+def _new_parcel(t):
+    return {"date": t["date"], "units": t["units"], "cost_aud": t["value"],
+            "cost_local": t["units"] * t["price"],
+            "cost_local_gross": t["value"] * (t.get("exch_rate") or 1.0),
+            "buy_id": t.get("id")}
+
+
+def _split_parcels(parcels, extra_units):
+    total = sum(p["units"] for p in parcels)
+    if total > 1e-9:
+        ratio = (total + extra_units) / total
+        for p in parcels:
+            p["units"] *= ratio
+
 
 @app.route("/api/cgt", methods=["GET"])
 @jwt_required()
